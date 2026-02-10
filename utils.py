@@ -237,8 +237,23 @@ def build_volume(
     V.set_aperture(float(p.aperture_m), float(p.aperture_m), "circular")
     V.t_max_mm = float(p.t_max_mm)
 
-    if p.sc_enabled and hasattr(V, "sc_dt_mm"):
-        V.sc_dt_mm = float(p.sc_dt_mm)
+    if p.sc_enabled:
+        # Enable space charge if the RF-Track build exposes the hooks.
+        for method_name in (
+            "set_sc_on",
+            "enable_sc",
+            "enable_space_charge",
+            "set_space_charge",
+        ):
+            method = getattr(V, method_name, None)
+            if callable(method):
+                method(True)
+        for attr_name in ("sc_on", "sc_enabled", "sc_enable", "space_charge"):
+            if hasattr(V, attr_name):
+                setattr(V, attr_name, True)
+
+        if hasattr(V, "sc_dt_mm"):
+            V.sc_dt_mm = float(p.sc_dt_mm)
         if hasattr(V, "emission_nsteps"):
             V.emission_nsteps = int(p.emission_nsteps)
         if hasattr(V, "emission_range"):
@@ -277,6 +292,8 @@ def build_bunch_simple(
     M = np.column_stack([x, px, y, py, z, pz])
     N_real = float(abs(q_total_C) / q_e)
     B0 = rft.Bunch6dT(ME_MEV, N_real, -1.0, M)
+    if hasattr(B0, "set_t0"):
+        B0.set_t0(np.zeros(n))
     return B0
 
 
@@ -332,6 +349,8 @@ def build_bunch_thermionic(
 
     N_real = float(abs(Q_target_C) / q_e)
     B0 = rft.Bunch6dT(ME_MEV, N_real, -1.0, M)
+    if hasattr(B0, "set_t0"):
+        B0.set_t0(t)
 
     info = {
         "Ez0": Ez0,
