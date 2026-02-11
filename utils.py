@@ -167,6 +167,10 @@ class VolumeBuildParams:
     aperture_m: float = 1.0
     t_max_mm: float = 2000.0
 
+    # Field map integration knobs
+    fm_nsteps: int = 400
+    fm_tt_nsteps: int = 200
+
     # Optional space charge during emission
     sc_enabled: bool = False
     sc_dt_mm: float = 1.0
@@ -208,9 +212,9 @@ def build_volume(
     )
 
     if hasattr(FM, "set_tt_nsteps"):
-        FM.set_tt_nsteps(200)
+        FM.set_tt_nsteps(int(p.fm_tt_nsteps))
     if hasattr(FM, "set_nsteps"):
-        FM.set_nsteps(400)
+        FM.set_nsteps(int(p.fm_nsteps))
     if hasattr(FM, "set_odeint_algorithm"):
         FM.set_odeint_algorithm(p.ode_algorithm)
     if hasattr(FM, "set_odeint_epsabs"):
@@ -302,6 +306,7 @@ def build_bunch_thermionic(
     n: int,
     phi_deg: float,
     *,
+    f_hz: float,
     cathode_radius_mm: float,
     cathode_T_K: float,
     work_function_eV: float,
@@ -309,13 +314,17 @@ def build_bunch_thermionic(
     Q_target_C: float,
     pz0_MeV_c: float,
     Ez0_phasor_axis: complex,
+    time_dependent: bool = True,
+    samples_per_period: int = 200,
+    max_periods: int = 200,
     rng: Optional[np.random.Generator] = None,
 ) -> Tuple[Any, Dict[str, Any]]:
     """
-    Thermionic emission with a simple Richardson + Schottky estimate for the emitted current.
+    Thermionic emission with Richardson + Schottky current.
 
-    This sets the macro-particle charge to match Q_target_C and distributes emission times
-    uniformly over τ_emit.
+    The macro-particle charge matches Q_target_C. Emission times are sampled from a
+    time-dependent current I(t) derived from Ez(z=0, t) unless time_dependent=False,
+    in which case emission times are uniform over τ_emit.
     """
     rng = np.random.default_rng() if rng is None else rng
 
@@ -323,24 +332,100 @@ def build_bunch_thermionic(
     phi_rad = np.deg2rad(phi_deg)
     Ez0 = float(np.real(Ez0_phasor_axis * np.exp(1j * phi_rad)))  # [V/m]
 
+    area_m2 = np.pi * (cathode_radius_mm * 1e-3)**2
+
     dphi = schottky_delta_phi_eV(Ez0, beta=beta_field)
     phi_eff = max(work_function_eV - dphi, 0.0)
+    J0 = richardson_J_Apm2(cathode_T_K, phi_eff)  # [A/m^2]
+    I0 = J0 * area_m2
 
-    J = richardson_J_Apm2(cathode_T_K, phi_eff)  # [A/m^2]
-    area_m2 = np.pi * (cathode_radius_mm * 1e-3)**2
-    I = J * area_m2
-    tau_s = emission_window_from_charge(Q_target_C, I)
+    t_emit_s = None
+    t_s = None
+    Ez_t = None
+    dphi_t = None
+    phi_eff_t = None
+    J_t = None
+    I_t = None
+    Q_cum = None
+    tau_s = None
+    I_avg = None
+    I_peak = None
+    n_periods_used = None
+    periods_capped = False
+
+    if time_dependent:
+        f_hz = float(f_hz)
+        T = 1.0 / f_hz
+        omega = 2.0 * np.pi * f_hz
+
+        samples_per_period = max(int(samples_per_period), 10)
+        max_periods = max(int(max_periods), 1)
+
+        t_period = np.linspace(0.0, T, samples_per_period + 1)
+        Ez_period = np.real(Ez0_phasor_axis * np.exp(1j * (omega * t_period + phi_rad)))
+        Eabs_period = np.abs(Ez_period)
+        dphi_period = np.sqrt((q_e**3) * Eabs_period / (4.0 * np.pi * epsilon_0)) / q_e
+        phi_eff_period = np.maximum(work_function_eV - dphi_period, 0.0)
+
+        kB_eV_per_K = 8.617333262e-5
+        J_period = A_RICH * (cathode_T_K**2) * np.exp(-phi_eff_period / (kB_eV_per_K * cathode_T_K))
+        I_period = J_period * area_m2
+        I_avg = float(np.trapezoid(I_period, t_period) / T) if np.any(I_period) else 0.0
+
+        if I_avg > 0.0:
+            n_periods = int(np.ceil(Q_target_C / (I_avg * T)))
+        else:
+            n_periods = 1
+        n_periods = max(1, n_periods)
+
+        if n_periods > max_periods:
+            n_periods = max_periods
+            periods_capped = True
+
+        n_periods_used = n_periods
+        t_s = np.linspace(0.0, n_periods * T, n_periods * samples_per_period + 1)
+        Ez_t = np.real(Ez0_phasor_axis * np.exp(1j * (omega * t_s + phi_rad)))
+        Eabs_t = np.abs(Ez_t)
+        dphi_t = np.sqrt((q_e**3) * Eabs_t / (4.0 * np.pi * epsilon_0)) / q_e
+        phi_eff_t = np.maximum(work_function_eV - dphi_t, 0.0)
+        J_t = A_RICH * (cathode_T_K**2) * np.exp(-phi_eff_t / (kB_eV_per_K * cathode_T_K))
+        I_t = J_t * area_m2
+
+        dt = t_s[1] - t_s[0]
+        Q_cum = np.zeros_like(t_s)
+        if t_s.size > 1:
+            Q_cum[1:] = np.cumsum((I_t[:-1] + I_t[1:]) * 0.5) * dt
+
+        Q_end = float(Q_cum[-1]) if Q_cum.size else 0.0
+        if Q_end > 0.0:
+            Q_use = min(float(Q_target_C), Q_end)
+            t_emit_s = np.interp(rng.random(n) * Q_use, Q_cum, t_s)
+            if Q_use < float(Q_target_C):
+                tau_s = float(t_s[-1])
+            else:
+                tau_s = float(np.interp(Q_use, Q_cum, t_s))
+        else:
+            t_emit_s = np.zeros(n)
+            tau_s = np.inf
+
+        I_peak = float(np.max(I_t)) if I_t is not None and I_t.size else 0.0
+    else:
+        I_avg = I0
+        I_peak = I0
+        tau_s = emission_window_from_charge(Q_target_C, I0)
+        if np.isfinite(tau_s):
+            t_emit_s = rng.uniform(0.0, tau_s, size=n)
+        else:
+            t_emit_s = np.zeros(n)
 
     # Transverse phase space
     x, y = sample_disk(n, cathode_radius_mm, rng=rng)
     px, py, pz = sample_thermionic_momenta(n, cathode_T_K, pz0_MeV_c, rng=rng)
 
     # Emission time distribution (mm/c)
-    if np.isfinite(tau_s):
-        tau_mm_c = tau_s * c * 1e3  # [mm/c]
-        t = rng.uniform(0.0, tau_mm_c, size=n)
+    if np.isfinite(tau_s) and t_emit_s is not None:
+        t = t_emit_s * c * 1e3  # [mm/c]
     else:
-        tau_mm_c = np.inf
         t = np.zeros(n)
 
     z = np.zeros(n)
@@ -356,9 +441,23 @@ def build_bunch_thermionic(
         "Ez0": Ez0,
         "dphi_eV": dphi,
         "phi_eff_eV": phi_eff,
-        "J_Apm2": J,
-        "I_A": I,
+        "J_Apm2": J0,
+        "I_A": I0,
+        "I_avg_A": I_avg,
+        "I_peak_A": I_peak,
         "tau_ns": float(tau_s * 1e9) if np.isfinite(tau_s) else np.inf,
+        "tau_s": float(tau_s) if np.isfinite(tau_s) else np.inf,
+        "t_s": t_s,
+        "Ez_t": Ez_t,
+        "dphi_eV_t": dphi_t,
+        "phi_eff_eV_t": phi_eff_t,
+        "J_Apm2_t": J_t,
+        "I_A_t": I_t,
+        "Q_cum_C": Q_cum,
+        "t_emit_s": t_emit_s,
+        "n_periods": n_periods_used,
+        "samples_per_period": samples_per_period,
+        "periods_capped": periods_capped,
         "has_t0": hasattr(B0, "set_t0") or hasattr(B0, "get_t0"),
     }
     return B0, info
