@@ -317,6 +317,7 @@ def build_bunch_thermionic(
     time_dependent: bool = True,
     samples_per_period: int = 200,
     max_periods: int = 200,
+    emit_sign: int = -1,
     rng: Optional[np.random.Generator] = None,
 ) -> Tuple[Any, Dict[str, Any]]:
     """
@@ -353,6 +354,9 @@ def build_bunch_thermionic(
     n_periods_used = None
     periods_capped = False
 
+    if emit_sign not in (-1, 1):
+        raise ValueError("emit_sign must be -1 or +1")
+
     if time_dependent:
         f_hz = float(f_hz)
         T = 1.0 / f_hz
@@ -370,6 +374,8 @@ def build_bunch_thermionic(
         kB_eV_per_K = 8.617333262e-5
         J_period = A_RICH * (cathode_T_K**2) * np.exp(-phi_eff_period / (kB_eV_per_K * cathode_T_K))
         I_period = J_period * area_m2
+        emit_mask_period = (Ez_period * emit_sign) > 0.0
+        I_period = np.where(emit_mask_period, I_period, 0.0)
         I_avg = float(np.trapezoid(I_period, t_period) / T) if np.any(I_period) else 0.0
 
         if I_avg > 0.0:
@@ -390,6 +396,8 @@ def build_bunch_thermionic(
         phi_eff_t = np.maximum(work_function_eV - dphi_t, 0.0)
         J_t = A_RICH * (cathode_T_K**2) * np.exp(-phi_eff_t / (kB_eV_per_K * cathode_T_K))
         I_t = J_t * area_m2
+        emit_mask_t = (Ez_t * emit_sign) > 0.0
+        I_t = np.where(emit_mask_t, I_t, 0.0)
 
         dt = t_s[1] - t_s[0]
         Q_cum = np.zeros_like(t_s)
@@ -458,6 +466,7 @@ def build_bunch_thermionic(
         "n_periods": n_periods_used,
         "samples_per_period": samples_per_period,
         "periods_capped": periods_capped,
+        "emit_sign": emit_sign,
         "has_t0": hasattr(B0, "set_t0") or hasattr(B0, "get_t0"),
     }
     return B0, info
