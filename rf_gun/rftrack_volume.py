@@ -1,0 +1,165 @@
+"""RF-Track Volume helpers."""
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from typing import Optional, Sequence, Tuple
+
+import numpy as np
+
+
+@dataclass(frozen=True)
+class VolumeBuildParams:
+    @staticmethod
+    def from_dict(d: dict) -> "VolumeBuildParams":
+        return VolumeBuildParams(**d)
+
+    def replace(self, **kwargs):
+        return replace(self, **kwargs)
+
+    f_hz: float
+    map_z0_m: float
+    z_min_m: float
+    z_max_m: float
+    hr_m: float
+    hz_m: float
+    dt_mm: float
+    ode_algorithm: str = "rk2"
+    ode_epsabs: float = 1e-10
+    aperture_m: float = 1.0
+    t_max_mm: float = 2000.0
+    fm_nsteps: int = 400
+    fm_tt_nsteps: int = 200
+    sc_enabled: bool = False
+    sc_dt_mm: float = 1.0
+    emission_nsteps: int = 1
+    emission_range: float = 0.0
+
+
+def _coerce_volume_params(p: VolumeBuildParams | dict) -> VolumeBuildParams:
+    if isinstance(p, VolumeBuildParams):
+        return p
+    if isinstance(p, dict):
+        return VolumeBuildParams.from_dict(p)
+    raise TypeError(f"Volume params must be VolumeBuildParams or dict, got {type(p)}")
+
+
+def build_volume(
+    rft,
+    Er_grid: np.ndarray,
+    Ez_grid: np.ndarray,
+    phi_deg: float,
+    p: VolumeBuildParams,
+    add_screens_z_m: Optional[Sequence[float]] = None,
+):
+    """Construct a Volume containing a single RF_FieldMap_2d and optional Screens."""
+    p = _coerce_volume_params(p)
+
+    FM = rft.RF_FieldMap_2d(
+        Er_grid,
+        Ez_grid,
+        0.0,
+        float(p.map_z0_m),
+        float(p.hr_m),
+        float(p.hz_m),
+        -1,
+        float(p.f_hz),
+        +1,
+        1.0,
+        1.0,
+    )
+
+    if hasattr(FM, "set_tt_nsteps"):
+        FM.set_tt_nsteps(int(p.fm_tt_nsteps))
+    if hasattr(FM, "set_nsteps"):
+        FM.set_nsteps(int(p.fm_nsteps))
+    if hasattr(FM, "set_odeint_algorithm"):
+        FM.set_odeint_algorithm(p.ode_algorithm)
+    if hasattr(FM, "set_odeint_epsabs"):
+        FM.set_odeint_epsabs(p.ode_epsabs)
+
+    FM.set_phid(float(phi_deg))
+    if hasattr(FM, "set_t0"):
+        FM.set_t0(0.0)
+
+    V = rft.Volume()
+    V.add(FM, 0.0, 0.0, 0.0, "entrance")
+
+    if add_screens_z_m:
+        for z in add_screens_z_m:
+            S = rft.Screen()
+            V.add(S, 0.0, 0.0, float(z), "entrance")
+
+    V.dt_mm = float(p.dt_mm)
+    V.odeint_algorithm = p.ode_algorithm
+    V.odeint_epsabs = float(p.ode_epsabs)
+    V.set_s0(float(p.z_min_m))
+    V.set_s1(float(p.z_max_m))
+    V.set_aperture(float(p.aperture_m), float(p.aperture_m), "circular")
+    V.t_max_mm = float(p.t_max_mm)
+
+    if p.sc_enabled:
+        for method_name in (
+            "set_sc_on",
+            "enable_sc",
+            "enable_space_charge",
+            "set_space_charge",
+        ):
+            method = getattr(V, method_name, None)
+            if callable(method):
+                method(True)
+        for attr_name in ("sc_on", "sc_enabled", "sc_enable", "space_charge"):
+            if hasattr(V, attr_name):
+                setattr(V, attr_name, True)
+
+        if hasattr(V, "sc_dt_mm"):
+            V.sc_dt_mm = float(p.sc_dt_mm)
+        if hasattr(V, "emission_nsteps"):
+            V.emission_nsteps = int(p.emission_nsteps)
+        if hasattr(V, "emission_range"):
+            V.emission_range = float(p.emission_range)
+
+    return V
+
+
+def track_volume_with_screens(
+    rft,
+    Er_grid: np.ndarray,
+    Ez_grid: np.ndarray,
+    phi_deg: float,
+    p: VolumeBuildParams,
+    B0,
+    z_screens_m: Sequence[float],
+):
+    """Track once, capturing phase-space snapshots at `z_screens_m`."""
+    z_screens_m = [float(z) for z in z_screens_m]
+    V = build_volume(rft, Er_grid, Ez_grid, phi_deg, p, add_screens_z_m=z_screens_m)
+    Bout = V.track(B0)
+    snaps = V.get_bunch_at_screens() if hasattr(V, "get_bunch_at_screens") else []
+    return Bout, snaps
+
+
+def track_volume_transport_table(
+    rft,
+    Er_grid: np.ndarray,
+    Ez_grid: np.ndarray,
+    phi_deg: float,
+    p: VolumeBuildParams,
+    B0,
+    tt_dt_mm: float,
+    table_fmt: str,
+):
+    """Track once and retrieve RF-Track's transport table in a Volume."""
+    V = build_volume(rft, Er_grid, Ez_grid, phi_deg, p, add_screens_z_m=None)
+
+    opts = rft.TrackingOptions()
+    opts.tt_dt_mm = float(tt_dt_mm)
+
+    Bout = V.track(B0, opts)
+    T = V.get_transport_table(table_fmt) if hasattr(V, "get_transport_table") else None
+    return Bout, T
+
+
+def find_Ez_axis_phasor_at_z0(Ez_grid: np.ndarray, z_grid_m: np.ndarray, z0_m: float = 0.0) -> complex:
+    """Return on-axis Ez phasor at z~z0 (r=0 index)."""
+    iz0 = int(np.argmin(np.abs(z_grid_m - z0_m)))
+    return complex(Ez_grid[iz0, 0])
