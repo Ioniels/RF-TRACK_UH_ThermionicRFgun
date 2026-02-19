@@ -4,14 +4,14 @@ Thermionic cathode electron beam tracking in a TM010 λ/4 RF cavity at 2.856 GHz
 
 ## Overview
 
-This project simulates electron beam dynamics from a heated thermionic cathode through an RF photoinjector cavity. The cavity operates in TM010 mode at f = 2.856 GHz with a half-wavelength (λ/2) geometry.
+This project simulates electron beam dynamics from a heated thermionic cathode through an RF photoinjector cavity. The cavity operates in TM010 mode at f = 2.856 GHz with a half-wavelength (λ/4) geometry.
 
 ### Physics
 
 **TM010 Cavity:**
 - Resonant frequency: 2.856 GHz
 - Mode: TM010 (transverse magnetic, axially symmetric)
-- Length: λ/2 ≈ 52.5 mm
+- Length: λ/4
 - Accelerating gradient determined by field maps
 
 **Thermionic Emission:**
