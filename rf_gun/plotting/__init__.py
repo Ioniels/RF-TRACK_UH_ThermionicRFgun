@@ -3,7 +3,7 @@
 from .fields import field_maps, axis_phase
 from .emission import plot_emission_history, plot_j_vs_n
 from .phase_space import plot_phase_space, plot_spectra
-from .evolution import plot_evolution
+from .evolution import plot_evolution, plot_twiss_evolution, plot_transmission_evolution
 from .phase_scan import theory_plot, phase_plot
 
 __all__ = [
@@ -14,6 +14,8 @@ __all__ = [
     "plot_phase_space",
     "plot_spectra",
     "plot_evolution",
+    "plot_twiss_evolution",
+    "plot_transmission_evolution",
     "theory_plot",
     "phase_plot",
 ]

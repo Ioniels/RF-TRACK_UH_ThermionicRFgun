@@ -55,6 +55,7 @@ class SimulationResult:
     thermo_info: Dict[str, Any]
     M_snaps: List[np.ndarray]
     z_snaps: List[float]
+    I_snaps: List[Any]
 
 
 def build_bunch_simple(
@@ -350,6 +351,7 @@ def run_transport(
     M_snaps = [
         np.array(s.get_phase_space(tracking.phase_fmt, "good"), copy=True) for s in snaps
     ] if snaps else []
+    I_snaps = [s.get_info() if hasattr(s, "get_info") else None for s in snaps] if snaps else []
 
     return SimulationResult(
         B0=B0,
@@ -357,4 +359,5 @@ def run_transport(
         thermo_info=thermo_info,
         M_snaps=M_snaps,
         z_snaps=z_snaps,
+        I_snaps=I_snaps,
     )
