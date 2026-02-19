@@ -1,6 +1,6 @@
 # UH Gun RF-Track Beam Dynamics Simulation
 
-Thermionic cathode electron beam tracking in a TM010 λ/2 RF cavity at 2.856 GHz using RF-Track.
+Thermionic cathode electron beam tracking in a TM010 λ/4 RF cavity at 2.856 GHz using RF-Track.
 
 ## Overview
 
