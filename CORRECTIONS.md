@@ -3,7 +3,7 @@
 ## Summary of Changes
 
 ### 1. **Time Units Fixed**
-- **Issue**: Raw COMSOL data is in seconds, was being treated as nanoseconds
+- **Issue**: Raw field map time data is in seconds, was being treated as nanoseconds
 - **Fix**: Applied `t_ns = yz['time'].astype(np.float64)` followed by `t_ns = t_ns * 1e9` to convert seconds → ns
 - **Verification**: Time now properly spans a reasonable range (e.g., 0 to ~0.3 ns for RF oscillations at 2.856 GHz)
 
@@ -30,7 +30,7 @@
 - **Fix**: Reorganized to subplot(1,2):
   - Panel 1: RF-Track input (r ≥ 0)
   - Panel 2: Mirrored visualization (full r range)
-  - Raw COMSOL mesh now shown in separate cell
+  - Raw mesh now shown in separate cell
 - **Result**: Clean side-by-side field map comparison with proper colorbars and labels
 
 ### 5. **I/Q Snapshot Selection Corrected**

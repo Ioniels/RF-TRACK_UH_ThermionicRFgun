@@ -16,6 +16,7 @@ from typing import Iterable, Optional, Sequence, Tuple, Dict, Any, List
 
 import numpy as np
 from scipy.constants import c, e as q_e, epsilon_0
+from scipy.interpolate import griddata, UnivariateSpline
 
 ME_MEV = 0.51099895  # electron rest energy [MeV]
 
@@ -38,6 +39,36 @@ def sample_disk(n: int, radius_mm: float, rng: Optional[np.random.Generator] = N
     theta = 2.0 * np.pi * rng.random(n)
     r = radius_mm * np.sqrt(u)
     return r * np.cos(theta), r * np.sin(theta)
+
+
+def min_step(vals: np.ndarray) -> float:
+    """Min positive spacing."""
+    u = np.unique(np.asarray(vals))
+    if u.size < 2:
+        return np.nan
+    d = np.diff(np.sort(u))
+    d = d[d > 0]
+    return float(d.min()) if d.size else np.nan
+
+
+def med_step(vals: np.ndarray) -> float:
+    """Median positive spacing."""
+    u = np.unique(np.asarray(vals))
+    if u.size < 2:
+        return np.nan
+    d = np.diff(np.sort(u))
+    d = d[d > 0]
+    return float(np.median(d)) if d.size else np.nan
+
+
+def fmt_bytes(n: float) -> str:
+    """Byte size label."""
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024.0:
+            return f"{n:.2f} {unit}"
+        n /= 1024.0
+    return f"{n:.2f} PB"
 
 
 # ----------------------------- Thermionic emission -----------------------------
@@ -76,11 +107,680 @@ def select_iq_snapshots(t_ns: np.ndarray, Ez_rms: np.ndarray, f_hz: float, searc
     return int(best[1]), int(best[2]), float(best[3]), float(best[4])
 
 
-def build_iq_phasor(field_0: np.ndarray, field_90: np.ndarray, env_0: float, env_90: float, scale: float = 1.0) -> np.ndarray:
+def build_iq_phasor(
+    field_0: np.ndarray,
+    field_90: np.ndarray,
+    env_0: float,
+    env_90: float,
+    scale: float = 1.0,
+) -> np.ndarray:
     """Complex phasor from two snapshots at 0° and 90°, normalized by the envelope."""
     e0 = field_0 / (env_0 if env_0 != 0 else 1.0)
     e90 = field_90 / (env_90 if env_90 != 0 else 1.0)
     return (e0 - 1j * e90) * float(scale)
+
+
+def build_crest_phasor(field_crest: np.ndarray, scale: Optional[float] = None) -> np.ndarray:
+    """Simplified phasor using a single crest snapshot (real-only)."""
+    field_crest = np.asarray(field_crest, dtype=float)
+    if scale is None:
+        return field_crest.astype(np.complex128)
+    env = float(np.max(np.abs(field_crest))) if field_crest.size else 1.0
+    env = env if env != 0.0 else 1.0
+    return (field_crest / env) * float(scale)
+
+
+def rms_from_phasor_over_time(
+    phasor: np.ndarray,
+    t_ns: np.ndarray,
+    f_hz: float,
+    phase_deg: float = 0.0,
+) -> np.ndarray:
+    """RMS of Re{phasor * exp(j*omega*t + j*phase)} over vertices for each time sample."""
+    ph = np.asarray(phasor, dtype=np.complex128).reshape(-1)
+    if ph.size == 0:
+        return np.zeros_like(t_ns, dtype=float)
+
+    a = ph.real
+    b = ph.imag
+    a2 = float(np.mean(a * a))
+    b2 = float(np.mean(b * b))
+    ab = float(np.mean(a * b))
+
+    omega = 2.0 * np.pi * float(f_hz)
+    t_s = np.asarray(t_ns, dtype=float) * 1e-9
+    theta = omega * t_s + np.deg2rad(float(phase_deg))
+    cos_t = np.cos(theta)
+    sin_t = np.sin(theta)
+
+    rms2 = (a2 * (cos_t**2)) + (b2 * (sin_t**2)) - (2.0 * ab * cos_t * sin_t)
+    rms2 = np.clip(rms2, 0.0, None)
+    return np.sqrt(rms2)
+
+
+def interp_cfield(pts: np.ndarray, R: np.ndarray, Z: np.ndarray, phasor: np.ndarray) -> np.ndarray:
+    """Complex field interpolation with NaN fill."""
+    re_lin = griddata(pts, phasor.real, (R, Z), method="linear")
+    im_lin = griddata(pts, phasor.imag, (R, Z), method="linear")
+    re_nn = griddata(pts, phasor.real, (R, Z), method="nearest")
+    im_nn = griddata(pts, phasor.imag, (R, Z), method="nearest")
+    re = np.where(np.isfinite(re_lin), re_lin, re_nn)
+    im = np.where(np.isfinite(im_lin), im_lin, im_nn)
+    return (re + 1j * im).astype(np.complex128)
+
+
+def phasor_check(
+    Ez_yz: np.ndarray,
+    yz_vertices: Optional[np.ndarray],
+    t_ns: np.ndarray,
+    f_hz: float,
+    mode: str,
+    i0: int,
+    i90: int,
+    i_crest: int,
+    Ez_rms: np.ndarray,
+    t_fit: Optional[np.ndarray] = None,
+    Ez_fit: Optional[np.ndarray] = None,
+) -> Dict[str, float]:
+    """Compare phasor reconstruction against Ez_rms(t)."""
+    import matplotlib.pyplot as plt
+
+    mode = str(mode).strip().lower()
+    if mode not in ("reconstruct", "simplified"):
+        raise ValueError(f"Unknown mode: {mode}")
+
+    if mode == "reconstruct":
+        Ez_0 = Ez_yz[:, i0]
+        Ez_90 = Ez_yz[:, i90]
+        Ez_max_0 = float(np.max(np.abs(Ez_0)))
+        Ez_max_90 = float(np.max(np.abs(Ez_90)))
+        Ez_ref = max(Ez_max_0, Ez_max_90)
+        Ez_phasor = build_iq_phasor(Ez_0, Ez_90, Ez_max_0, Ez_max_90, scale=Ez_ref)
+        phase_deg = -360.0 * f_hz * (float(t_ns[i0]) * 1e-9)
+        phase_label = f"aligned to i0 @ {t_ns[i0]:.4f} ns"
+    else:
+        Ez_crest = Ez_yz[:, i_crest]
+        Ez_max_crest = float(np.max(np.abs(Ez_crest)))
+        Ez_phasor = build_crest_phasor(Ez_crest, scale=Ez_max_crest)
+        phase_deg = -360.0 * f_hz * (float(t_ns[i_crest]) * 1e-9)
+        phase_label = f"aligned to crest @ {t_ns[i_crest]:.4f} ns"
+
+    Ez_rms_recon = rms_from_phasor_over_time(Ez_phasor, t_ns, f_hz, phase_deg=phase_deg)
+    peak_data = float(np.max(Ez_rms)) if Ez_rms.size else np.nan
+    peak_recon = float(np.max(Ez_rms_recon)) if Ez_rms_recon.size else np.nan
+    ratio = (peak_recon / peak_data) if peak_data else np.nan
+
+    print("Phasor check:")
+    print(f"  Mode: {mode}")
+    print(f"  Phasor time evolution uses f = {f_hz/1e9:.6f} GHz")
+    print(f"  Phase alignment: {phase_label}")
+    print("Amplitude:")
+    print(f"  Peak Ez_rms (data):   {peak_data:.3e} V/m")
+    print(f"  Peak Ez_rms (phasor): {peak_recon:.3e} V/m")
+    print(f"  Peak ratio (phasor/data): {ratio:.3f}")
+    print(f"  Ez_peak (data RMS max): {float(np.max(Ez_rms)):.3e} V/m")
+
+    out = {
+        "peak_data": peak_data,
+        "peak_recon": peak_recon,
+        "ratio": ratio,
+        "phase_deg": phase_deg,
+    }
+
+    if t_ns.size <= 1:
+        return out
+
+    dt_s = float(np.median(np.diff(t_ns))) * 1e-9
+    if dt_s <= 0:
+        return out
+
+    rms_per_vertex = np.sqrt(np.mean(Ez_yz**2, axis=1))
+    i_vtx = int(np.argmax(rms_per_vertex))
+    Ez_trace = Ez_yz[i_vtx, :].astype(float)
+    if yz_vertices is not None and len(yz_vertices) > i_vtx:
+        vtx_y_mm = float(yz_vertices[i_vtx, 1])
+        vtx_z_mm = float(yz_vertices[i_vtx, 2])
+    else:
+        vtx_y_mm = np.nan
+        vtx_z_mm = np.nan
+
+    omega = 2.0 * np.pi * f_hz
+    Ez_recon_trace = np.real(
+        Ez_phasor[i_vtx] * np.exp(1j * (omega * (t_ns * 1e-9) + np.deg2rad(phase_deg)))
+    )
+    s_factor_trace = 1e-4 * Ez_trace.var() * Ez_trace.size
+    spl_trace = UnivariateSpline(t_ns, Ez_trace, s=s_factor_trace)
+    Ez_trace_fit = spl_trace(t_fit) if t_fit is not None else None
+
+    y = Ez_trace - np.mean(Ez_trace)
+    yf = np.fft.rfft(y)
+    ff = np.fft.rfftfreq(y.size, d=dt_s)
+    f_est_hz = np.nan
+    if ff.size > 1:
+        band = (ff > 0.25 * f_hz) & (ff < 2.0 * f_hz)
+        if np.any(band):
+            k = int(np.argmax(np.abs(yf[band])))
+            f_est_hz = float(ff[band][k])
+    span_s = (t_ns[-1] - t_ns[0]) * 1e-9
+    df_hz = (1.0 / span_s) if span_s > 0 else np.nan
+    nyq_hz = 0.5 / dt_s
+    print("Frequency diagnostics (single-vertex Ez):")
+    print(f"  FFT peak (banded): {f_est_hz/1e9:.6f} GHz (nominal {f_hz/1e9:.6f} GHz)")
+    print(f"  FFT resolution: Delta f approx {df_hz/1e9:.6f} GHz | Nyquist: {nyq_hz/1e9:.6f} GHz")
+
+    sgn = np.sign(Ez_trace)
+    zc = np.where(np.diff(sgn) != 0)[0]
+    if zc.size > 2:
+        t_zc = t_ns[zc].astype(float)
+        periods = np.diff(t_zc[::2]) if t_zc.size >= 3 else np.array([])
+        f_zc_hz = 1e9 / float(np.median(periods)) if periods.size else np.nan
+    else:
+        f_zc_hz = np.nan
+    print(f"  Zero-crossings: {f_zc_hz/1e9:.6f} GHz")
+
+    t_s = t_ns * 1e-9
+    f_min = 0.5 * f_hz
+    f_max = 1.5 * f_hz
+    n_grid = 2000
+    f_grid = np.linspace(f_min, f_max, n_grid)
+    best = (np.inf, np.nan, 0.0, 0.0, 0.0)
+    for f_try in f_grid:
+        w = 2.0 * np.pi * f_try
+        cos_wt = np.cos(w * t_s)
+        sin_wt = np.sin(w * t_s)
+        X = np.column_stack([cos_wt, sin_wt, np.ones_like(cos_wt)])
+        coef, _, _, _ = np.linalg.lstsq(X, Ez_trace, rcond=None)
+        resid = Ez_trace - X @ coef
+        err = float(np.mean(resid**2))
+        if err < best[0]:
+            best = (err, float(f_try), float(coef[0]), float(coef[1]), float(coef[2]))
+    f_fit_hz = best[1]
+    A_fit, B_fit, C_fit = best[2], best[3], best[4]
+    Ez_fit_trace = A_fit * np.cos(2.0 * np.pi * f_fit_hz * t_s) + B_fit * np.sin(
+        2.0 * np.pi * f_fit_hz * t_s
+    ) + C_fit
+    print(f"  Sinusoid fit: {f_fit_hz/1e9:.6f} GHz")
+
+    a = (Ez_rms - np.mean(Ez_rms))
+    b = (Ez_rms_recon - np.mean(Ez_rms_recon))
+    if a.size == b.size and a.size > 3:
+        corr = np.correlate(a, b, mode="full")
+        lag = int(np.argmax(corr) - (a.size - 1))
+        lag_s = lag * dt_s
+        lag_deg = 360.0 * f_hz * lag_s
+        print("Phase and RMS:")
+        print(f"  Lag @ max correlation: {lag_s*1e12:.2f} ps (approx {lag_deg:.1f} deg at {f_hz/1e9:.3f} GHz)")
+    else:
+        print("Phase and RMS:")
+        print("  Lag @ max correlation: n/a")
+
+    rms_data = float(np.sqrt(np.mean(Ez_rms**2)))
+    rms_recon = float(np.sqrt(np.mean(Ez_rms_recon**2)))
+    rms_ratio = (rms_recon / rms_data) if rms_data else np.nan
+    print(f"  RMS Ez_rms (data):   {rms_data:.3e} V/m")
+    print(f"  RMS Ez_rms (phasor): {rms_recon:.3e} V/m")
+    print(f"  RMS ratio (phasor/data): {rms_ratio:.3f}")
+    if np.isfinite(vtx_y_mm) and np.isfinite(vtx_z_mm):
+        print(f"  Vertex (RMS-max): index={i_vtx}, y={vtx_y_mm:.3f} mm, z={vtx_z_mm:.3f} mm")
+
+    fig, axes = plt.subplots(3, 1, figsize=(9, 9.0), sharex=False)
+    mag = np.abs(yf)
+    axes[0].plot(ff * 1e-9, mag, lw=1.4, color="tab:blue")
+    axes[0].axvline(f_hz * 1e-9, color="gray", ls="--", lw=1.0, label="Nominal f")
+    if np.isfinite(f_est_hz):
+        axes[0].axvline(f_est_hz * 1e-9, color="tab:red", ls="--", lw=1.0, label="FFT peak")
+    if np.isfinite(f_zc_hz):
+        axes[0].axvline(f_zc_hz * 1e-9, color="tab:green", ls=":", lw=1.0, label="Zero-cross")
+    axes[0].set_xlim(0.0, min(6.0, nyq_hz * 1e-9))
+    axes[0].set_xlabel("Frequency [GHz]")
+    axes[0].set_ylabel("|FFT|")
+    axes[0].set_title("Ez(t) FFT (single vertex)")
+    axes[0].legend(frameon=False, loc="upper right")
+    axes[0].grid(alpha=0.3)
+
+    axes[1].plot(t_ns, Ez_rms, "o", ms=4, alpha=0.6, label="Ez RMS (data)")
+    axes[1].plot(t_ns, Ez_rms_recon, "-", lw=2, label=f"Phasor RMS ({mode})")
+    if t_fit is not None and Ez_fit is not None:
+        axes[1].plot(t_fit, Ez_fit, "-", lw=1.8, color="red", label="Spline fit (RMS)")
+    axes[1].set_ylabel("Ez RMS [V/m]")
+    axes[1].set_title(f"Phasor vs measured envelope ({phase_label})")
+    axes[1].legend(frameon=False, loc="upper right")
+    axes[1].grid(alpha=0.3)
+
+    axes[2].plot(t_ns, Ez_trace, "o", ms=3, alpha=0.5, label="Ez (data vertex)")
+    axes[2].plot(t_ns, Ez_recon_trace, "-", lw=1.8, label="Ez (phasor vertex)")
+    if np.isfinite(f_fit_hz):
+        axes[2].plot(t_ns, Ez_fit_trace, "-", lw=1.2, color="tab:red", label="Sinusoid fit (Ez)")
+    if Ez_trace_fit is not None:
+        axes[2].plot(t_fit, Ez_trace_fit, "-", lw=1.6, color="red", label="Spline fit (Ez)")
+    axes[2].set_xlabel("Time [ns]")
+    axes[2].set_ylabel("Ez [V/m]")
+    if np.isfinite(vtx_y_mm) and np.isfinite(vtx_z_mm):
+        axes[2].set_title(f"Ez(t) at vertex {i_vtx} (y={vtx_y_mm:.3f} mm, z={vtx_z_mm:.3f} mm)")
+    else:
+        axes[2].set_title(f"Ez(t) at vertex {i_vtx}")
+    axes[2].legend(frameon=False, loc="upper right")
+    axes[2].grid(alpha=0.3)
+
+    fig.suptitle(f"Phasor time evolution uses f = {f_hz/1e9:.6f} GHz", fontsize=11)
+    plt.tight_layout(rect=[0, 0.0, 1, 0.96])
+    plt.show()
+
+    return out
+
+
+def field_maps(
+    xy: Dict[str, np.ndarray],
+    yz: Dict[str, np.ndarray],
+    t_ns: np.ndarray,
+    t_crest: float,
+    r_grid: np.ndarray,
+    z_grid: np.ndarray,
+    Ez_grid: np.ndarray,
+    lambda_m: float,
+):
+    """Plot raw field maps and RF-Track grid."""
+    import matplotlib.pyplot as plt
+    import matplotlib.tri as mtri
+    import matplotlib.colors as colors
+
+    i_snap = int(np.argmin(np.abs(t_ns - t_crest)))
+
+    fig = plt.figure(figsize=(14, 8))
+    gs = fig.add_gridspec(2, 2, height_ratios=[1.0, 1.1])
+
+    verts_xy = xy["vertices"]
+    tri_xy = xy["facets"]
+    Ux = verts_xy[:, 0]
+    Vy = verts_xy[:, 1]
+    Fx = np.asarray(xy["Ez"])[:, i_snap]
+
+    triang_xy = mtri.Triangulation(Ux, Vy, triangles=tri_xy)
+    ax_xy = fig.add_subplot(gs[0, 0])
+    p_xy = float(np.percentile(np.abs(Fx), 99)) if Fx.size else 1.0
+    p_xy = p_xy if p_xy > 0 else 1.0
+    norm_xy = colors.TwoSlopeNorm(vcenter=0.0, vmin=-p_xy, vmax=p_xy)
+    levels_xy = np.linspace(-p_xy, p_xy, 257)
+    cf_xy = ax_xy.tricontourf(triang_xy, Fx, levels=levels_xy, cmap="coolwarm", norm=norm_xy)
+    ax_xy.set_aspect("equal", adjustable="box")
+    ax_xy.set_xlabel("x [mm]")
+    ax_xy.set_ylabel("y [mm]")
+    ax_xy.set_title("Raw mesh: XY Ez at crest")
+    plt.colorbar(cf_xy, ax=ax_xy, label="Ez [V/m]")
+
+    verts_yz = yz["vertices"]
+    tri_yz = yz["facets"]
+    Uy = verts_yz[:, 1]
+    Vz = verts_yz[:, 2]
+    Fy = np.asarray(yz["Ez"])[:, i_snap]
+
+    triang_yz = mtri.Triangulation(Vz, Uy, triangles=tri_yz)
+    ax_yz = fig.add_subplot(gs[0, 1])
+    p_yz = float(np.percentile(np.abs(Fy), 99)) if Fy.size else 1.0
+    p_yz = p_yz if p_yz > 0 else 1.0
+    norm_yz = colors.TwoSlopeNorm(vcenter=0.0, vmin=-p_yz, vmax=p_yz)
+    levels_yz = np.linspace(-p_yz, p_yz, 257)
+    cf_yz = ax_yz.tricontourf(triang_yz, Fy, levels=levels_yz, cmap="coolwarm", norm=norm_yz)
+    ax_yz.set_aspect("equal", adjustable="box")
+    ax_yz.set_xlabel("z [mm]")
+    ax_yz.set_ylabel("y [mm]")
+    ax_yz.set_title("Raw mesh (rotated): YZ Ez at crest")
+    plt.colorbar(cf_yz, ax=ax_yz, label="Ez [V/m]")
+
+    r_neg = -r_grid[::-1]
+    r_full = np.concatenate([r_neg, r_grid[1:]])
+    Ez_full = np.concatenate([Ez_grid[:, ::-1], Ez_grid[:, 1:]], axis=1)
+
+    ax_rf = fig.add_subplot(gs[1, :])
+    extent_full = [z_grid[0] * 1e3, z_grid[-1] * 1e3, r_full[0] * 1e3, r_full[-1] * 1e3]
+    im = ax_rf.imshow(
+        np.real(Ez_full.T),
+        aspect="auto",
+        origin="lower",
+        extent=extent_full,
+        cmap="plasma",
+    )
+    ax_rf.axvline(0, color="white", ls="--", lw=1, alpha=0.5, label="Cathode (z=0)")
+    ax_rf.axvline(lambda_m / 4 * 1e3, color="cyan", ls="--", lw=1, alpha=0.7, label="lambda/4")
+    ax_rf.axhline(0, color="white", ls=":", lw=0.8, alpha=0.4)
+    ax_rf.set_xlabel("z [mm]")
+    ax_rf.set_ylabel("r [mm]")
+    ax_rf.set_title("RF-Track field map: Re(Ez)")
+    legend = ax_rf.legend(frameon=False, loc="upper right", fontsize=16)
+    for text in legend.get_texts():
+        text.set_color("white")
+    ax_rf.text(
+        0,
+        r_full[-1] * 1e3 * 0.93,
+        "Cathode (z=0)",
+        color="white",
+        fontsize=16,
+        ha="left",
+        va="top",
+        bbox=dict(facecolor="black", alpha=0.15, edgecolor="none"),
+    )
+    ax_rf.text(
+        lambda_m / 4 * 1e3,
+        r_full[-1] * 1e3 * 0.93,
+        "lambda/4",
+        color="white",
+        fontsize=16,
+        ha="left",
+        va="top",
+        bbox=dict(facecolor="black", alpha=0.15, edgecolor="none"),
+    )
+    plt.colorbar(im, ax=ax_rf, label="Ez [V/m]")
+
+    plt.tight_layout()
+    plt.show()
+
+
+def axis_phase(
+    Ez_axis: np.ndarray,
+    z_grid: np.ndarray,
+    Ez0_phasor_axis: complex,
+    emission_phase_start: float,
+    emission_phase_range: float,
+    lambda_m: float,
+) -> Tuple[float, float]:
+    """Auto phase from on-axis phasor and plot Ez(z)."""
+    import matplotlib.pyplot as plt
+
+    phi_opt = -np.angle(Ez_axis[np.argmax(np.abs(Ez_axis))])
+    phi_zero_deg = (90.0 - np.rad2deg(np.angle(Ez0_phasor_axis))) % 360.0
+    transport_phase_deg = (phi_zero_deg + float(emission_phase_start)) % 360.0
+
+    print(f"Auto phase: Ez0 crosses 0 at phi approx {phi_zero_deg:.2f} deg")
+    print(
+        f"Transport phase (t=0): phi = {transport_phase_deg:.2f} deg "
+        f"(start shift {float(emission_phase_start):.1f} deg)"
+    )
+    print(f"Emission window: {float(emission_phase_range):.1f} deg")
+
+    offsets_deg = [0, 30, 60, 90, 120, 150, 180]
+    phases_deg_plot = [np.rad2deg(phi_opt) + d for d in offsets_deg]
+    for extra_phase in (phi_zero_deg, transport_phase_deg):
+        if not any(np.isclose(extra_phase, p, atol=1e-3) for p in phases_deg_plot):
+            phases_deg_plot.append(extra_phase)
+
+    fig, ax = plt.subplots(figsize=(9, 3.5))
+    for deg in phases_deg_plot:
+        phi = np.deg2rad(deg)
+        Ez_phase = np.real(Ez_axis * np.exp(1j * phi))
+        ax.plot(z_grid * 1e3, Ez_phase, lw=1.5, label=f"phi = {deg:.1f} deg")
+
+    ax.axvline(0, color="red", ls="--", lw=1, alpha=0.6, label="Cathode")
+    ax.axvline(
+        lambda_m / 4 * 1e3,
+        color="blue",
+        ls="--",
+        lw=1,
+        alpha=0.6,
+        label=f"lambda/4 = {lambda_m/4*1e3:.2f} mm",
+    )
+    ax.set_xlabel("z [mm]")
+    ax.set_ylabel("Re{Ez(r=0, z, phi)} [V/m]")
+    ax.set_title("On-axis field at selected phases")
+    ax.legend(frameon=False, ncol=2)
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+    return float(transport_phase_deg), float(phi_zero_deg)
+
+
+def theory_plot(phi_deg: np.ndarray, dW_vals: np.ndarray, pz_theory: np.ndarray):
+    """Plot theory phase scan for energy gain."""
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(8, 4.2))
+    ax.plot(phi_deg, dW_vals, "o-", ms=4, lw=1.6, color="tab:blue", label="Delta W")
+    ax.axhline(0.0, color="gray", ls="--", lw=1.0, alpha=0.6)
+
+    ax2 = ax.twinx()
+    ax2.plot(phi_deg, pz_theory, "s--", ms=3, lw=1.2, color="tab:orange", alpha=0.9, label="pz (end)")
+    ax2.set_ylabel("pz [MeV/c]", color="tab:orange")
+    ax2.tick_params(axis="y", colors="tab:orange")
+
+    if np.any(np.isfinite(dW_vals)):
+        i_max = int(np.nanargmax(dW_vals))
+        ax.axvline(phi_deg[i_max], color="tab:red", ls="--", lw=1.2, alpha=0.7)
+        ax.plot(phi_deg[i_max], dW_vals[i_max], "o", ms=7, color="tab:red", zorder=5)
+        ax.text(
+            phi_deg[i_max],
+            dW_vals[i_max],
+            f"  peak {dW_vals[i_max]:.3f} MeV @ {phi_deg[i_max]:.1f} deg",
+            va="bottom",
+            ha="left",
+            fontsize=9,
+            color="tab:red",
+        )
+
+    ax.set_xlabel("RF phase [deg]")
+    ax.set_ylabel("Delta W [MeV]", color="tab:blue")
+    ax.tick_params(axis="y", colors="tab:blue")
+    ax.set_title("Theory: energy gain vs phase")
+    ax.grid(alpha=0.3)
+
+    handles1, labels1 = ax.get_legend_handles_labels()
+    handles2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(handles1 + handles2, labels1 + labels2, frameon=False, loc="best")
+
+    plt.tight_layout()
+    plt.show()
+
+
+def phase_plot(phi_abs: np.ndarray, pz_mean: np.ndarray):
+    """Plot fast phase scan pz vs phase."""
+    import matplotlib.pyplot as plt
+
+    mask = np.isfinite(pz_mean)
+    fig, ax = plt.subplots(figsize=(8, 4.2))
+    ax.plot(phi_abs[mask], pz_mean[mask], "o-", ms=4, lw=1.6, color="tab:blue")
+    ax.axhline(0.0, color="gray", ls="--", lw=1.0, alpha=0.6)
+    if np.any(mask):
+        i_max = int(np.nanargmax(pz_mean))
+        ax.axvline(phi_abs[i_max], color="tab:red", ls="--", lw=1.2, alpha=0.7)
+        ax.plot(phi_abs[i_max], pz_mean[i_max], "o", ms=7, color="tab:red", zorder=5)
+        ax.text(
+            phi_abs[i_max],
+            pz_mean[i_max],
+            f"  peak {pz_mean[i_max]:.3f} MeV/c @ {phi_abs[i_max]:.1f} deg",
+            va="bottom",
+            ha="left",
+            fontsize=9,
+            color="tab:red",
+        )
+    ax.set_xlabel("RF phase [deg] (absolute)")
+    ax.set_ylabel("Mean pz at exit [MeV/c]")
+    ax.set_title("Fast phase scan: mean pz vs phase")
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+
+def bunch_diag(
+    B0,
+    Bout,
+    M_snaps: Sequence[np.ndarray],
+    z_snaps: Sequence[float],
+    transport_phase_deg: float,
+    clean_e: bool = False,
+    show_zle0: bool = True,
+):
+    """Plot spectra, phase space, and z evolution."""
+    import matplotlib.pyplot as plt
+
+    PHASE_FMT = "%X %Px %Y %Py %Z %Pz"
+    ID_FMTS = ["%id"]
+
+    def _safe_get_phase_space(bunch, selection):
+        return np.array(bunch.get_phase_space(PHASE_FMT, selection), copy=True)
+
+    def _try_get_ids(bunch, selection):
+        for fmt in ID_FMTS:
+            try:
+                ids = np.array(bunch.get_phase_space(fmt, selection), copy=True).reshape(-1)
+                if ids.size:
+                    return ids
+            except Exception:
+                continue
+        return None
+
+    def _clean_output_particles(M):
+        if not clean_e or M is None or M.shape[0] == 0:
+            return M
+        mask = M[:, 4] > 0.0
+        return M[mask]
+
+    try:
+        Mf_f_all = _safe_get_phase_space(Bout, "all")
+        Mf_launch_all = _safe_get_phase_space(B0, "all")
+        has_all = True
+    except Exception:
+        Mf_f_all = _safe_get_phase_space(Bout, "good")
+        Mf_launch_all = _safe_get_phase_space(B0, "good")
+        has_all = False
+
+    finite_z = np.isfinite(Mf_f_all[:, 4])
+    mask_bad = finite_z & (Mf_f_all[:, 4] <= 0.0)
+    mask_good = finite_z & (Mf_f_all[:, 4] > 0.0)
+
+    Mf_f_good = Mf_f_all[mask_good]
+    Mf_f = Mf_f_good if clean_e else Mf_f_all[finite_z]
+    M_snaps = [_clean_output_particles(M) for M in M_snaps]
+
+    ids_exit = _try_get_ids(Bout, "all") if has_all else None
+    ids_launch = _try_get_ids(B0, "all") if has_all else None
+    lost_ids = None
+    if ids_exit is not None and ids_exit.size == Mf_f_all.shape[0]:
+        lost_ids = ids_exit[mask_bad]
+        print(f"Lost particles (z <= 0): {lost_ids.size} of {ids_exit.size}")
+        if lost_ids.size:
+            preview = np.array2string(lost_ids[:20], separator=", ")
+            print(f"Lost particle IDs (first 20): {preview}")
+
+    total_tracked = int(np.sum(finite_z))
+    lost_count = int(np.sum(mask_bad))
+    good_count = int(np.sum(mask_good))
+    transmission_pct = 100.0 * good_count / total_tracked if total_tracked > 0 else 0.0
+    print(f"Lost particles (z <= 0): {lost_count} / {total_tracked}")
+    print(f"Transmission (z > 0): {transmission_pct:.2f}% (tracked)")
+
+    Mf_launch = Mf_launch_all
+    launch_mask_bad = None
+    if has_all and lost_ids is not None and ids_launch is not None:
+        if ids_launch.size == Mf_launch_all.shape[0]:
+            launch_mask_bad = np.isin(ids_launch, lost_ids)
+        else:
+            print("Warning: launch ID array length does not match launch phase space.")
+    elif has_all and Mf_launch_all.shape[0] == Mf_f_all.shape[0]:
+        launch_mask_bad = mask_bad
+    elif has_all and Mf_launch_all.shape[0] != Mf_f_all.shape[0]:
+        print(
+            "Warning: 'all' selections differ in size; cannot map launch to exit one-to-one. "
+            "Skipping red overlay on launch plots."
+        )
+    Mf_launch_bad = Mf_launch_all[launch_mask_bad] if launch_mask_bad is not None else np.empty((0, 6))
+
+    if Mf_f.shape[0] > 0:
+        pz_f = Mf_f[:, 5]
+        tof_ns = (Mf_f[:, 4] * 1e-3 / c) * 1e9
+        tof_ns = tof_ns[np.isfinite(tof_ns)]
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        axes[0].hist(pz_f, bins=60, alpha=0.75, edgecolor="black", lw=0.5)
+        axes[0].set_xlabel("Pz [MeV/c]")
+        axes[0].set_ylabel("Counts")
+        axes[0].grid(alpha=0.3)
+        axes[0].set_title(f"Final longitudinal momentum @ phi = {transport_phase_deg:.1f} deg")
+
+        if tof_ns.size > 0:
+            axes[1].hist(tof_ns, bins=60, alpha=0.75, edgecolor="black", lw=0.5)
+            axes[1].set_xlabel("ToF [ns]")
+            axes[1].set_ylabel("Counts")
+            axes[1].grid(alpha=0.3)
+            axes[1].set_title("Time of flight histogram")
+        else:
+            axes[1].axis("off")
+            axes[1].text(0.5, 0.5, "ToF not available", ha="center", va="center")
+
+        plt.tight_layout()
+        plt.show()
+
+    if Mf_f.shape[0] > 0 and Mf_launch.shape[0] > 0:
+        fig, axes = plt.subplots(2, 3, figsize=(13, 7))
+
+        axes[0, 0].plot(Mf_launch[:, 0], Mf_launch[:, 1], ".", ms=2, alpha=0.5)
+        if show_zle0 and Mf_launch_bad.shape[0] > 0:
+            axes[0, 0].plot(Mf_launch_bad[:, 0], Mf_launch_bad[:, 1], ".", ms=2, alpha=0.7, color="red")
+        axes[0, 0].set_xlabel("x [mm]")
+        axes[0, 0].set_ylabel("px [MeV/c]")
+        axes[0, 0].set_title("Launch: x-px")
+        axes[0, 0].grid(alpha=0.3)
+
+        axes[0, 1].plot(Mf_launch[:, 2], Mf_launch[:, 3], ".", ms=2, alpha=0.5)
+        if show_zle0 and Mf_launch_bad.shape[0] > 0:
+            axes[0, 1].plot(Mf_launch_bad[:, 2], Mf_launch_bad[:, 3], ".", ms=2, alpha=0.7, color="red")
+        axes[0, 1].set_xlabel("y [mm]")
+        axes[0, 1].set_ylabel("py [MeV/c]")
+        axes[0, 1].set_title("Launch: y-py")
+        axes[0, 1].grid(alpha=0.3)
+
+        axes[0, 2].plot(Mf_launch[:, 4], Mf_launch[:, 5], ".", ms=2, alpha=0.5)
+        if show_zle0 and Mf_launch_bad.shape[0] > 0:
+            axes[0, 2].plot(Mf_launch_bad[:, 4], Mf_launch_bad[:, 5], ".", ms=2, alpha=0.7, color="red")
+        axes[0, 2].set_xlabel("z [mm]")
+        axes[0, 2].set_ylabel("pz [MeV/c]")
+        axes[0, 2].set_title("Launch: z-pz")
+        axes[0, 2].grid(alpha=0.3)
+
+        axes[1, 0].plot(Mf_f[:, 0], Mf_f[:, 1], ".", ms=2, alpha=0.5)
+        axes[1, 0].set_xlabel("x [mm]")
+        axes[1, 0].set_ylabel("px [MeV/c]")
+        axes[1, 0].set_title("Exit: x-px")
+        axes[1, 0].grid(alpha=0.3)
+
+        axes[1, 1].plot(Mf_f[:, 2], Mf_f[:, 3], ".", ms=2, alpha=0.5)
+        axes[1, 1].set_xlabel("y [mm]")
+        axes[1, 1].set_ylabel("py [MeV/c]")
+        axes[1, 1].set_title("Exit: y-py")
+        axes[1, 1].grid(alpha=0.3)
+
+        axes[1, 2].plot(Mf_f[:, 4], Mf_f[:, 5], ".", ms=2, alpha=0.5)
+        axes[1, 2].set_xlabel("z [mm]")
+        axes[1, 2].set_ylabel("pz [MeV/c]")
+        axes[1, 2].set_title("Exit: z-pz")
+        axes[1, 2].grid(alpha=0.3)
+
+        plt.tight_layout()
+        plt.show()
+
+    if len(M_snaps) and len(z_snaps) == len(M_snaps):
+        z_mm = 1e3 * np.asarray(z_snaps)
+        sig_x = np.array([np.std(M[:, 0]) if M.shape[0] else np.nan for M in M_snaps])
+        sig_y = np.array([np.std(M[:, 2]) if M.shape[0] else np.nan for M in M_snaps])
+        pz_m = np.array([np.mean(M[:, 5]) if M.shape[0] else np.nan for M in M_snaps])
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot(z_mm, sig_x, "o-", ms=3, label="sigma x")
+        ax.plot(z_mm, sig_y, "o-", ms=3, label="sigma y")
+        ax.set_xlabel("z [mm]")
+        ax.set_ylabel("RMS size [mm]")
+        ax.grid(alpha=0.3)
+        ax.legend()
+        ax.set_title("Transverse RMS size vs z")
+        plt.show()
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot(z_mm, pz_m, "o-", ms=3)
+        ax.set_xlabel("z [mm]")
+        ax.set_ylabel("Mean Pz [MeV/c]")
+        ax.grid(alpha=0.3)
+        ax.set_title("Mean longitudinal momentum vs z")
+        plt.show()
+    else:
+        print("No snapshots available (M_snaps empty or z_snaps mismatch).")
 
 
 def theoretical_energy_gain(Ez_axis_phasor: np.ndarray, z_m: np.ndarray, phi_rad: float) -> float:
@@ -311,21 +1011,19 @@ def build_bunch_thermionic(
     cathode_T_K: float,
     work_function_eV: float,
     beta_field: float,
-    Q_target_C: float,
+    emission_phase_range_deg: float,
     pz0_MeV_c: float,
     Ez0_phasor_axis: complex,
     time_dependent: bool = True,
-    samples_per_period: int = 200,
-    max_periods: int = 200,
-    emit_sign: int = -1,
     rng: Optional[np.random.Generator] = None,
 ) -> Tuple[Any, Dict[str, Any]]:
     """
     Thermionic emission with Richardson + Schottky current.
 
-    The macro-particle charge matches Q_target_C. Emission times are sampled from a
-    time-dependent current I(t) derived from Ez(z=0, t) unless time_dependent=False,
-    in which case emission times are uniform over τ_emit.
+    The macro-particle charge matches the total charge emitted within the selected
+    phase window. Emission times are sampled from a time-dependent current I(t)
+    derived from Ez(z=0, t) unless time_dependent=False, in which case emission
+    times are uniform over the phase window.
     """
     rng = np.random.default_rng() if rng is None else rng
 
@@ -351,77 +1049,51 @@ def build_bunch_thermionic(
     tau_s = None
     I_avg = None
     I_peak = None
-    n_periods_used = None
-    periods_capped = False
-
-    if emit_sign not in (-1, 1):
-        raise ValueError("emit_sign must be -1 or +1")
+    Q_total_C = 0.0
 
     if time_dependent:
         f_hz = float(f_hz)
         T = 1.0 / f_hz
         omega = 2.0 * np.pi * f_hz
 
-        samples_per_period = max(int(samples_per_period), 10)
-        max_periods = max(int(max_periods), 1)
+        phase_range_deg = max(float(emission_phase_range_deg), 0.0)
+        tau_s = (phase_range_deg / 360.0) * T
 
-        t_period = np.linspace(0.0, T, samples_per_period + 1)
-        Ez_period = np.real(Ez0_phasor_axis * np.exp(1j * (omega * t_period + phi_rad)))
-        Eabs_period = np.abs(Ez_period)
-        dphi_period = np.sqrt((q_e**3) * Eabs_period / (4.0 * np.pi * epsilon_0)) / q_e
-        phi_eff_period = np.maximum(work_function_eV - dphi_period, 0.0)
+        samples_per_period = max(200, int(phase_range_deg * 2.0))
+        n_samples = max(int(samples_per_period * phase_range_deg / 360.0) + 1, 2)
 
-        kB_eV_per_K = 8.617333262e-5
-        J_period = A_RICH * (cathode_T_K**2) * np.exp(-phi_eff_period / (kB_eV_per_K * cathode_T_K))
-        I_period = J_period * area_m2
-        emit_mask_period = (Ez_period * emit_sign) > 0.0
-        I_period = np.where(emit_mask_period, I_period, 0.0)
-        I_avg = float(np.trapezoid(I_period, t_period) / T) if np.any(I_period) else 0.0
-
-        if I_avg > 0.0:
-            n_periods = int(np.ceil(Q_target_C / (I_avg * T)))
-        else:
-            n_periods = 1
-        n_periods = max(1, n_periods)
-
-        if n_periods > max_periods:
-            n_periods = max_periods
-            periods_capped = True
-
-        n_periods_used = n_periods
-        t_s = np.linspace(0.0, n_periods * T, n_periods * samples_per_period + 1)
+        t_s = np.linspace(0.0, tau_s, n_samples)
         Ez_t = np.real(Ez0_phasor_axis * np.exp(1j * (omega * t_s + phi_rad)))
         Eabs_t = np.abs(Ez_t)
         dphi_t = np.sqrt((q_e**3) * Eabs_t / (4.0 * np.pi * epsilon_0)) / q_e
         phi_eff_t = np.maximum(work_function_eV - dphi_t, 0.0)
+
+        kB_eV_per_K = 8.617333262e-5
         J_t = A_RICH * (cathode_T_K**2) * np.exp(-phi_eff_t / (kB_eV_per_K * cathode_T_K))
         I_t = J_t * area_m2
-        emit_mask_t = (Ez_t * emit_sign) > 0.0
-        I_t = np.where(emit_mask_t, I_t, 0.0)
 
-        dt = t_s[1] - t_s[0]
+        dt = t_s[1] - t_s[0] if t_s.size > 1 else 0.0
         Q_cum = np.zeros_like(t_s)
         if t_s.size > 1:
             Q_cum[1:] = np.cumsum((I_t[:-1] + I_t[1:]) * 0.5) * dt
 
-        Q_end = float(Q_cum[-1]) if Q_cum.size else 0.0
-        if Q_end > 0.0:
-            Q_use = min(float(Q_target_C), Q_end)
-            t_emit_s = np.interp(rng.random(n) * Q_use, Q_cum, t_s)
-            if Q_use < float(Q_target_C):
-                tau_s = float(t_s[-1])
-            else:
-                tau_s = float(np.interp(Q_use, Q_cum, t_s))
+        Q_total_C = float(Q_cum[-1]) if Q_cum.size else 0.0
+        if Q_total_C > 0.0:
+            t_emit_s = np.interp(rng.random(n) * Q_total_C, Q_cum, t_s)
         else:
             t_emit_s = np.zeros(n)
-            tau_s = np.inf
 
         I_peak = float(np.max(I_t)) if I_t is not None and I_t.size else 0.0
+        I_avg = float(Q_total_C / tau_s) if tau_s and np.isfinite(tau_s) else 0.0
     else:
+        f_hz = float(f_hz)
+        T = 1.0 / f_hz
+        phase_range_deg = max(float(emission_phase_range_deg), 0.0)
+        tau_s = (phase_range_deg / 360.0) * T
         I_avg = I0
         I_peak = I0
-        tau_s = emission_window_from_charge(Q_target_C, I0)
-        if np.isfinite(tau_s):
+        Q_total_C = float(I0 * tau_s) if np.isfinite(tau_s) else 0.0
+        if tau_s > 0.0:
             t_emit_s = rng.uniform(0.0, tau_s, size=n)
         else:
             t_emit_s = np.zeros(n)
@@ -440,7 +1112,7 @@ def build_bunch_thermionic(
 
     M = np.column_stack([x, px, y, py, z, pz])
 
-    N_real = float(abs(Q_target_C) / q_e)
+    N_real = float(abs(Q_total_C) / q_e) if Q_total_C > 0.0 else 0.0
     B0 = rft.Bunch6dT(ME_MEV, N_real, -1.0, M)
     if hasattr(B0, "set_t0"):
         B0.set_t0(t)
@@ -455,6 +1127,8 @@ def build_bunch_thermionic(
         "I_peak_A": I_peak,
         "tau_ns": float(tau_s * 1e9) if np.isfinite(tau_s) else np.inf,
         "tau_s": float(tau_s) if np.isfinite(tau_s) else np.inf,
+        "Q_total_C": float(Q_total_C),
+        "emission_phase_range_deg": float(emission_phase_range_deg),
         "t_s": t_s,
         "Ez_t": Ez_t,
         "dphi_eV_t": dphi_t,
@@ -463,10 +1137,6 @@ def build_bunch_thermionic(
         "I_A_t": I_t,
         "Q_cum_C": Q_cum,
         "t_emit_s": t_emit_s,
-        "n_periods": n_periods_used,
-        "samples_per_period": samples_per_period,
-        "periods_capped": periods_capped,
-        "emit_sign": emit_sign,
         "has_t0": hasattr(B0, "set_t0") or hasattr(B0, "get_t0"),
     }
     return B0, info

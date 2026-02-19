@@ -12,7 +12,7 @@ This project simulates electron beam dynamics from a heated thermionic cathode t
 - Resonant frequency: 2.856 GHz
 - Mode: TM010 (transverse magnetic, axially symmetric)
 - Length: λ/2 ≈ 52.5 mm
-- Accelerating gradient determined by COMSOL field maps
+- Accelerating gradient determined by field maps
 
 **Thermionic Emission:**
 - Hot cathode model: DC electron emission
@@ -26,8 +26,8 @@ This project simulates electron beam dynamics from a heated thermionic cathode t
 ├── UH_gun_tracking.ipynb       # Main analysis notebook
 ├── config.py                   # RF-Track setup
 ├── utils.py                    # Helper functions
-├── load_fieldmap_mat.py        # COMSOL field map loader
-├── field_maps/                 # COMSOL simulation data
+├── load_fieldmap_mat.py        # Field map loader
+├── field_maps/                 # Field map data
 │   ├── XYplanarSensorData.mat
 │   └── YZplanarSensorData.mat
 └── archive/                    # Previous notebook versions
@@ -36,7 +36,7 @@ This project simulates electron beam dynamics from a heated thermionic cathode t
 ## Workflow
 
 ### 1. Field Map Processing
-- Load COMSOL field maps (XY and YZ planes)
+- Load field maps (XY and YZ planes)
 - Analyze temporal envelope via Ez_rms(t) spline fit
 - Select I/Q snapshots ~90° apart for phasor construction
 - Transform to axisymmetric (r,z) coordinates
@@ -97,7 +97,7 @@ All tunable parameters are clearly defined at the top of the notebook under "Con
 - `cavity_wavelength()` - Wavelength parameters
 
 **load_fieldmap_mat.py:**
-- `load_fieldmap_mat()` - Load COMSOL .mat files
+- `load_fieldmap_mat()` - Load .mat field-map files
 - `plot_fieldmap_on_mesh()` - Visualize raw field maps
 
 ## References
@@ -109,7 +109,7 @@ All tunable parameters are clearly defined at the top of the notebook under "Con
 ## Notes
 
 **Coordinate Transformation:**
-- COMSOL uses (x, y, z) with y = vertical
+- Source field maps use (x, y, z) with y = vertical
 - RF-Track uses axisymmetric (r, z) with z = beam direction
 - Mapping: r = |x|, z = y_cathode - y, Er = sign(x)·Ex, Ez = Ey
 

@@ -1,4 +1,4 @@
-"""COMSOL field map loading and visualization utilities."""
+"""Field map loading and visualization utilities."""
 import numpy as np
 import scipy.io
 import matplotlib.pyplot as plt
@@ -96,7 +96,7 @@ def _normalize_key(k: str) -> str:
 
 
 def load_fieldmap_mat(filename, verbose=False):
-    """Load COMSOL planar field maps from .mat file."""
+    """Load planar field maps from a .mat file."""
 
     mat_raw = scipy.io.loadmat(filename)
 
