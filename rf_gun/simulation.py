@@ -98,6 +98,7 @@ def build_bunch_thermionic(
     Ez0 = float(np.real(Ez0_phasor_axis * np.exp(1j * phi_rad)))
 
     area_m2 = np.pi * (params.cathode_radius_mm * 1e-3) ** 2
+    area_cm2 = area_m2 * 1e4
 
     beta_enh = float(params.beta_enh) if params.beta_enh is not None else float(params.beta_field)
     dphi = schottky_delta_phi_eV(Ez0, beta=beta_enh)
@@ -265,6 +266,8 @@ def build_bunch_thermionic(
         "n_at_peak": float(n_t[np.argmax(J_t)]) if n_t is not None and J_t is not None and J_t.size else None,
         "n_at_peak_field": float(n_t[np.argmax(J_fe_t)]) if n_t is not None and J_fe_t is not None and J_fe_t.size else None,
         "I_A_t": I_t,
+        "area_m2": float(area_m2),
+        "area_cm2": float(area_cm2),
         "Q_cum_C": Q_cum,
         "t_emit_s": t_emit_s,
         "has_t0": hasattr(B0, "set_t0") or hasattr(B0, "get_t0"),

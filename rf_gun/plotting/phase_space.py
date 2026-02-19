@@ -26,6 +26,7 @@ def _try_get_ids(bunch, selection: str):
 def plot_spectra(
     Bout,
     transport_phase_deg: float,
+    clean_e: bool = False,
     phase_fmt: str = "%X %Px %Y %Py %Z %Pz",
 ):
     """Plot final pz histogram and ToF histogram."""
@@ -37,7 +38,10 @@ def plot_spectra(
         Mf_f_all = _safe_get_phase_space(Bout, "good", phase_fmt)
 
     finite_z = np.isfinite(Mf_f_all[:, 4])
-    Mf_f = Mf_f_all[finite_z]
+    if clean_e:
+        Mf_f = Mf_f_all[finite_z & (Mf_f_all[:, 4] > 0.0)]
+    else:
+        Mf_f = Mf_f_all[finite_z]
     if Mf_f.shape[0] == 0:
         print("No particles in output bunch.")
         return
