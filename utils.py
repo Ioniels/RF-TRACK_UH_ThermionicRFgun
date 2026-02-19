@@ -12,7 +12,7 @@ Conventions
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Iterable, Optional, Sequence, Tuple, Dict, Any, List
+from typing import Iterable, Optional, Sequence, Tuple, Dict, Any, List, Literal
 
 import numpy as np
 from scipy.constants import c, e as q_e, epsilon_0
@@ -815,15 +815,41 @@ def emission_window_from_charge(Q_C: float, I_A: float) -> float:
     return float(Q_C / I_A)
 
 
+def sample_pz_flux(
+    n: int,
+    T_K: float,
+    rng: Optional[np.random.Generator] = None,
+) -> Tuple[np.ndarray, float, float]:
+    """
+    Flux model for normal energy: eps_z ~ Exp(mean=kT).
+    Returns pz [MeV/c], mean eps_z [eV], expected mean [eV].
+    """
+    rng = np.random.default_rng() if rng is None else rng
+
+    kB_J_per_K = 1.380649e-23
+    kB_eV_per_K = 8.617333262e-5
+    me_kg = 9.1093837015e-31
+    MeV_c_SI = (1e6 * q_e) / c
+
+    eps_z_J = rng.exponential(scale=kB_J_per_K * T_K, size=n)
+    pz_SI = np.sqrt(2.0 * me_kg * eps_z_J)
+    pz_MeV_c = pz_SI / MeV_c_SI
+
+    mean_eps_eV = float(np.mean(eps_z_J) / q_e) if n > 0 else 0.0
+    exp_eps_eV = float(kB_eV_per_K * T_K)
+    return pz_MeV_c, mean_eps_eV, exp_eps_eV
+
+
 def sample_thermionic_momenta(
     n: int,
     T_K: float,
     pz0_MeV_c: float,
+    pz_model: Literal["constant", "flux"] = "flux",
     rng: Optional[np.random.Generator] = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
     """
-    Thermal transverse momenta for a Maxwellian emitter.
-    Longitudinal momentum is initialized around pz0_MeV_c.
+    Maxwellian transverse momenta with optional flux-normal pz.
+    pz_model='flux' samples eps_z ~ Exp(kT); 'constant' uses pz0_MeV_c.
     """
     rng = np.random.default_rng() if rng is None else rng
 
@@ -840,8 +866,16 @@ def sample_thermionic_momenta(
 
     px = rng.normal(0.0, sigma_p_MeV_c, size=n)
     py = rng.normal(0.0, sigma_p_MeV_c, size=n)
-    pz = np.full(n, float(pz0_MeV_c))
-    return px, py, pz
+
+    if pz_model == "flux":
+        pz, mean_eps_eV, exp_eps_eV = sample_pz_flux(n, T_K, rng=rng)
+    elif pz_model == "constant":
+        pz = np.full(n, float(pz0_MeV_c))
+        mean_eps_eV = np.nan
+        exp_eps_eV = float(8.617333262e-5 * T_K)
+    else:
+        raise ValueError(f"Unknown pz_model: {pz_model}")
+    return px, py, pz, float(mean_eps_eV), float(exp_eps_eV)
 
 
 # ----------------------------- RF-Track setup -----------------------------
@@ -1015,6 +1049,7 @@ def build_bunch_thermionic(
     pz0_MeV_c: float,
     Ez0_phasor_axis: complex,
     time_dependent: bool = True,
+    pz_model: Literal["constant", "flux"] = "flux",
     rng: Optional[np.random.Generator] = None,
 ) -> Tuple[Any, Dict[str, Any]]:
     """
@@ -1100,7 +1135,18 @@ def build_bunch_thermionic(
 
     # Transverse phase space
     x, y = sample_disk(n, cathode_radius_mm, rng=rng)
-    px, py, pz = sample_thermionic_momenta(n, cathode_T_K, pz0_MeV_c, rng=rng)
+    px, py, pz, mean_eps_eV, exp_eps_eV = sample_thermionic_momenta(
+        n,
+        cathode_T_K,
+        pz0_MeV_c,
+        pz_model=pz_model,
+        rng=rng,
+    )
+
+    if pz_model == "flux":
+        print(
+            f"Normal energy: <eps_z>={mean_eps_eV:.4f} eV (expected {exp_eps_eV:.4f} eV)"
+        )
 
     # Emission time distribution (mm/c)
     if np.isfinite(tau_s) and t_emit_s is not None:
@@ -1129,6 +1175,9 @@ def build_bunch_thermionic(
         "tau_s": float(tau_s) if np.isfinite(tau_s) else np.inf,
         "Q_total_C": float(Q_total_C),
         "emission_phase_range_deg": float(emission_phase_range_deg),
+        "pz_model": str(pz_model),
+        "mean_eps_z_eV": float(mean_eps_eV),
+        "mean_eps_z_eV_expected": float(exp_eps_eV),
         "t_s": t_s,
         "Ez_t": Ez_t,
         "dphi_eV_t": dphi_t,
