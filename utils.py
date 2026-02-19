@@ -840,6 +840,42 @@ def sample_pz_flux(
     return pz_MeV_c, mean_eps_eV, exp_eps_eV
 
 
+def roughness_slope_rms(Ra_um: float, Re_um: float) -> float:
+    """
+    RMS surface slope from sinusoidal roughness.
+    Assume a ~ sqrt(2)*Ra and lambda ~ Re.
+    """
+    Ra_um = float(Ra_um)
+    Re_um = float(Re_um)
+    if Ra_um <= 0.0 or Re_um <= 0.0:
+        return 0.0
+    amp_um = np.sqrt(2.0) * Ra_um
+    return float((2.0 * np.pi * amp_um) / Re_um)
+
+
+def apply_roughness(
+    px: np.ndarray,
+    py: np.ndarray,
+    pz: np.ndarray,
+    Ra_um: float,
+    Re_um: float,
+    rng: Optional[np.random.Generator] = None,
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """
+    Small-angle rotation from local surface slopes.
+    px <- px + pz*theta_x, py <- py + pz*theta_y.
+    """
+    rng = np.random.default_rng() if rng is None else rng
+    sigma_theta = roughness_slope_rms(Ra_um, Re_um)
+    if sigma_theta <= 0.0:
+        return px, py, 0.0
+    theta_x = rng.normal(0.0, sigma_theta, size=px.size)
+    theta_y = rng.normal(0.0, sigma_theta, size=py.size)
+    px = px + pz * theta_x
+    py = py + pz * theta_y
+    return px, py, float(sigma_theta)
+
+
 def sample_thermionic_momenta(
     n: int,
     T_K: float,
@@ -1050,6 +1086,8 @@ def build_bunch_thermionic(
     Ez0_phasor_axis: complex,
     time_dependent: bool = True,
     pz_model: Literal["constant", "flux"] = "flux",
+    Ra_um: float = 0.0,
+    Re_um: float = 0.0,
     rng: Optional[np.random.Generator] = None,
 ) -> Tuple[Any, Dict[str, Any]]:
     """
@@ -1143,6 +1181,12 @@ def build_bunch_thermionic(
         rng=rng,
     )
 
+    px_rms0 = float(np.std(px)) if px.size else np.nan
+    py_rms0 = float(np.std(py)) if py.size else np.nan
+    px, py, sigma_theta = apply_roughness(px, py, pz, Ra_um, Re_um, rng=rng)
+    px_rms = float(np.std(px)) if px.size else np.nan
+    py_rms = float(np.std(py)) if py.size else np.nan
+
     if pz_model == "flux":
         print(
             f"Normal energy: <eps_z>={mean_eps_eV:.4f} eV (expected {exp_eps_eV:.4f} eV)"
@@ -1178,6 +1222,13 @@ def build_bunch_thermionic(
         "pz_model": str(pz_model),
         "mean_eps_z_eV": float(mean_eps_eV),
         "mean_eps_z_eV_expected": float(exp_eps_eV),
+        "Ra_um": float(Ra_um),
+        "Re_um": float(Re_um),
+        "sigma_theta_rad": float(sigma_theta),
+        "px_rms0": float(px_rms0),
+        "py_rms0": float(py_rms0),
+        "px_rms": float(px_rms),
+        "py_rms": float(py_rms),
         "t_s": t_s,
         "Ez_t": Ez_t,
         "dphi_eV_t": dphi_t,
