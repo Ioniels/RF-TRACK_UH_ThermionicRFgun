@@ -6,6 +6,8 @@ from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
+from .constants import ME_MEV, c
+
 
 @dataclass(frozen=True)
 class VolumeBuildParams:
@@ -33,6 +35,75 @@ class VolumeBuildParams:
     sc_dt_mm: float = 1.0
     emission_nsteps: int = 1
     emission_range: float = 0.0
+    cfx_dt_mm: float = 1.0
+    beam_loading_enabled: bool = False
+    bl_Q_loaded: float = 0.0
+    bl_r_over_q_ohm_per_m: float = 0.0
+    bl_ncells: int = 1
+    bl_tinj_mode: str = "auto_from_emission"
+    bl_tinj_manual_mm_c: float = 0.0
+
+
+def _attach_beam_loading_sw(rft, FM, p: VolumeBuildParams):
+    if not p.beam_loading_enabled:
+        return
+    if p.bl_Q_loaded <= 0.0 or p.bl_r_over_q_ohm_per_m <= 0.0:
+        raise ValueError(
+            "Beam loading enabled but invalid parameters: "
+            f"bl_Q_loaded={p.bl_Q_loaded}, bl_r_over_q_ohm_per_m={p.bl_r_over_q_ohm_per_m}."
+        )
+    if not hasattr(rft, "BeamLoadingSW"):
+        raise RuntimeError("RF-Track binding has no BeamLoadingSW; cannot enable beam loading.")
+    if not hasattr(FM, "add_collective_effect"):
+        raise RuntimeError("RF field map has no add_collective_effect; cannot attach BeamLoadingSW.")
+
+    omega = 2.0 * np.pi * float(p.f_hz)
+    tau_s = 2.0 * float(p.bl_Q_loaded) / omega
+
+    mode = str(p.bl_tinj_mode).strip().lower()
+    if mode not in ("manual", "auto_from_emission"):
+        raise ValueError(f"Unknown bl_tinj_mode: {p.bl_tinj_mode}")
+    if mode == "auto_from_emission":
+        tinj_mm_c = 0.0
+    else:
+        tinj_mm_c = float(p.bl_tinj_manual_mm_c)
+    tinj_s = (tinj_mm_c * 1e-3) / c
+    tinj_tau = tinj_s / tau_s if tau_s > 0.0 else 0.0
+
+    Q_scalar = float(p.bl_Q_loaded)
+    rQ_scalar = float(p.bl_r_over_q_ohm_per_m)
+    Q_arr = np.array([Q_scalar], dtype=float)
+    rQ_arr = np.array([rQ_scalar], dtype=float)
+
+    ctor_errors = []
+    bl_obj = None
+    signatures = [
+        lambda: rft.BeamLoadingSW(FM, Q_scalar, rQ_scalar, int(p.bl_ncells), float(ME_MEV), -1.0, float(tinj_tau)),
+        lambda: rft.BeamLoadingSW(FM, Q_scalar, rQ_scalar, float(ME_MEV), -1.0, float(tinj_tau)),
+        lambda: rft.BeamLoadingSW(FM, Q_scalar, rQ_scalar, int(p.bl_ncells), float(ME_MEV), -1.0),
+        lambda: rft.BeamLoadingSW(FM, Q_scalar, rQ_scalar, float(ME_MEV), -1.0),
+        lambda: rft.BeamLoadingSW(FM, Q_arr, rQ_arr, int(p.bl_ncells), float(ME_MEV), -1.0, float(tinj_tau)),
+        lambda: rft.BeamLoadingSW(FM, Q_arr, rQ_arr, int(p.bl_ncells), float(ME_MEV), -1.0),
+        lambda: rft.BeamLoadingSW(FM, Q_arr, rQ_arr, int(p.bl_ncells)),
+    ]
+    for make in signatures:
+        try:
+            bl_obj = make()
+            break
+        except Exception as exc:
+            ctor_errors.append(str(exc))
+    if bl_obj is None:
+        msg = " | ".join(ctor_errors[:3])
+        raise RuntimeError(f"Could not construct BeamLoadingSW with attempted signatures. Details: {msg}")
+
+    FM.add_collective_effect(bl_obj)
+
+    print(
+        "Beam loading ON | "
+        f"Q_loaded={p.bl_Q_loaded:.4g}, r/Q={p.bl_r_over_q_ohm_per_m:.4g} Ohm/m, ncells={int(p.bl_ncells)}, "
+        f"f={p.f_hz:.6g} Hz, tau={tau_s:.4e} s, "
+        f"tinj={tinj_mm_c:.4e} mm/c (tinj/tau={tinj_tau:.4e})"
+    )
 
 
 def _coerce_volume_params(p: VolumeBuildParams | dict) -> VolumeBuildParams:
@@ -77,6 +148,8 @@ def build_volume(
     if hasattr(FM, "set_odeint_epsabs"):
         FM.set_odeint_epsabs(p.ode_epsabs)
 
+    _attach_beam_loading_sw(rft, FM, p)
+
     FM.set_phid(float(phi_deg))
     if hasattr(FM, "set_t0"):
         FM.set_t0(0.0)
@@ -90,6 +163,11 @@ def build_volume(
             V.add(S, 0.0, 0.0, float(z), "entrance")
 
     V.dt_mm = float(p.dt_mm)
+    if hasattr(V, "cfx_dt_mm"):
+        V.cfx_dt_mm = float(p.cfx_dt_mm)
+    else:
+        if p.beam_loading_enabled:
+            print("Warning: Volume has no cfx_dt_mm attribute; beam loading convergence may be unreliable.")
     V.odeint_algorithm = p.ode_algorithm
     V.odeint_epsabs = float(p.ode_epsabs)
     V.set_s0(float(p.z_min_m))
@@ -117,6 +195,9 @@ def build_volume(
             V.emission_nsteps = int(p.emission_nsteps)
         if hasattr(V, "emission_range"):
             V.emission_range = float(p.emission_range)
+
+    if p.beam_loading_enabled:
+        print(f"Volume steps: dt_mm={float(p.dt_mm):.4g}, cfx_dt_mm={float(p.cfx_dt_mm):.4g}")
 
     return V
 

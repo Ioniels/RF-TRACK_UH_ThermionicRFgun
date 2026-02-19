@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Literal
+import threading
+import time
 
 import numpy as np
 
@@ -56,6 +58,49 @@ class SimulationResult:
     M_snaps: List[np.ndarray]
     z_snaps: List[float]
     I_snaps: List[Any]
+
+
+_TRANSPORT_RUNTIME_HISTORY: Dict[tuple, float] = {}
+
+
+def _resolve_beam_loading_tinj(
+    vol_params: VolumeBuildParams,
+    B0,
+    thermo_info: Dict[str, Any],
+) -> VolumeBuildParams:
+    if not bool(getattr(vol_params, "beam_loading_enabled", False)):
+        return vol_params
+    mode = str(getattr(vol_params, "bl_tinj_mode", "manual")).strip().lower()
+    if mode != "auto_from_emission":
+        return vol_params
+
+    tinj_mm_c = None
+    get_t0 = getattr(B0, "get_t0", None)
+    if callable(get_t0):
+        try:
+            t0 = np.asarray(get_t0(), dtype=float).reshape(-1)
+            t0 = t0[np.isfinite(t0)]
+            if t0.size:
+                tinj_mm_c = float(np.min(t0))
+        except Exception:
+            tinj_mm_c = None
+
+    if tinj_mm_c is None:
+        t_emit_s = thermo_info.get("t_emit_s", None)
+        if t_emit_s is not None:
+            t_emit_s = np.asarray(t_emit_s, dtype=float).reshape(-1)
+            t_emit_s = t_emit_s[np.isfinite(t_emit_s)]
+            if t_emit_s.size:
+                tinj_mm_c = float(np.min(t_emit_s) * c * 1e3)
+
+    if tinj_mm_c is None:
+        tinj_mm_c = 0.0
+        print("Warning: could not infer emission start time; using tinj=0 mm/c for beam loading.")
+
+    return vol_params.replace(
+        bl_tinj_mode="manual",
+        bl_tinj_manual_mm_c=float(tinj_mm_c),
+    )
 
 
 def build_bunch_simple(
@@ -329,6 +374,7 @@ def run_transport(
         params=emission,
         Ez0_phasor_axis=Ez0_phasor_axis,
     )
+    vol_params_eff = _resolve_beam_loading_tinj(vol_params, B0, thermo_info)
 
     z_snaps = []
     if tracking.z_screens_m is not None:
@@ -339,12 +385,12 @@ def run_transport(
             Er_grid,
             Ez_grid,
             tracking.phi_deg,
-            vol_params,
+            vol_params_eff,
             B0,
             z_snaps,
         )
     else:
-        V = build_volume(rft, Er_grid, Ez_grid, tracking.phi_deg, vol_params)
+        V = build_volume(rft, Er_grid, Ez_grid, tracking.phi_deg, vol_params_eff)
         Bout = V.track(B0)
         snaps = []
 
@@ -361,3 +407,151 @@ def run_transport(
         z_snaps=z_snaps,
         I_snaps=I_snaps,
     )
+
+
+def run_transport_with_progress(
+    rft,
+    Er_grid: np.ndarray,
+    Ez_grid: np.ndarray,
+    Ez0_phasor_axis: complex,
+    vol_params: VolumeBuildParams,
+    emission: EmissionParams,
+    tracking: TrackingParams,
+    use_coarse_progress_proxy: bool = True,
+    poll_interval_s: float = 0.5,
+):
+    """Run transport with staged progress bars and coarse runtime proxy.
+
+    Returns:
+        (SimulationResult, stats_dict)
+        where stats_dict has `track_elapsed_s` and `track_estimate_s`.
+    """
+
+    try:
+        from tqdm.auto import tqdm
+    except Exception:
+        start_s = time.time()
+        result = run_transport(rft, Er_grid, Ez_grid, Ez0_phasor_axis, vol_params, emission, tracking)
+        elapsed_s = time.time() - start_s
+        return result, {"track_elapsed_s": elapsed_s, "track_estimate_s": np.nan}
+
+    stages = [
+        "Build thermionic bunch",
+        "Prepare tracking and screens",
+        "Run RF-Track transport",
+        "Extract phase-space snapshots",
+        "Extract screen info",
+    ]
+    pbar = tqdm(total=len(stages), desc="Transport", unit="stage")
+
+    def _set_stage(i: int):
+        pbar.set_description_str(f"[{i}/{len(stages)}] {stages[i-1]}")
+
+    _set_stage(1)
+    B0, thermo_info = build_bunch_thermionic(
+        rft,
+        tracking.n_particles,
+        tracking.phi_deg,
+        f_hz=vol_params.f_hz,
+        params=emission,
+        Ez0_phasor_axis=Ez0_phasor_axis,
+    )
+    vol_params_eff = _resolve_beam_loading_tinj(vol_params, B0, thermo_info)
+    pbar.update(1)
+
+    _set_stage(2)
+    z_snaps = list(tracking.z_screens_m) if tracking.z_screens_m is not None else []
+    pbar.update(1)
+
+    runtime_key = (
+        int(tracking.n_particles),
+        float(getattr(vol_params_eff, "dt_mm", np.nan)),
+        float(getattr(vol_params_eff, "sc_dt_mm", np.nan)),
+        int(getattr(vol_params_eff, "emission_nsteps", 0)),
+        float(getattr(vol_params_eff, "emission_range", np.nan)),
+        len(z_snaps),
+        bool(getattr(vol_params_eff, "sc_enabled", False)),
+        bool(getattr(vol_params_eff, "beam_loading_enabled", False)),
+    )
+    est_s = _TRANSPORT_RUNTIME_HISTORY.get(runtime_key, None)
+
+    _track_state: Dict[str, Any] = {}
+
+    def _track_worker():
+        try:
+            if len(z_snaps) > 0:
+                Bout, snaps = track_volume_with_screens(
+                    rft,
+                    Er_grid,
+                    Ez_grid,
+                    tracking.phi_deg,
+                    vol_params_eff,
+                    B0,
+                    z_snaps,
+                )
+            else:
+                V = build_volume(rft, Er_grid, Ez_grid, tracking.phi_deg, vol_params_eff)
+                Bout = V.track(B0)
+                snaps = []
+            _track_state["Bout"] = Bout
+            _track_state["snaps"] = snaps
+        except Exception as exc:
+            _track_state["error"] = exc
+
+    _set_stage(3)
+    thread = threading.Thread(target=_track_worker, daemon=True)
+    thread.start()
+
+    track_start_s = time.time()
+    with tqdm(total=100, desc="tracking", unit="%", leave=False) as tbar:
+        while thread.is_alive():
+            elapsed = time.time() - track_start_s
+            if use_coarse_progress_proxy and est_s is not None and est_s > 0:
+                proxy = min(98.0, 100.0 * elapsed / est_s)
+                tbar.n = int(proxy)
+                tbar.set_postfix_str(f"elapsed={elapsed:,.1f}s | proxy={proxy:5.1f}% | est={est_s:,.1f}s")
+            else:
+                tbar.set_postfix_str(f"elapsed={elapsed:,.1f}s")
+            tbar.refresh()
+            time.sleep(max(0.1, float(poll_interval_s)))
+        thread.join()
+        tbar.n = 100
+        tbar.refresh()
+
+    if "error" in _track_state:
+        pbar.close()
+        raise _track_state["error"]
+
+    track_elapsed_s = time.time() - track_start_s
+    if est_s is None:
+        _TRANSPORT_RUNTIME_HISTORY[runtime_key] = track_elapsed_s
+    else:
+        _TRANSPORT_RUNTIME_HISTORY[runtime_key] = 0.7 * float(est_s) + 0.3 * track_elapsed_s
+
+    Bout = _track_state["Bout"]
+    snaps = _track_state["snaps"]
+    pbar.update(1)
+
+    _set_stage(4)
+    M_snaps = [
+        np.array(s.get_phase_space(tracking.phase_fmt, "good"), copy=True) for s in snaps
+    ] if snaps else []
+    pbar.update(1)
+
+    _set_stage(5)
+    I_snaps = [s.get_info() if hasattr(s, "get_info") else None for s in snaps] if snaps else []
+    pbar.update(1)
+    pbar.close()
+
+    result = SimulationResult(
+        B0=B0,
+        Bout=Bout,
+        thermo_info=thermo_info,
+        M_snaps=M_snaps,
+        z_snaps=z_snaps,
+        I_snaps=I_snaps,
+    )
+    return result, {
+        "track_elapsed_s": float(track_elapsed_s),
+        "track_estimate_s": float(_TRANSPORT_RUNTIME_HISTORY[runtime_key]),
+    }
