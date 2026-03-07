@@ -6,66 +6,11 @@ from typing import Sequence
 import numpy as np
 
 from ..constants import c
-
-
-def _twiss_from_moments(u: np.ndarray, pu: np.ndarray):
-    if u.size < 2 or pu.size < 2:
-        return np.nan, np.nan, np.nan
-    u0 = u - np.mean(u)
-    pu0 = pu - np.mean(pu)
-    s11 = float(np.mean(u0 * u0))
-    s22 = float(np.mean(pu0 * pu0))
-    s12 = float(np.mean(u0 * pu0))
-    det = s11 * s22 - s12 * s12
-    if not np.isfinite(det) or det <= 0.0:
-        return np.nan, np.nan, np.nan
-    eps = np.sqrt(det)
-    alpha = -s12 / eps
-    beta = s11 / eps
-    gamma = s22 / eps
-    return alpha, beta, gamma
-
-
-def _info_get(info, key: str):
-    if info is None:
-        return np.nan
-    if isinstance(info, dict):
-        if key in info:
-            return info[key]
-        if key.lower() in info:
-            return info[key.lower()]
-        if key.upper() in info:
-            return info[key.upper()]
-        return np.nan
-    if hasattr(info, key):
-        val = getattr(info, key)
-        return val() if callable(val) else val
-    if hasattr(info, key.lower()):
-        val = getattr(info, key.lower())
-        return val() if callable(val) else val
-    if hasattr(info, key.upper()):
-        val = getattr(info, key.upper())
-        return val() if callable(val) else val
-    if hasattr(info, f"get_{key}"):
-        getter = getattr(info, f"get_{key}")
-        return getter() if callable(getter) else getter
-    return np.nan
-
-
-def _info_get_first(info, keys: Sequence[str]):
-    for key in keys:
-        val = _info_get(info, key)
-        try:
-            fval = float(val)
-        except Exception:
-            continue
-        if np.isfinite(fval):
-            return fval
-    return np.nan
+from ..diagnostics import twiss_from_moments, info_get, info_get_first
 
 
 def _extract_time_ns_from_info(info):
-    t_mm_c = _info_get_first(info, ["t", "mean_t", "mean_T"])
+    t_mm_c = info_get_first(info, ["t", "mean_t", "mean_T"])
     if not np.isfinite(t_mm_c):
         return np.nan
     return float((t_mm_c * 1e-3 / c) * 1e9)
@@ -84,23 +29,24 @@ def plot_evolution(
     """
     import matplotlib.pyplot as plt
 
-    if not len(M_snaps) or len(z_snaps) != len(M_snaps):
-        print("No snapshots available (M_snaps empty or z_snaps mismatch).")
+    use_info = info_snaps is not None and len(info_snaps) == len(z_snaps)
+    has_m = len(M_snaps) == len(z_snaps) and len(M_snaps) > 0
+    if not use_info and not has_m:
+        print("No snapshots available (provide info_snaps or M_snaps matching z_snaps).")
         return
 
     z_mm = 1e3 * np.asarray(z_snaps)
-    use_info = info_snaps is not None and len(info_snaps) == len(z_snaps)
 
     if use_info and clean_e:
         print("Note: clean_e is ignored when using RF-Track get_info() summaries.")
 
     if use_info:
-        sig_x = np.asarray([_info_get_first(info, ["sigma_X", "sigma_x"]) for info in info_snaps])
-        sig_y = np.asarray([_info_get_first(info, ["sigma_Y", "sigma_y"]) for info in info_snaps])
-        sig_px = np.asarray([_info_get_first(info, ["sigma_Px", "sigma_px", "sigma_xp"]) for info in info_snaps])
-        sig_py = np.asarray([_info_get_first(info, ["sigma_Py", "sigma_py", "sigma_yp"]) for info in info_snaps])
-        pz_m = np.asarray([_info_get_first(info, ["mean_Pz", "mean_P", "mean_pz"]) for info in info_snaps])
-        sig_pz = np.asarray([_info_get_first(info, ["sigma_Pz", "sigma_P", "sigma_pz"]) for info in info_snaps])
+        sig_x = np.asarray([info_get_first(info, ["sigma_X", "sigma_x"]) for info in info_snaps])
+        sig_y = np.asarray([info_get_first(info, ["sigma_Y", "sigma_y"]) for info in info_snaps])
+        sig_px = np.asarray([info_get_first(info, ["sigma_Px", "sigma_px", "sigma_xp"]) for info in info_snaps])
+        sig_py = np.asarray([info_get_first(info, ["sigma_Py", "sigma_py", "sigma_yp"]) for info in info_snaps])
+        pz_m = np.asarray([info_get_first(info, ["mean_Pz", "mean_P", "mean_pz"]) for info in info_snaps])
+        sig_pz = np.asarray([info_get_first(info, ["sigma_Pz", "sigma_P", "sigma_pz"]) for info in info_snaps])
     else:
         if info_snaps is not None and len(info_snaps) != len(z_snaps):
             print("Warning: info_snaps length mismatch; using moment-based evolution fallback.")
@@ -167,8 +113,10 @@ def plot_twiss_evolution(
     """
     import matplotlib.pyplot as plt
 
-    if not len(M_snaps) or len(z_snaps) != len(M_snaps):
-        print("No snapshots available (M_snaps empty or z_snaps mismatch).")
+    use_info = info_snaps is not None and len(info_snaps) == len(z_snaps)
+    has_m = len(M_snaps) == len(z_snaps) and len(M_snaps) > 0
+    if not use_info and not has_m:
+        print("No snapshots available (provide info_snaps or M_snaps matching z_snaps).")
         return
 
     z_mm = 1e3 * np.asarray(z_snaps)
@@ -180,8 +128,6 @@ def plot_twiss_evolution(
         else:
             cleaned.append(M)
 
-    use_info = info_snaps is not None and len(info_snaps) == len(z_snaps)
-
     alpha_x = []
     beta_x = []
     alpha_y = []
@@ -191,12 +137,12 @@ def plot_twiss_evolution(
 
     if use_info:
         for info in info_snaps:
-            alpha_x.append(float(_info_get(info, "alpha_x")))
-            beta_x.append(float(_info_get(info, "beta_x")))
-            alpha_y.append(float(_info_get(info, "alpha_y")))
-            beta_y.append(float(_info_get(info, "beta_y")))
-            alpha_z.append(float(_info_get(info, "alpha_z")))
-            beta_z.append(float(_info_get(info, "beta_z")))
+            alpha_x.append(float(info_get(info, "alpha_x")))
+            beta_x.append(float(info_get(info, "beta_x")))
+            alpha_y.append(float(info_get(info, "alpha_y")))
+            beta_y.append(float(info_get(info, "beta_y")))
+            alpha_z.append(float(info_get(info, "alpha_z")))
+            beta_z.append(float(info_get(info, "beta_z")))
     else:
         if info_snaps is not None and len(info_snaps) != len(z_snaps):
             print("Warning: info_snaps length mismatch; using moment-based Twiss fallback.")
@@ -210,9 +156,9 @@ def plot_twiss_evolution(
                 beta_z.append(np.nan)
                 continue
 
-            ax, bx, _ = _twiss_from_moments(M[:, 0], M[:, 1])
-            ay, by, _ = _twiss_from_moments(M[:, 2], M[:, 3])
-            az, bz, _ = _twiss_from_moments(M[:, 4], M[:, 5])
+            ax, bx, _ = twiss_from_moments(M[:, 0], M[:, 1])
+            ay, by, _ = twiss_from_moments(M[:, 2], M[:, 3])
+            az, bz, _ = twiss_from_moments(M[:, 4], M[:, 5])
             alpha_x.append(ax)
             beta_x.append(bx)
             alpha_y.append(ay)
@@ -261,6 +207,89 @@ def plot_twiss_evolution(
     plt.show()
 
 
+def plot_emittance_evolution(
+    z_snaps: Sequence[float],
+    info_snaps: Sequence[object] | None,
+):
+    """Plot geometric and normalized emittance evolution from RF-Track get_info().
+
+    Notes
+    -----
+    - This function reads emittance values directly from ``info_snaps`` only.
+    - It does **not** compute emittance from ``M_snaps`` moments/covariance.
+        - If RF-Track emittance keys are not present in ``get_info()``, it returns.
+    """
+    import matplotlib.pyplot as plt
+
+    if not len(z_snaps) or info_snaps is None or len(info_snaps) != len(z_snaps):
+        print("No emittance data available (info_snaps missing or length mismatch).")
+        return
+
+    z_mm = 1e3 * np.asarray(z_snaps, dtype=float)
+
+    geom_keys = {
+        "x": ["emit_x", "emittance_x", "eps_x", "epsilon_x", "ex"],
+        "y": ["emit_y", "emittance_y", "eps_y", "epsilon_y", "ey"],
+        "z": ["emit_z", "emittance_z", "eps_z", "epsilon_z", "ez"],
+    }
+    norm_keys = {
+        "x": ["emitt_x", "emit_nx", "emitnx", "norm_emit_x", "normalized_emittance_x", "eps_nx", "epsilon_nx"],
+        "y": ["emitt_y", "emit_ny", "emitny", "norm_emit_y", "normalized_emittance_y", "eps_ny", "epsilon_ny"],
+        "z": ["emitt_z", "emit_nz", "emitnz", "norm_emit_z", "normalized_emittance_z", "eps_nz", "epsilon_nz"],
+    }
+
+    eps_x = np.asarray([info_get_first(info, geom_keys["x"]) for info in info_snaps], dtype=float)
+    eps_y = np.asarray([info_get_first(info, geom_keys["y"]) for info in info_snaps], dtype=float)
+    eps_z = np.asarray([info_get_first(info, geom_keys["z"]) for info in info_snaps], dtype=float)
+
+    eps_nx = np.asarray([info_get_first(info, norm_keys["x"]) for info in info_snaps], dtype=float)
+    eps_ny = np.asarray([info_get_first(info, norm_keys["y"]) for info in info_snaps], dtype=float)
+    eps_nz = np.asarray([info_get_first(info, norm_keys["z"]) for info in info_snaps], dtype=float)
+
+    has_geom_x = np.any(np.isfinite(eps_x))
+    has_geom_y = np.any(np.isfinite(eps_y))
+    has_geom_z = np.any(np.isfinite(eps_z))
+    has_norm_x = np.any(np.isfinite(eps_nx))
+    has_norm_y = np.any(np.isfinite(eps_ny))
+    has_norm_z = np.any(np.isfinite(eps_nz))
+
+    has_any_transverse = has_geom_x or has_geom_y or has_norm_x or has_norm_y
+    has_any_longitudinal = has_geom_z or has_norm_z
+    if not (has_any_transverse or has_any_longitudinal):
+        return
+
+    if has_any_transverse:
+        fig_xy, ax_xy = plt.subplots(figsize=(8.5, 4.2))
+        if has_geom_x:
+            ax_xy.plot(z_mm, eps_x, "o-", ms=3, color="tab:blue", label=r"$\varepsilon_{x}$ (geom)")
+        if has_geom_y:
+            ax_xy.plot(z_mm, eps_y, "o-", ms=3, color="tab:orange", label=r"$\varepsilon_{y}$ (geom)")
+        if has_norm_x:
+            ax_xy.plot(z_mm, eps_nx, "--", lw=1.4, color="tab:blue", alpha=0.8, label=r"$\varepsilon_{n,x}$")
+        if has_norm_y:
+            ax_xy.plot(z_mm, eps_ny, "--", lw=1.4, color="tab:orange", alpha=0.8, label=r"$\varepsilon_{n,y}$")
+        ax_xy.set_xlabel(r"$z\,(\mathrm{mm})$")
+        ax_xy.set_ylabel(r"$\varepsilon$")
+        ax_xy.set_title(r"$\mathrm{Transverse\ emittance\ evolution}$")
+        ax_xy.grid(alpha=0.3)
+        ax_xy.legend(frameon=False, loc="best")
+        plt.tight_layout()
+        plt.show()
+
+    if has_any_longitudinal:
+        fig_z, ax_z = plt.subplots(figsize=(8.5, 4.2))
+        if has_geom_z:
+            ax_z.plot(z_mm, eps_z, "o-", ms=3, color="tab:green", label=r"$\varepsilon_{z}$ (geom)")
+        if has_norm_z:
+            ax_z.plot(z_mm, eps_nz, "--", lw=1.4, color="tab:green", alpha=0.8, label=r"$\varepsilon_{n,z}$")
+        ax_z.set_xlabel(r"$z\,(\mathrm{mm})$")
+        ax_z.set_ylabel(r"$\varepsilon$")
+        ax_z.set_title(r"$\mathrm{Longitudinal\ emittance\ evolution}$")
+        ax_z.grid(alpha=0.3)
+        ax_z.legend(frameon=False, loc="best")
+        plt.tight_layout()
+        plt.show()
+
 def plot_transmission_evolution(
     z_snaps: Sequence[float],
     info_snaps: Sequence[object],
@@ -279,30 +308,30 @@ def plot_transmission_evolution(
         return
 
     z_mm = 1e3 * np.asarray(z_snaps)
-    transmission = np.asarray([float(_info_get(info, "transmission")) for info in info_snaps])
+    transmission = np.asarray([float(info_get(info, "transmission")) for info in info_snaps])
     t_ns = np.asarray([_extract_time_ns_from_info(info) for info in info_snaps])
 
     fig, ax = plt.subplots(figsize=(8, 4))
     if n_real_ref is not None and np.isfinite(n_real_ref) and n_real_ref > 0:
         frac = 100.0 * transmission / float(n_real_ref)
-        ax.plot(z_mm, frac, "o-", ms=3, color="tab:blue", label="fraction of emitted charge")
-        ax.set_ylabel("Transmission [% of emitted charge]")
+        ax.plot(z_mm, frac, "o-", ms=3, color="tab:blue", label=r"fraction of emitted charge")
+        ax.set_ylabel(r"$\mathrm{Transmission}\,(\%\ \mathrm{of\ emitted\ charge})$")
 
         if n_macroparticles is not None and int(n_macroparticles) > 0:
             macro_eq = transmission / float(n_real_ref) * int(n_macroparticles)
             ax2 = ax.twinx()
-            ax2.plot(z_mm, macro_eq, "--", lw=1.3, color="tab:green", label="macro-equivalent")
-            ax2.set_ylabel("Equivalent macroparticles")
+            ax2.plot(z_mm, macro_eq, "--", lw=1.3, color="tab:green", label=r"macro-equivalent")
+            ax2.set_ylabel(r"$N_{\mathrm{macro,eq}}$")
             h1, l1 = ax.get_legend_handles_labels()
             h2, l2 = ax2.get_legend_handles_labels()
             ax.legend(h1 + h2, l1 + l2, frameon=False, loc="best")
     else:
-        ax.plot(z_mm, transmission, "o-", ms=3, color="tab:green", label="real-particle equivalent")
-        ax.set_ylabel("Transmission [real-particle equivalent]")
+        ax.plot(z_mm, transmission, "o-", ms=3, color="tab:green", label=r"real-particle equivalent")
+        ax.set_ylabel(r"$N_{\mathrm{real,eq}}$")
         ax.legend(frameon=False)
 
-    ax.set_xlabel("z [mm]")
-    ax.set_title("Transmission vs z (RF-Track get_info)")
+    ax.set_xlabel(r"$z\,(\mathrm{mm})$")
+    ax.set_title(r"$\mathrm{Transmission\ vs\ }z\ (\mathrm{RF\!\!\!-Track\ get\_info})$")
     if np.any(np.isfinite(t_ns)):
         i0 = int(np.nanargmin(np.abs(z_mm - z_mm[0])))
         i1 = int(np.nanargmin(np.abs(z_mm - z_mm[-1])))

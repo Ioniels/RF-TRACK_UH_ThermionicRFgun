@@ -11,3 +11,10 @@ venv/
 
 # Project-specific
 archive/
+outputs/
+logs/
+.rf_gun_transport_runtime_history.json
+
+# Local artifacts / OS metadata
+*.zip
+*:Zone.Identifier

@@ -2,6 +2,8 @@
 import numpy as np
 import scipy.io
 
+from .phasor import interp_cfield
+
 
 def _normalize_key(k: str) -> str:
     """Remove MATLAB export artifacts (null chars, spaces)."""

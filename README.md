@@ -4,10 +4,10 @@ Thermionic cathode electron beam tracking in a TM010 λ/4 RF cavity at 2.856 GHz
 
 ## Overview
 
-This project simulates electron beam dynamics from a heated thermionic cathode through an RF cavity (S-band - λ/4 - 1 MW - 1 MeV) using RF-Track (developed at CERN: link to RF-Track github). The simulation code includes:
+This project simulates electron beam dynamics from a heated thermionic cathode through an RF cavity (S-band, λ/4, ~1 MW, ~1 MeV class) using RF-Track (developed at CERN). The simulation code includes:
 
 - Helpers for thermionic emission model self-consistent as a function of T, includes cathode surface roughness
-- Loads field maps from an FDTD (3D Yee-Cell) EM solver and phasor builder for evolution vers time during transients
+- Loads field maps from an FDTD (3D Yee-cell) EM solver and builds RF phasors for time evolution during transients
 - Particle tracking from RF-Track includes space-charge and beam loading
 
 To be included next:
@@ -63,8 +63,8 @@ The main parameters used for the simulations are currently according to the UH L
 
 ### 3. Tracking
 - **Phase scan:** Test single particles at various RF phases
-- **DC emission:** Sample uniform phase distribution (48 phases × N particles)
-- Volume tracking with space-charge (if enabled)
+- **Thermionic emission:** Time-dependent emission from Richardson-Dushman + Schottky lowering, including roughness-induced angular spread
+- Volume tracking with space-charge and beam loading (if enabled)
 
 ### 4. Analysis
 - Energy spectrum and phase correlation
@@ -75,21 +75,30 @@ The main parameters used for the simulations are currently according to the UH L
 
 **Cavity:**
 - `F_HZ = 2.856e9` - RF frequency
-- `Y_CATHODE_MM = 13.0` - Cathode position in solver frame
+- `Y_CATHODE_MM = 12.75` - Cathode position in solver frame
 - `R_MAX_M = 0.010` - Radial extent
-- `NR = 4000`, `NZ = 10000` - Field map resolution
+- `DR_UM = 4.0`, `DZ_UM = 13.0` - Field-map interpolation resolution
+- `EXT_ZMAX = 0.0075`, `EXT_ZMIN = 0.0` - Axial map extension around cavity
 
 **Beam:**
 - `R_CATHODE_MM = 3.14/2` - Emission radius
-- `THERMAL_PT_MEVC = 0.0` - Transverse thermal momentum
-- `PZ_INIT_MEVC = 1e-4` - Initial longitudinal momentum
-- `N_PHASES = 48`, `N_PER_PHASE = 3` - Sampling
+- `T_CATHODE_K = 1700.0` - Cathode temperature
+- `PHI_EFF_EV = 2.1` - Effective work function
+- `BETA_F = 1.0` - Field-enhancement factor
+- `RA_UM = 1.0`, `RE_UM = 10.0` - Roughness height/correlation length
+- `PZ_INIT_MEVC = 4.0e-3` - Initial longitudinal momentum (only for constant-`pz` mode)
+- `EMISSION_LAW = "RD_schottky"` - Emission law
 
 **Tracking:**
-- `DT_MM = 0.2` - Integration step
+- `DT_MM = 0.1` - Integration step
 - `APERTURE_M = 0.010` - Circular aperture
 - `ODE_ALGORITHM = "rk2"` - Integrator
 - `ODE_EPSABS = 1e-6` - Error tolerance
+- `SC_ENABLED = True`, `SC_DT_MM = 0.2` - Space-charge settings
+- `EMISSION_NSTEPS = 100`, `EMISSION_RANGE = 10.0` - Emission-time integration controls
+- `BEAM_LOADING = False` (default), `BL_CFX_DT_MM = 0.1` - Beam-loading controls
+- `EMISSION_PHASE_START = 0.0`, `EMISSION_PHASE_RANGE = 180.0` - Emission phase window
+- `TRANSPORT_N_PART = 10_000`, `N_Z_SNAP = 100` - Transport macroparticles and longitudinal diagnostics
 
 ## Usage
 
@@ -202,7 +211,7 @@ There is no segmented transport mode in the current code path.
 - RF phase φ set via FM.set_phid()
 
 **Thermionic Model:**
-- Simulates DC beam from hot cathode
-- Samples 48 phases uniformly in [0, 2π)
-- Each phase gets independent tracking
-- Results combined for phase-averaged statistics
+- Simulates a hot-cathode thermionic source with time-dependent emission current
+- Uses Richardson-Dushman current density with Schottky lowering from the local RF field
+- Includes optional roughness-driven angular broadening via `(Ra, Re)`
+- Generates emission times from the computed current waveform, then tracks in RF-Track with SC/BL options

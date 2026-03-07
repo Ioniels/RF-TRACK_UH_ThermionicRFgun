@@ -9,6 +9,29 @@ import numpy as np
 from .constants import ME_MEV, c
 
 
+def _call_first_available(obj, names, *args):
+    for name in names:
+        fn = getattr(obj, name, None)
+        if callable(fn):
+            try:
+                fn(*args)
+                return True
+            except Exception:
+                continue
+    return False
+
+
+def _set_first_available_attr(obj, names, value):
+    for name in names:
+        if hasattr(obj, name):
+            try:
+                setattr(obj, name, value)
+                return True
+            except Exception:
+                continue
+    return False
+
+
 @dataclass(frozen=True)
 class VolumeBuildParams:
     @staticmethod
@@ -57,56 +80,23 @@ class ScreenBuildParams:
 
 def _configure_screen(S, screen_params: ScreenBuildParams, index: int, z_m: float):
     if screen_params.width_mm is not None:
-        for name in ("set_width", "set_xwidth", "set_size_x"):
-            fn = getattr(S, name, None)
-            if callable(fn):
-                try:
-                    fn(float(screen_params.width_mm))
-                    break
-                except Exception:
-                    pass
+        _call_first_available(S, ("set_width", "set_xwidth", "set_size_x"), float(screen_params.width_mm))
 
     if screen_params.height_mm is not None:
-        for name in ("set_height", "set_ywidth", "set_size_y"):
-            fn = getattr(S, name, None)
-            if callable(fn):
-                try:
-                    fn(float(screen_params.height_mm))
-                    break
-                except Exception:
-                    pass
+        _call_first_available(S, ("set_height", "set_ywidth", "set_size_y"), float(screen_params.height_mm))
 
     if screen_params.time_window_mm_c is not None:
-        for name in ("set_time_window", "set_twindow", "set_dt", "set_time_width"):
-            fn = getattr(S, name, None)
-            if callable(fn):
-                try:
-                    fn(float(screen_params.time_window_mm_c))
-                    break
-                except Exception:
-                    pass
+        _call_first_available(
+            S,
+            ("set_time_window", "set_twindow", "set_dt", "set_time_width"),
+            float(screen_params.time_window_mm_c),
+        )
 
     mode = str(screen_params.t0_mode).strip().lower()
     if mode not in ("unset", "sync_to_first_crossing", "manual"):
         raise ValueError(f"Unknown screen t0 mode: {screen_params.t0_mode}")
     if mode == "manual":
-        for name in ("set_t0", "set_ref_time", "set_reference_time"):
-            fn = getattr(S, name, None)
-            if callable(fn):
-                try:
-                    fn(float(screen_params.t0_manual_mm_c))
-                    break
-                except Exception:
-                    pass
-    elif mode == "unset":
-        for name in ("unset_t0", "clear_t0"):
-            fn = getattr(S, name, None)
-            if callable(fn):
-                try:
-                    fn()
-                    break
-                except Exception:
-                    pass
+        _call_first_available(S, ("set_t0", "set_ref_time", "set_reference_time"), float(screen_params.t0_manual_mm_c))
 
     if screen_params.log:
         tw = (
@@ -228,25 +218,9 @@ def build_volume(
 
     FM.set_phid(float(phi_deg))
 
-    t0_set = False
-    for name in ("set_t0", "set_ref_time", "set_reference_time"):
-        method = getattr(FM, name, None)
-        if callable(method):
-            try:
-                method(0.0)
-                t0_set = True
-                break
-            except Exception:
-                pass
+    t0_set = _call_first_available(FM, ("set_t0", "set_ref_time", "set_reference_time"), 0.0)
     if not t0_set:
-        for attr in ("t0", "ref_time", "reference_time"):
-            if hasattr(FM, attr):
-                try:
-                    setattr(FM, attr, 0.0)
-                    t0_set = True
-                    break
-                except Exception:
-                    pass
+        _set_first_available_attr(FM, ("t0", "ref_time", "reference_time"), 0.0)
 
     _attach_beam_loading_sw(rft, FM, p)
 
@@ -279,18 +253,17 @@ def build_volume(
     V.t_max_mm = float(p.t_max_mm)
 
     if p.sc_enabled:
-        for method_name in (
-            "set_sc_on",
-            "enable_sc",
-            "enable_space_charge",
-            "set_space_charge",
-        ):
-            method = getattr(V, method_name, None)
-            if callable(method):
-                method(True)
-        for attr_name in ("sc_on", "sc_enabled", "sc_enable", "space_charge"):
-            if hasattr(V, attr_name):
-                setattr(V, attr_name, True)
+        _call_first_available(
+            V,
+            (
+                "set_sc_on",
+                "enable_sc",
+                "enable_space_charge",
+                "set_space_charge",
+            ),
+            True,
+        )
+        _set_first_available_attr(V, ("sc_on", "sc_enabled", "sc_enable", "space_charge"), True)
 
         if hasattr(V, "sc_dt_mm"):
             V.sc_dt_mm = float(p.sc_dt_mm)
@@ -314,6 +287,7 @@ def track_volume_with_screens(
     B0,
     z_screens_m: Sequence[float],
     screen_params: Optional[ScreenBuildParams] = None,
+    return_volume: bool = False,
 ):
     """Track once, capturing phase-space snapshots at `z_screens_m`."""
     z_screens_m = [float(z) for z in z_screens_m]
@@ -328,6 +302,8 @@ def track_volume_with_screens(
     )
     Bout = V.track(B0)
     snaps = V.get_bunch_at_screens() if hasattr(V, "get_bunch_at_screens") else []
+    if return_volume:
+        return Bout, snaps, V
     return Bout, snaps
 
 
@@ -340,6 +316,7 @@ def track_volume_transport_table(
     B0,
     tt_dt_mm: float,
     table_fmt: str,
+    return_volume: bool = False,
 ):
     """Track once and retrieve RF-Track's transport table in a Volume."""
     V = build_volume(rft, Er_grid, Ez_grid, phi_deg, p, add_screens_z_m=None)
@@ -349,6 +326,8 @@ def track_volume_transport_table(
 
     Bout = V.track(B0, opts)
     T = V.get_transport_table(table_fmt) if hasattr(V, "get_transport_table") else None
+    if return_volume:
+        return Bout, T, V
     return Bout, T
 
 

@@ -5,6 +5,8 @@ from typing import Dict, Tuple
 
 import numpy as np
 
+from .style import DEFAULT_PLOT_STYLE, PlotStyleConfig, get_default_density_cmap
+
 
 def field_maps(
     xy: Dict[str, np.ndarray],
@@ -15,12 +17,27 @@ def field_maps(
     z_grid: np.ndarray,
     Ez_grid: np.ndarray,
     lambda_m: float,
+    *,
+    style: PlotStyleConfig | None = None,
+    show_colorbar: bool = False,
+    density_cmap=None,
 ):
-    """Plot raw field maps and RF-Track grid."""
+    """Plot raw field maps and RF-Track grid with shared density style.
+
+    Example
+    -------
+    ``field_maps(xy, yz, t_ns, t_crest, r_grid, z_grid, Ez_grid, lambda_m)``
+
+    This uses the shared default plasma-with-white colormap from
+    ``get_default_density_cmap()`` and keeps colorbars disabled unless
+    ``show_colorbar=True``.
+    """
     import matplotlib.pyplot as plt
     import matplotlib.tri as mtri
     import matplotlib.colors as colors
-    from matplotlib import cm
+
+    style = DEFAULT_PLOT_STYLE if style is None else style
+    cmap_density = get_default_density_cmap() if density_cmap is None else density_cmap
 
     i_snap = int(np.argmin(np.abs(t_ns - t_crest)))
 
@@ -53,15 +70,15 @@ def field_maps(
     vmax_top = vmax_top if vmax_top > 0 else 1.0
     norm_top = colors.Normalize(vmin=-vmax_top, vmax=vmax_top)
 
-    cmap_top = cm.get_cmap("RdBu_r").copy()
-    cmap_top.set_bad("white")
+    cmap_top = cmap_density
 
     cf_xy = ax_xy.tripcolor(triang_xy, Fx, cmap=cmap_top, norm=norm_top, shading="gouraud")
     cf_yz = ax_yz.tripcolor(triang_yz, Fy, cmap=cmap_top, norm=norm_top, shading="gouraud")
     ax_yz.set_aspect("equal", adjustable="box")
     ax_yz.set_xlabel(r"$x$ (mm)")
     ax_yz.set_ylabel(r"$z$ (mm)")
-    plt.colorbar(cf_yz, ax=ax_yz, label=r"$E_z$ (V/m)")
+    if bool(show_colorbar):
+        plt.colorbar(cf_yz, ax=ax_yz, label=r"$E_z$ (V/m)")
 
     x_lo, x_hi = np.percentile(Ux, [0.5, 99.5])
     y_lo_xy, y_hi_xy = np.percentile(Vy, [0.5, 99.5])
@@ -93,7 +110,7 @@ def field_maps(
         aspect="auto",
         origin="lower",
         extent=extent_full,
-        cmap="plasma",
+        cmap=cmap_density,
     )
     ax_rf.axvline(0, color="white", ls="--", lw=1, alpha=0.5, label="Cathode (z=0)")
     ax_rf.axvline(lambda_m / 4 * 1e3, color="cyan", ls="--", lw=1, alpha=0.7, label=r"$\lambda/4$")
@@ -121,8 +138,9 @@ def field_maps(
         va="top",
         bbox=dict(facecolor="black", alpha=0.15, edgecolor="none"),
     )
-    cbar = fig.colorbar(im, ax=ax_rf, location="right", pad=0.02, fraction=0.03)
-    cbar.set_label(r"$E_z$ (V/m)")
+    if bool(show_colorbar):
+        cbar = fig.colorbar(im, ax=ax_rf, location="right", pad=0.02, fraction=0.03)
+        cbar.set_label(r"$E_z$ (V/m)")
 
     plt.tight_layout(rect=[0.0, 0.0, 1.0, 0.955])
     pos = ax_rf.get_position()
@@ -145,12 +163,14 @@ def axis_phase(
 
     phi_opt = -np.angle(Ez_axis[np.argmax(np.abs(Ez_axis))])
     phi_zero_deg = (90.0 - np.rad2deg(np.angle(Ez0_phasor_axis))) % 360.0
+    phi_crest_deg = (phi_zero_deg + 90.0) % 360.0
     transport_phase_deg = (phi_zero_deg + float(emission_phase_start)) % 360.0
 
     print(f"Auto phase: Ez0 crosses 0 at phi approx {phi_zero_deg:.2f} deg")
+    print(f"Auto crest phase at cathode: phi approx {phi_crest_deg:.2f} deg")
     print(
         f"Transport phase (t=0): phi = {transport_phase_deg:.2f} deg "
-        f"(start shift {float(emission_phase_start):.1f} deg)"
+        f"(zero-crossing reference + start shift {float(emission_phase_start):.1f} deg)"
     )
     print(f"Emission window: {float(emission_phase_range):.1f} deg")
 
