@@ -25,8 +25,10 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--threads", type=int, default=None)
     parser.add_argument("--phase_deg", type=float, default=0.0)
-    parser.add_argument("--emission_phase_start", type=float, default=0.0)
+    parser.add_argument("--emission_phase_start", type=float, default=45.0)
     parser.add_argument("--n_particles", type=int, default=100_000)
+    parser.add_argument("--run-family", type=str, default="thermionic")
+    parser.add_argument("--scan-tags", type=str, nargs="*", default=None)
 
     parser.add_argument("--xy_fieldmap", type=Path, default=Path("field_maps/XYplanarSensorData.mat"))
     parser.add_argument("--yz_fieldmap", type=Path, default=Path("field_maps/YZplanarSensorData.mat"))
@@ -41,16 +43,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--z_max", type=float, default=None)
     parser.add_argument("--ext_zmax", type=float, default=0.0075)
 
-    parser.add_argument("--dt_mm", type=float, default=0.1)
-    parser.add_argument("--sc_dt_mm", type=float, default=0.2)
-    parser.add_argument("--emission_nsteps", type=int, default=100)
+    parser.add_argument("--dt_mm", type=float, default=0.01)
+    parser.add_argument("--sc_dt_mm", type=float, default=0.01)
+    parser.add_argument("--emission_nsteps", type=int, default=200)
     parser.add_argument("--emission_range", type=float, default=10.0)
-    parser.add_argument("--fm_nsteps", type=int, default=100)
-    parser.add_argument("--fm_tt_nsteps", type=int, default=100)
-    parser.add_argument("--cfx_dt_mm", type=float, default=0.1)
+    parser.add_argument("--fm_nsteps", type=int, default=200)
+    parser.add_argument("--fm_tt_nsteps", type=int, default=200)
+    parser.add_argument("--cfx_dt_mm", type=float, default=0.01)
     parser.add_argument("--ode_algorithm", type=str, default="rk2")
     parser.add_argument("--ode_epsabs", type=float, default=1e-6)
-    parser.add_argument("--aperture_m", type=float, default=0.01)
+    parser.add_argument("--aperture_m", type=float, default=1.0)
 
     parser.add_argument("--sc_enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--beam_loading", action=argparse.BooleanOptionalAction, default=False)
@@ -63,7 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bl_tinj_manual_mm_c", type=float, default=0.0)
 
     parser.add_argument("--n_screens", type=int, default=0)
-    parser.add_argument("--n_z_snap", type=int, default=None)
+    parser.add_argument("--n_z_snap", type=int, default=3)
     parser.add_argument("--screens_z", type=float, nargs="*", default=None)
     parser.add_argument("--no-screens", action="store_true", default=False)
 
@@ -78,20 +80,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--emission_scale", type=float, default=1.0)
     parser.add_argument("--use_const_pz", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--pz_init_mevc", type=float, default=4.0e-3)
-    parser.add_argument("--ra_um", type=float, default=1.0)
-    parser.add_argument("--re_um", type=float, default=10.0)
+    parser.add_argument("--ra_um", type=float, default=0.0)
+    parser.add_argument("--re_um", type=float, default=0.0)
     parser.add_argument("--emission_law", choices=["RD_schottky", "unified"], default="RD_schottky")
     parser.add_argument("--t_cathode_k", type=float, default=1700.0)
     parser.add_argument("--phi_eff_ev", type=float, default=2.1)
     parser.add_argument("--beta_f", type=float, default=1.0)
-    parser.add_argument("--emission_phase_range", type=float, default=180.0)
+    parser.add_argument("--emission_phase_range", type=float, default=90.0)
 
+    parser.add_argument("--phase_scan_min", type=float, default=0.0)
+    parser.add_argument("--phase_scan_max", type=float, default=360.0)
     parser.add_argument("--phase_scan_n", type=int, default=90)
     parser.add_argument("--phase_scan_n_part", type=int, default=20)
     parser.add_argument("--phase_scan_dt_mm", type=float, default=0.5)
 
     parser.add_argument("--poll_interval_s", type=float, default=0.5)
     parser.add_argument("--progress-bar", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--progress-notebook-mode", choices=["minimal", "verbose", "auto"], default="auto")
     parser.add_argument("--timing-diagnostics", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--slow-step-warn-s", type=float, default=20.0)
     parser.add_argument("--save-figures", action=argparse.BooleanOptionalAction, default=True)
@@ -104,6 +109,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-screen-particles", type=int, default=None)
     parser.add_argument("--subsample-screens-random", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-lost-particles", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--save-beam-json", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--save-beam-summary", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--save-screen-phase-space-batch", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--save-screen-phase-space-json", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--calibrate-bl-r-over-q", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--t_max_mm", type=float, default=None)
     parser.add_argument("--seed", type=int, default=42)
 
@@ -162,6 +172,142 @@ def format_duration(seconds: float) -> str:
     return f"{m} min {s - 60 * m:.1f} s"
 
 
+def _safe_stat_summary(values: np.ndarray) -> dict[str, Any]:
+    arr = np.asarray(values, dtype=float)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return {"count": int(arr.size), "finite_count": 0, "min": None, "max": None, "mean": None}
+    return {
+        "count": int(arr.size),
+        "finite_count": int(finite.size),
+        "min": float(np.min(finite)),
+        "max": float(np.max(finite)),
+        "mean": float(np.mean(finite)),
+    }
+
+
+def _twiss_summary_from_phase_space(rg, M_snaps: list[np.ndarray]) -> dict[str, Any]:
+    alpha_x = []
+    beta_x = []
+    alpha_y = []
+    beta_y = []
+    alpha_z = []
+    beta_z = []
+    for M in M_snaps:
+        M_arr = np.asarray(M, dtype=float)
+        if M_arr.ndim != 2 or M_arr.shape[0] < 2 or M_arr.shape[1] < 6:
+            alpha_x.append(np.nan)
+            beta_x.append(np.nan)
+            alpha_y.append(np.nan)
+            beta_y.append(np.nan)
+            alpha_z.append(np.nan)
+            beta_z.append(np.nan)
+            continue
+        ax, bx, _ = rg.twiss_from_moments(M_arr[:, 0], M_arr[:, 1])
+        ay, by, _ = rg.twiss_from_moments(M_arr[:, 2], M_arr[:, 3])
+        az, bz, _ = rg.twiss_from_moments(M_arr[:, 4], M_arr[:, 5])
+        alpha_x.append(ax)
+        beta_x.append(bx)
+        alpha_y.append(ay)
+        beta_y.append(by)
+        alpha_z.append(az)
+        beta_z.append(bz)
+    return {
+        "alpha_x": _safe_stat_summary(np.asarray(alpha_x, dtype=float)),
+        "beta_x": _safe_stat_summary(np.asarray(beta_x, dtype=float)),
+        "alpha_y": _safe_stat_summary(np.asarray(alpha_y, dtype=float)),
+        "beta_y": _safe_stat_summary(np.asarray(beta_y, dtype=float)),
+        "alpha_z": _safe_stat_summary(np.asarray(alpha_z, dtype=float)),
+        "beta_z": _safe_stat_summary(np.asarray(beta_z, dtype=float)),
+    }
+
+
+def _emittance_summary_from_info(rg, info_snaps: list[Any]) -> dict[str, Any]:
+    geom_keys = {
+        "x": ["emit_x", "emittance_x", "eps_x", "epsilon_x", "ex"],
+        "y": ["emit_y", "emittance_y", "eps_y", "epsilon_y", "ey"],
+        "z": ["emit_z", "emittance_z", "eps_z", "epsilon_z", "ez"],
+    }
+    norm_keys = {
+        "x": ["emitt_x", "emit_nx", "emitnx", "norm_emit_x", "normalized_emittance_x", "eps_nx", "epsilon_nx"],
+        "y": ["emitt_y", "emit_ny", "emitny", "norm_emit_y", "normalized_emittance_y", "eps_ny", "epsilon_ny"],
+        "z": ["emitt_z", "emit_nz", "emitnz", "norm_emit_z", "normalized_emittance_z", "eps_nz", "epsilon_nz"],
+    }
+    out: dict[str, Any] = {}
+    for axis in ("x", "y", "z"):
+        geom = np.asarray([rg.info_get_first(info, geom_keys[axis]) for info in info_snaps], dtype=float)
+        norm = np.asarray([rg.info_get_first(info, norm_keys[axis]) for info in info_snaps], dtype=float)
+        out[f"eps_{axis}"] = _safe_stat_summary(geom)
+        out[f"eps_n{axis}"] = _safe_stat_summary(norm)
+    return out
+
+
+def _build_beam_summary(
+    *,
+    rg,
+    args: argparse.Namespace,
+    run_name: str,
+    result,
+    M0: np.ndarray,
+    Mf: np.ndarray,
+) -> dict[str, Any]:
+    z_snaps = np.asarray(result.z_snaps, dtype=float)
+    M_snaps = [np.asarray(M, dtype=float) for M in list(result.M_snaps)]
+    I_snaps = list(result.I_snaps)
+
+    evolution_n = np.asarray([float(np.asarray(M).shape[0]) for M in M_snaps], dtype=float) if M_snaps else np.asarray([], dtype=float)
+    evolution_mean_pz = np.asarray([
+        float(np.mean(np.asarray(M, dtype=float)[:, 5])) if np.asarray(M).ndim == 2 and np.asarray(M).shape[0] > 0 else np.nan
+        for M in M_snaps
+    ], dtype=float) if M_snaps else np.asarray([], dtype=float)
+
+    transmission = np.asarray([rg.info_get_first(info, ["transmission", "Transmission"]) for info in I_snaps], dtype=float) if I_snaps else np.asarray([], dtype=float)
+    screen_z_mm = (1e3 * z_snaps).tolist() if z_snaps.size else []
+
+    particle_classes = dict(result.particle_classes) if isinstance(result.particle_classes, dict) else {}
+    for k in ("initial_t0_mm_c", "initial_pz_MeV_c", "particle_id"):
+        particle_classes.pop(k, None)
+
+    return {
+        "run_name": str(run_name),
+        "run_family": str(args.run_family),
+        "scan_tags": [str(x) for x in (args.scan_tags or [])],
+        "scanned_parameters": {
+            "t_cathode_k": float(args.t_cathode_k),
+            "sc_dt_mm": float(args.sc_dt_mm),
+            "bl_cfx_dt_mm": float(args.cfx_dt_mm),
+            "ra_um": float(args.ra_um),
+            "re_um": float(args.re_um),
+        },
+        "major_toggles": {
+            "sc_enabled": bool(args.sc_enabled),
+            "beam_loading": bool(args.beam_loading),
+            "calibrate_bl_r_over_q": bool(args.calibrate_bl_r_over_q),
+            "phasor_mode": str(args.phasor_mode),
+            "emission_law": str(args.emission_law),
+        },
+        "particle_count": {
+            "requested": int(args.n_particles),
+            "initial": int(M0.shape[0]) if M0.ndim == 2 else 0,
+            "final": int(Mf.shape[0]) if Mf.ndim == 2 else 0,
+        },
+        "screen_positions_m": z_snaps.tolist(),
+        "screen_positions_mm": screen_z_mm,
+        "evolution_summary": {
+            "screen_count": int(len(M_snaps)),
+            "N": _safe_stat_summary(evolution_n),
+            "mean_pz_MeV_c": _safe_stat_summary(evolution_mean_pz),
+        },
+        "twiss_summary": _twiss_summary_from_phase_space(rg, M_snaps),
+        "emittance_summary": _emittance_summary_from_info(rg, I_snaps),
+        "transmission_summary": {
+            "rftrack_transmission": _safe_stat_summary(transmission),
+            "screen_summaries": to_jsonable(result.screen_summaries),
+            "particle_classes": to_jsonable(particle_classes),
+        },
+    }
+
+
 def main() -> None:
     t_sim_start = time.time()
 
@@ -170,6 +316,7 @@ def main() -> None:
     args = parse_args()
     apply_preset(args)
     rng = np.random.default_rng(int(args.seed) if args.seed is not None else None)
+
     if args.threads is not None:
         args.threads = rg.resolve_threads(requested=args.threads, default=1)
         rg.set_thread_environment(args.threads, pin_blas_threads=True)
@@ -188,8 +335,13 @@ def main() -> None:
         except Exception:
             pass
 
-    print(f"RF-Track max threads: {rft.max_number_of_threads}")
-    print(f"RF-Track chosen threads: {getattr(rft.cvar, 'number_of_threads', 'n/a')}")
+    slurm_cpus = os.environ.get("SLURM_CPUS_PER_TASK", "unset")
+    rftrack_max_threads = getattr(rft, "max_number_of_threads", "n/a")
+    rftrack_chosen_threads = getattr(rft.cvar, "number_of_threads", "n/a")
+
+    print(f"SLURM_CPUS_PER_TASK: {slurm_cpus}")
+    print(f"RF-Track max threads (detected): {rftrack_max_threads}")
+    print(f"RF-Track chosen threads (effective): {rftrack_chosen_threads}")
     print("---- Simulation Main Parameters ----")
     print(f"Particles: {int(args.n_particles):,}")
     print(f"N_Z_SNAP: {int(args.n_z_snap) if args.n_z_snap is not None else int(args.n_screens)}")
@@ -205,16 +357,16 @@ def main() -> None:
     print(f"sc_dt_mm: {float(args.sc_dt_mm)}")
     print(f"cfx_dt_mm: {float(args.cfx_dt_mm)}")
     if args.threads is None:
-        print("Thread policy: unmanaged (RF-Track/environment defaults)")
+        print("Thread policy: automatic detection")
     else:
         print(f"Thread policy: forced --threads={int(args.threads)}")
-    print(f"Env RF_TRACK_NUMBER_OF_THREADS={os.environ.get('RF_TRACK_NUMBER_OF_THREADS')}")
+    print(f"Env RF_TRACK_NUMBER_OF_THREADS={os.environ.get('RF_TRACK_NUMBER_OF_THREADS', 'unset')}")
     print(
         "BLAS thread env: "
-        f"OMP={os.environ.get('OMP_NUM_THREADS')} "
-        f"OPENBLAS={os.environ.get('OPENBLAS_NUM_THREADS')} "
-        f"MKL={os.environ.get('MKL_NUM_THREADS')} "
-        f"NUMEXPR={os.environ.get('NUMEXPR_NUM_THREADS')}"
+        f"OMP={os.environ.get('OMP_NUM_THREADS', 'unset')} "
+        f"OPENBLAS={os.environ.get('OPENBLAS_NUM_THREADS', 'unset')} "
+        f"MKL={os.environ.get('MKL_NUM_THREADS', 'unset')} "
+        f"NUMEXPR={os.environ.get('NUMEXPR_NUM_THREADS', 'unset')}"
     )
     if bool(args.timing_diagnostics):
         print(f"Timing diagnostics: ON (slow-step threshold={float(args.slow_step_warn_s):.2f} s)")
@@ -328,7 +480,7 @@ def main() -> None:
 
     phase_scan_n = max(3, int(args.phase_scan_n))
     phase_scan_n_part = max(1, int(args.phase_scan_n_part))
-    phase_scan_rel = np.linspace(0.0, 360.0, phase_scan_n)
+    phase_scan_rel = np.linspace(float(args.phase_scan_min), float(args.phase_scan_max), phase_scan_n)
     vol_params_cal = rg.VolumeBuildParams(
         f_hz=f_hz,
         map_z0_m=z_min,
@@ -378,7 +530,11 @@ def main() -> None:
     r_over_q_ohm = (veff_v**2) / (p_del_w * q_loaded)
     bl_r_over_q_ohm_per_m = r_over_q_per_m(veff_v, p_del_w, q_loaded, l_eff_m)
 
-    print("Beam-loading R/Q per m updated from phase scan.")
+    if bool(args.beam_loading) and bool(args.calibrate_bl_r_over_q):
+        print("Beam-loading R/Q per m updated from phase scan.")
+    else:
+        bl_r_over_q_ohm_per_m = float(args.bl_r_over_q_ohm_per_m)
+        print("Beam-loading R/Q per m kept fixed from CLI/default value.")
     print(f"Phase scan elapsed: {format_duration(t_phase_scan_elapsed)}")
     print(f"Veff = {veff_v/1e6:.6f} MV")
     print(f"(R/Q) from scan = {r_over_q_ohm:.3e} Ω")
@@ -491,6 +647,7 @@ def main() -> None:
         tracking,
         diagnostics=diagnostics,
         progress_bar=bool(args.progress_bar),
+        progress_notebook_mode=str(args.progress_notebook_mode),
         use_coarse_progress_proxy=True,
         poll_interval_s=float(args.poll_interval_s),
         timing_diagnostics=bool(args.timing_diagnostics),
@@ -511,6 +668,12 @@ def main() -> None:
         for i, M in enumerate(result.M_snaps):
             npz_payload[f"screen_phase_space_{i:04d}"] = np.asarray(M)
     np.savez_compressed(npz_path, **npz_payload)
+
+    b0_json_path = None
+    bout_json_path = None
+    if bool(args.save_beam_json):
+        b0_json_path = rg.save_beam_phase_space_json(output_dir / "B0.json", m0, label="B0")
+        bout_json_path = rg.save_beam_phase_space_json(output_dir / "Bout.json", mf, label="Bout")
 
     thermo_summary = {
         k: to_jsonable(v)
@@ -538,6 +701,28 @@ def main() -> None:
             lost_table=result.lost_table,
         )
 
+    screen_phase_space_batch = None
+    if bool(args.save_screen_phase_space_batch):
+        n_real_ref = abs(float(result.thermo_info.get("Q_total_C", np.nan))) / rg.q_e if result.thermo_info else None
+        plot_style = rg.PlotStyleConfig(dezoom_frac=0.05)
+        screen_phase_space_batch = rg.save_screen_phase_space_batch(
+            output_dir=output_dir,
+            M_snaps=list(result.M_snaps),
+            z_snaps=list(result.z_snaps),
+            info_snaps=list(result.I_snaps),
+            B0=result.B0,
+            Bout=result.Bout,
+            phase_fmt=phase_fmt,
+            clean_e=False,
+            clean_except_zpz=True,
+            n_real_ref=n_real_ref,
+            n_macroparticles=int(args.n_particles),
+            style=plot_style,
+            highlight_mode="zlt0",
+            show_colorbar=False,
+            save_json=bool(args.save_screen_phase_space_json),
+        )
+
     saved_screen_json = 0
     if bool(args.save_screen_json):
         saved_screen_json = rg.save_screen_distributions_json(
@@ -550,6 +735,20 @@ def main() -> None:
 
     lost_path = rg.save_lost_particles_json(output_dir, result.lost_table) if bool(args.save_lost_particles) else None
 
+    beam_summary_path = None
+    if bool(args.save_beam_summary):
+        beam_summary = _build_beam_summary(
+            rg=rg,
+            args=args,
+            run_name=output_dir.name,
+            result=result,
+            M0=m0,
+            Mf=mf,
+        )
+        beam_summary_path = output_dir / "beam_summary.json"
+        with beam_summary_path.open("w", encoding="utf-8") as f:
+            json.dump(to_jsonable(beam_summary), f, indent=2, sort_keys=True)
+
     classes_summary = dict(result.particle_classes) if isinstance(result.particle_classes, dict) else {}
     for heavy_key in ("initial_t0_mm_c", "initial_pz_MeV_c", "particle_id"):
         if heavy_key in classes_summary:
@@ -557,12 +756,16 @@ def main() -> None:
 
     run_metadata: Dict[str, Any] = {
         "timestamp_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "run_family": str(args.run_family),
+        "scan_tags": [str(x) for x in (args.scan_tags or [])],
         "args": to_jsonable(vars(args)),
         "rftrack": {
             "max_number_of_threads": to_jsonable(getattr(rft, "max_number_of_threads", None)),
             "number_of_threads": to_jsonable(getattr(rft.cvar, "number_of_threads", None)),
+            "thread_policy": "automatic detection" if args.threads is None else f"forced ({int(args.threads)})",
         },
         "thread_env": {
+            "SLURM_CPUS_PER_TASK": os.environ.get("SLURM_CPUS_PER_TASK"),
             "RF_TRACK_NUMBER_OF_THREADS": os.environ.get("RF_TRACK_NUMBER_OF_THREADS"),
             "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"),
             "OPENBLAS_NUM_THREADS": os.environ.get("OPENBLAS_NUM_THREADS"),
@@ -613,7 +816,13 @@ def main() -> None:
         "screen_summaries": to_jsonable(result.screen_summaries),
         "particle_classes": to_jsonable(classes_summary),
         "saved_figures": saved_figures,
+        "screen_phase_space_batch": to_jsonable(screen_phase_space_batch),
         "saved_screen_json_count": int(saved_screen_json),
+        "beam_json": {
+            "B0": str(b0_json_path) if b0_json_path is not None else None,
+            "Bout": str(bout_json_path) if bout_json_path is not None else None,
+        },
+        "beam_summary_file": str(beam_summary_path) if beam_summary_path is not None else None,
         "lost_particles_file": str(lost_path) if lost_path is not None else None,
     }
 
@@ -645,8 +854,14 @@ def main() -> None:
         )
     print(f"Output dir: {output_dir.resolve()}")
     print(f"Saved: {npz_path.name}, {metadata_path.name}, {progress_path.name}")
+    if b0_json_path is not None and bout_json_path is not None:
+        print(f"Saved beam JSON: {b0_json_path.name}, {bout_json_path.name}")
+    if beam_summary_path is not None:
+        print(f"Saved beam summary: {beam_summary_path.name}")
     if saved_figures:
         print(f"Saved {len(saved_figures)} figure files (.png/.eps)")
+    if screen_phase_space_batch is not None:
+        print(f"Saved cinematic phase-space frames: {int(screen_phase_space_batch.get('frame_count', 0))}")
     if saved_screen_json:
         print(f"Saved {saved_screen_json} per-screen JSON files")
     if lost_path is not None:

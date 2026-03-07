@@ -1,6 +1,7 @@
 """Batch plotting entry points for run outputs."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -9,8 +10,11 @@ import numpy as np
 from ..diagnostics import build_screen_summaries
 from ..constants import c
 from .emission import plot_emission_history, plot_j_vs_n
-from .evolution import plot_evolution, plot_twiss_evolution, plot_transmission_evolution
-from .phase_space import plot_phase_space, plot_spectra
+from .evolution import plot_evolution, plot_twiss_evolution, plot_emittance_evolution, plot_transmission_evolution
+from .phase_space import plot_phase_space, plot_spectra, plot_screen_phase_space_slider
+
+
+PHASE_SPACE_COLUMNS = ["x_mm", "px_MeV_c", "y_mm", "py_MeV_c", "z_mm", "pz_MeV_c"]
 
 
 def _save_figure(fig, output_dir: Path, stem: str) -> list[str]:
@@ -103,6 +107,150 @@ def plot_class_conditioned_histograms(
     return fig
 
 
+def save_beam_phase_space_json(
+    output_path: Path,
+    M: np.ndarray,
+    *,
+    phase_space_columns: Sequence[str] | None = None,
+    label: str | None = None,
+) -> Path:
+    """Save one phase-space matrix to JSON with explicit schema fields."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    arr = np.asarray(M, dtype=float)
+    if arr.ndim != 2:
+        arr = np.zeros((0, 6), dtype=float)
+
+    cols = list(phase_space_columns) if phase_space_columns is not None else list(PHASE_SPACE_COLUMNS)
+    payload = {
+        "schema_version": 1,
+        "label": str(label) if label is not None else None,
+        "phase_space_columns": cols,
+        "particle_count": int(arr.shape[0]),
+        "phase_space": arr.tolist(),
+    }
+
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    return output_path
+
+
+def save_screen_phase_space_batch(
+    output_dir: Path,
+    M_snaps: Sequence[np.ndarray],
+    z_snaps: Sequence[float],
+    info_snaps: Sequence[Any] | None = None,
+    *,
+    B0=None,
+    Bout=None,
+    phase_fmt: str = "%X %Px %Y %Py %Z %Pz",
+    clean_e: bool = True,
+    clean_except_zpz: bool = False,
+    n_real_ref: float | None = None,
+    n_macroparticles: int | None = None,
+    style=None,
+    highlight_mode: str | None = None,
+    show_colorbar: bool = False,
+    save_json: bool = True,
+) -> dict[str, Any]:
+    """Save non-interactive phase-space figures for B0, screens and Bout."""
+    import matplotlib.pyplot as plt
+
+    output_dir = Path(output_dir)
+    fig_dir = output_dir / "screen_phase_space_frames"
+    json_dir = output_dir / "screen_phase_space_json"
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    if save_json:
+        json_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest: list[dict[str, Any]] = []
+    frame_idx = 0
+
+    def _z_tag(z_mm: float) -> str:
+        return f"{z_mm:+.3f}".replace("+", "p").replace("-", "m").replace(".", "p")
+
+    def _save_single(
+        label: str,
+        stem: str,
+        *,
+        M_local: np.ndarray,
+        z_local: float | None = None,
+        info_local: Any = None,
+        B0_local=None,
+        Bout_local=None,
+    ) -> None:
+        nonlocal frame_idx
+        plot_screen_phase_space_slider(
+            M_snaps=[np.asarray(M_local, dtype=float)] if M_local is not None else [],
+            z_snaps=[float(z_local)] if z_local is not None else [],
+            info_snaps=[info_local] if info_local is not None else None,
+            clean_e=clean_e,
+            n_real_ref=n_real_ref,
+            n_macroparticles=n_macroparticles,
+            style=style,
+            highlight_mode=highlight_mode,
+            show_colorbar=show_colorbar,
+            B0=B0_local,
+            Bout=Bout_local,
+            phase_fmt=phase_fmt,
+            clean_except_zpz=clean_except_zpz,
+        )
+        fig_files = _capture_current_figure(stem, fig_dir)
+        json_file = None
+        if save_json:
+            json_path = save_beam_phase_space_json(
+                json_dir / f"{stem}.json",
+                np.asarray(M_local, dtype=float),
+                label=label,
+            )
+            json_file = json_path.name
+        manifest.append(
+            {
+                "frame_index": int(frame_idx),
+                "label": label,
+                "z_mm": float(z_local) if z_local is not None else None,
+                "figure_files": fig_files,
+                "json_file": json_file,
+            }
+        )
+        frame_idx += 1
+        plt.close("all")
+
+    if B0 is not None:
+        M0 = np.array(B0.get_phase_space(phase_fmt, "all"), copy=True)
+        _save_single("B0", f"frame_{frame_idx:04d}_B0", M_local=M0, B0_local=B0)
+
+    z_mm = 1e3 * np.asarray(z_snaps, dtype=float) if z_snaps is not None else np.asarray([], dtype=float)
+    n_screens = min(len(M_snaps), int(z_mm.size))
+    for i in range(n_screens):
+        info_i = info_snaps[i] if (info_snaps is not None and i < len(info_snaps)) else None
+        z_i = float(z_mm[i])
+        stem = f"frame_{frame_idx:04d}_screen_{i+1:03d}_z{_z_tag(z_i)}mm"
+        _save_single(
+            f"screen_{i+1}",
+            stem,
+            M_local=np.asarray(M_snaps[i], dtype=float),
+            z_local=float(z_snaps[i]),
+            info_local=info_i,
+        )
+
+    if Bout is not None:
+        Mf = np.array(Bout.get_phase_space(phase_fmt, "all"), copy=True)
+        _save_single("Bout", f"frame_{frame_idx:04d}_Bout", M_local=Mf, Bout_local=Bout)
+
+    manifest_path = output_dir / "screen_phase_space_manifest.json"
+    with manifest_path.open("w", encoding="utf-8") as f:
+        json.dump({"frames": manifest}, f, indent=2)
+
+    return {
+        "frame_count": int(len(manifest)),
+        "figure_dir": str(fig_dir),
+        "json_dir": str(json_dir) if save_json else None,
+        "manifest_file": str(manifest_path),
+    }
+
+
 def save_run_figures(
     output_dir: Path,
     B0,
@@ -139,6 +287,9 @@ def save_run_figures(
 
         plot_twiss_evolution(M_snaps, z_snaps, info_snaps=I_snaps, clean_e=clean_e)
         saved += _capture_current_figure("twiss_evolution", output_dir)
+
+        plot_emittance_evolution(z_snaps, info_snaps=I_snaps)
+        saved += _capture_current_figure("emittance_evolution", output_dir)
 
     if z_snaps and I_snaps:
         plot_transmission_evolution(
