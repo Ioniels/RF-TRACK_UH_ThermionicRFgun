@@ -5,6 +5,8 @@ from typing import Sequence
 
 import numpy as np
 
+from ..constants import c
+
 
 def _twiss_from_moments(u: np.ndarray, pu: np.ndarray):
     if u.size < 2 or pu.size < 2:
@@ -60,6 +62,13 @@ def _info_get_first(info, keys: Sequence[str]):
         if np.isfinite(fval):
             return fval
     return np.nan
+
+
+def _extract_time_ns_from_info(info):
+    t_mm_c = _info_get_first(info, ["t", "mean_t", "mean_T"])
+    if not np.isfinite(t_mm_c):
+        return np.nan
+    return float((t_mm_c * 1e-3 / c) * 1e9)
 
 
 def plot_evolution(
@@ -255,8 +264,14 @@ def plot_twiss_evolution(
 def plot_transmission_evolution(
     z_snaps: Sequence[float],
     info_snaps: Sequence[object],
+    n_real_ref: float | None = None,
+    n_macroparticles: int | None = None,
 ):
-    """Plot transmission (number of particles in bunch) vs z from RF-Track get_info()."""
+    """Plot transmission vs z from RF-Track get_info().
+
+    `info_snaps` transmission is RF-Track's *real-particle equivalent* count, not
+    the number of simulated macroparticles.
+    """
     import matplotlib.pyplot as plt
 
     if not len(z_snaps) or info_snaps is None or len(info_snaps) != len(z_snaps):
@@ -265,12 +280,40 @@ def plot_transmission_evolution(
 
     z_mm = 1e3 * np.asarray(z_snaps)
     transmission = np.asarray([float(_info_get(info, "transmission")) for info in info_snaps])
+    t_ns = np.asarray([_extract_time_ns_from_info(info) for info in info_snaps])
 
     fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(z_mm, transmission, "o-", ms=3, color="tab:green")
+    if n_real_ref is not None and np.isfinite(n_real_ref) and n_real_ref > 0:
+        frac = 100.0 * transmission / float(n_real_ref)
+        ax.plot(z_mm, frac, "o-", ms=3, color="tab:blue", label="fraction of emitted charge")
+        ax.set_ylabel("Transmission [% of emitted charge]")
+
+        if n_macroparticles is not None and int(n_macroparticles) > 0:
+            macro_eq = transmission / float(n_real_ref) * int(n_macroparticles)
+            ax2 = ax.twinx()
+            ax2.plot(z_mm, macro_eq, "--", lw=1.3, color="tab:green", label="macro-equivalent")
+            ax2.set_ylabel("Equivalent macroparticles")
+            h1, l1 = ax.get_legend_handles_labels()
+            h2, l2 = ax2.get_legend_handles_labels()
+            ax.legend(h1 + h2, l1 + l2, frameon=False, loc="best")
+    else:
+        ax.plot(z_mm, transmission, "o-", ms=3, color="tab:green", label="real-particle equivalent")
+        ax.set_ylabel("Transmission [real-particle equivalent]")
+        ax.legend(frameon=False)
+
     ax.set_xlabel("z [mm]")
-    ax.set_ylabel("Transmission [particles]")
     ax.set_title("Transmission vs z (RF-Track get_info)")
+    if np.any(np.isfinite(t_ns)):
+        i0 = int(np.nanargmin(np.abs(z_mm - z_mm[0])))
+        i1 = int(np.nanargmin(np.abs(z_mm - z_mm[-1])))
+        ax.text(
+            0.02,
+            0.97,
+            f"t span ≈ {t_ns[i0]:.3f} to {t_ns[i1]:.3f} ns",
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+        )
     ax.grid(alpha=0.3)
     plt.tight_layout()
     plt.show()

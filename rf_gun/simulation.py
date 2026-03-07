@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Literal
-import threading
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Literal
 import time
+import os
+import json
+import hashlib
+import multiprocessing as mp
+from pathlib import Path
 
 import numpy as np
 
@@ -18,7 +22,12 @@ from .emission_models import (
     schottky_delta_phi_eV,
 )
 from .emission_sampling import apply_roughness, sample_thermionic_momenta
-from .rftrack_volume import build_volume, track_volume_with_screens, VolumeBuildParams
+from .rftrack_volume import (
+    build_volume,
+    track_volume_with_screens,
+    VolumeBuildParams,
+    ScreenBuildParams,
+)
 
 
 @dataclass(frozen=True)
@@ -48,6 +57,12 @@ class TrackingParams:
     n_particles: int
     z_screens_m: Optional[Sequence[float]] = None
     phase_fmt: str = "%X %Px %Y %Py %Z %Pz"
+    screen_width_mm: float | None = None
+    screen_height_mm: float | None = None
+    screen_time_window_mm_c: float | None = None
+    screen_t0_mode: Literal["unset", "sync_to_first_crossing", "manual"] = "unset"
+    screen_t0_manual_mm_c: float = 0.0
+    screen_log: bool = False
 
 
 @dataclass
@@ -60,7 +75,141 @@ class SimulationResult:
     I_snaps: List[Any]
 
 
-_TRANSPORT_RUNTIME_HISTORY: Dict[tuple, float] = {}
+_RUNTIME_HISTORY_CACHE = Path(
+    os.environ.get(
+        "RF_GUN_RUNTIME_CACHE",
+        str(Path(__file__).resolve().parents[1] / ".rf_gun_transport_runtime_history.json"),
+    )
+)
+
+
+def _load_transport_runtime_history() -> Dict[str, float]:
+    if not _RUNTIME_HISTORY_CACHE.exists():
+        return {}
+    try:
+        with _RUNTIME_HISTORY_CACHE.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+        hist = payload.get("history", {}) if isinstance(payload, dict) else {}
+        out: Dict[str, float] = {}
+        if isinstance(hist, dict):
+            for key, val in hist.items():
+                try:
+                    out[str(key)] = float(val)
+                except Exception:
+                    continue
+        return out
+    except Exception:
+        return {}
+
+
+def _save_transport_runtime_history(history: Dict[str, float]) -> None:
+    try:
+        _RUNTIME_HISTORY_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"version": 1, "history": history}
+        with _RUNTIME_HISTORY_CACHE.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+    except Exception:
+        pass
+
+
+_TRANSPORT_RUNTIME_HISTORY: Dict[str, float] = _load_transport_runtime_history()
+
+
+def _elapsed_progress_worker(
+    stop_event,
+    est_for_proxy_s: float,
+    poll_interval_s: float,
+):
+    try:
+        from tqdm.auto import tqdm
+    except Exception:
+        return
+
+    start_s = time.time()
+    with tqdm(total=100, desc="tracking", unit="%", leave=False) as tbar:
+        while not stop_event.is_set():
+            proxy = min(98.0, 100.0 * (time.time() - start_s) / max(1e-9, float(est_for_proxy_s)))
+            tbar.n = int(proxy)
+            tbar.refresh()
+
+            time.sleep(max(0.1, float(poll_interval_s)))
+
+        tbar.n = 100
+        tbar.refresh()
+
+
+def _runtime_key_payload(vol_params_eff: VolumeBuildParams, tracking: TrackingParams, n_screens: int) -> Dict[str, Any]:
+    return {
+        "n_particles": int(tracking.n_particles),
+        "dt_mm": float(getattr(vol_params_eff, "dt_mm", np.nan)),
+        "sc_dt_mm": float(getattr(vol_params_eff, "sc_dt_mm", np.nan)),
+        "emission_nsteps": int(getattr(vol_params_eff, "emission_nsteps", 0)),
+        "emission_range": float(getattr(vol_params_eff, "emission_range", np.nan)),
+        "n_screens": int(n_screens),
+        "sc_enabled": bool(getattr(vol_params_eff, "sc_enabled", False)),
+        "beam_loading_enabled": bool(getattr(vol_params_eff, "beam_loading_enabled", False)),
+        "phi_deg": float(getattr(tracking, "phi_deg", np.nan)),
+    }
+
+
+def _runtime_key_string(payload: Dict[str, Any]) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _runtime_key_hash(runtime_key: str) -> str:
+    return hashlib.sha1(runtime_key.encode("utf-8")).hexdigest()[:12]
+
+
+def _build_screen_params(tracking: TrackingParams) -> ScreenBuildParams:
+    return ScreenBuildParams(
+        width_mm=tracking.screen_width_mm,
+        height_mm=tracking.screen_height_mm,
+        time_window_mm_c=tracking.screen_time_window_mm_c,
+        t0_mode=tracking.screen_t0_mode,
+        t0_manual_mm_c=tracking.screen_t0_manual_mm_c,
+        log=tracking.screen_log,
+    )
+
+
+def screen_progress_callback(i: int, z_m: float, stats: Dict[str, float]) -> None:
+    """
+    Example callback for per-screen progress reporting during transport.
+    
+    Fires AFTER RF-TRACK transport completes, during screen snapshot extraction.
+    This is useful for tracking particle losses and diagnostics across screens.
+    
+    Note: Live RF-TRACK solver feedback during integration is not available with
+    current Python API bindings; RF-Track stepping callbacks are internal to C++.
+    
+    Args:
+        i: Screen index (0, 1, 2, ...)
+        z_m: Screen z position in meters
+        stats: Dict with keys:
+            - N: Number of particles at screen
+            - mean_pz: Mean longitudinal momentum [MeV/c]
+            - N_lost_since_prev: Particles lost since previous screen (if computed)
+    
+    Example:
+        >>> result, stats = run_transport_with_progress(..., on_screen=screen_progress_callback)
+    """
+    import sys
+    N_lost = stats.get("N_lost_since_prev", None)
+    lost_str = f" | lost_since_prev={N_lost}" if N_lost is not None and N_lost > 0 else ""
+    print(
+        f"  [screen {i}] z={z_m:.4g} m | N={int(stats['N'])} | "
+        f"pz_mean={stats['mean_pz']:.4g} MeV/c{lost_str}",
+        file=sys.stdout, flush=True
+    )
+
+
+def _snapshot_stats(M: np.ndarray) -> Dict[str, float]:
+    if M.size == 0:
+        return {"N": 0, "mean_pz": np.nan, "N_lost_since_prev": np.nan}
+    return {
+        "N": int(M.shape[0]),
+        "mean_pz": float(np.mean(M[:, 5])) if M.shape[1] > 5 else np.nan,
+        "N_lost_since_prev": np.nan,
+    }
 
 
 def _resolve_beam_loading_tinj(
@@ -335,7 +484,11 @@ def run_phase_scan(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Fast phase scan (on-axis, cold launch)."""
     phase_scan = []
-    vol_params_fast = vol_params.replace(sc_enabled=False)
+    vol_params_fast = vol_params.replace(
+        sc_enabled=False,
+        beam_loading_enabled=False,
+        beam_loading_verbose=False,
+    )
 
     for phi in phase_rel_deg:
         phi_abs = (float(phi) + float(transport_phase_deg)) % 360.0
@@ -364,6 +517,7 @@ def run_transport(
     vol_params: VolumeBuildParams,
     emission: EmissionParams,
     tracking: TrackingParams,
+    on_screen: Optional[Callable[[int, float, Dict[str, float]], None]] = None,
 ) -> SimulationResult:
     """Run a thermionic transport simulation with optional screens."""
     B0, thermo_info = build_bunch_thermionic(
@@ -380,6 +534,7 @@ def run_transport(
     if tracking.z_screens_m is not None:
         z_snaps = list(tracking.z_screens_m)
     if len(z_snaps) > 0:
+        screen_params = _build_screen_params(tracking)
         Bout, snaps = track_volume_with_screens(
             rft,
             Er_grid,
@@ -388,6 +543,7 @@ def run_transport(
             vol_params_eff,
             B0,
             z_snaps,
+            screen_params=screen_params,
         )
     else:
         V = build_volume(rft, Er_grid, Ez_grid, tracking.phi_deg, vol_params_eff)
@@ -395,9 +551,21 @@ def run_transport(
         snaps = []
 
     M_snaps = [
-        np.array(s.get_phase_space(tracking.phase_fmt, "good"), copy=True) for s in snaps
+        np.array(s.get_phase_space(tracking.phase_fmt, "all"), copy=True) for s in snaps
     ] if snaps else []
     I_snaps = [s.get_info() if hasattr(s, "get_info") else None for s in snaps] if snaps else []
+
+    if z_snaps and np.any(np.diff(np.asarray(z_snaps, dtype=float)) < 0.0):
+        print("Warning: z_screens_m is not monotonic increasing.")
+
+    if on_screen is not None and M_snaps:
+        prev_n = None
+        for i, (z_m, M) in enumerate(zip(z_snaps, M_snaps)):
+            stats = _snapshot_stats(M)
+            if prev_n is not None and np.isfinite(prev_n):
+                stats["N_lost_since_prev"] = float(prev_n - stats["N"])
+            prev_n = float(stats["N"])
+            on_screen(i, float(z_m), stats)
 
     return SimulationResult(
         B0=B0,
@@ -419,21 +587,14 @@ def run_transport_with_progress(
     tracking: TrackingParams,
     use_coarse_progress_proxy: bool = True,
     poll_interval_s: float = 0.5,
+    on_screen: Optional[Callable[[int, float, Dict[str, float]], None]] = None,
 ):
-    """Run transport with staged progress bars and coarse runtime proxy.
+    """Run transport with staged text and a single tracking progress bar.
 
     Returns:
         (SimulationResult, stats_dict)
-        where stats_dict has `track_elapsed_s` and `track_estimate_s`.
+        where stats_dict has `track_elapsed_s`, `track_estimate_s`, `runtime_key_hash`.
     """
-
-    try:
-        from tqdm.auto import tqdm
-    except Exception:
-        start_s = time.time()
-        result = run_transport(rft, Er_grid, Ez_grid, Ez0_phasor_axis, vol_params, emission, tracking)
-        elapsed_s = time.time() - start_s
-        return result, {"track_elapsed_s": elapsed_s, "track_estimate_s": np.nan}
 
     stages = [
         "Build thermionic bunch",
@@ -442,11 +603,11 @@ def run_transport_with_progress(
         "Extract phase-space snapshots",
         "Extract screen info",
     ]
-    pbar = tqdm(total=len(stages), desc="Transport", unit="stage")
 
     def _set_stage(i: int):
-        pbar.set_description_str(f"[{i}/{len(stages)}] {stages[i-1]}")
+        print(f"{i} / {len(stages)}: {stages[i-1]}")
 
+    print("---- Simulation Start ----")
     _set_stage(1)
     B0, thermo_info = build_bunch_thermionic(
         rft,
@@ -457,91 +618,120 @@ def run_transport_with_progress(
         Ez0_phasor_axis=Ez0_phasor_axis,
     )
     vol_params_eff = _resolve_beam_loading_tinj(vol_params, B0, thermo_info)
-    pbar.update(1)
 
     _set_stage(2)
     z_snaps = list(tracking.z_screens_m) if tracking.z_screens_m is not None else []
-    pbar.update(1)
 
-    runtime_key = (
-        int(tracking.n_particles),
-        float(getattr(vol_params_eff, "dt_mm", np.nan)),
-        float(getattr(vol_params_eff, "sc_dt_mm", np.nan)),
-        int(getattr(vol_params_eff, "emission_nsteps", 0)),
-        float(getattr(vol_params_eff, "emission_range", np.nan)),
-        len(z_snaps),
-        bool(getattr(vol_params_eff, "sc_enabled", False)),
-        bool(getattr(vol_params_eff, "beam_loading_enabled", False)),
-    )
+    runtime_payload = _runtime_key_payload(vol_params_eff, tracking, len(z_snaps))
+    runtime_key = _runtime_key_string(runtime_payload)
+    runtime_key_hash = _runtime_key_hash(runtime_key)
     est_s = _TRANSPORT_RUNTIME_HISTORY.get(runtime_key, None)
+    history_vals = [float(v) for v in _TRANSPORT_RUNTIME_HISTORY.values() if np.isfinite(v) and float(v) > 0.0]
+    heuristic_est_s = float(np.median(history_vals)) if history_vals else 300.0
 
-    _track_state: Dict[str, Any] = {}
+    settings_line = (
+        f"Tracking settings | N={int(tracking.n_particles):,} | dt_mm={float(getattr(vol_params_eff, 'dt_mm', np.nan)):.4g} "
+        f"| sc_dt_mm={float(getattr(vol_params_eff, 'sc_dt_mm', np.nan)):.4g} "
+        f"| emission_sc_steps={int(getattr(vol_params_eff, 'emission_nsteps', 0))} "
+        f"| screens={len(z_snaps)} | sc={'on' if bool(getattr(vol_params_eff, 'sc_enabled', False)) else 'off'} "
+        f"| bl={'on' if bool(getattr(vol_params_eff, 'beam_loading_enabled', False)) else 'off'} "
+        f"| mode=elapsed | key={runtime_key_hash}"
+    )
+    print(settings_line)
+    print("(emission_sc_steps = number of SC kicks/substeps applied during emission)")
 
-    def _track_worker():
-        try:
-            if len(z_snaps) > 0:
-                Bout, snaps = track_volume_with_screens(
-                    rft,
-                    Er_grid,
-                    Ez_grid,
-                    tracking.phi_deg,
-                    vol_params_eff,
-                    B0,
-                    z_snaps,
-                )
-            else:
-                V = build_volume(rft, Er_grid, Ez_grid, tracking.phi_deg, vol_params_eff)
-                Bout = V.track(B0)
-                snaps = []
-            _track_state["Bout"] = Bout
-            _track_state["snaps"] = snaps
-        except Exception as exc:
-            _track_state["error"] = exc
+    if bool(getattr(vol_params_eff, "beam_loading_enabled", False)):
+        omega = 2.0 * np.pi * float(getattr(vol_params_eff, "f_hz", np.nan))
+        tau_s = 2.0 * float(getattr(vol_params_eff, "bl_Q_loaded", 0.0)) / omega if omega > 0.0 else np.nan
+        mode = str(getattr(vol_params_eff, "bl_tinj_mode", "manual")).strip().lower()
+        tinj_mm_c = float(getattr(vol_params_eff, "bl_tinj_manual_mm_c", 0.0)) if mode == "manual" else 0.0
+        tinj_s = (tinj_mm_c * 1e-3) / c
+        tinj_tau = tinj_s / tau_s if np.isfinite(tau_s) and tau_s > 0.0 else np.nan
+        print(
+            "Beam-loading timing | "
+            f"tau={tau_s:.4e} s | tinj={tinj_mm_c:.4e} mm/c | tinj/tau={tinj_tau:.4e}"
+        )
+
+    if est_s is not None and np.isfinite(est_s):
+        print(f"Last-run estimate for this key: {float(est_s):.2f} s")
+    else:
+        print(f"No exact runtime estimate for this key yet; using heuristic estimate: {heuristic_est_s:.2f} s")
 
     _set_stage(3)
-    thread = threading.Thread(target=_track_worker, daemon=True)
-    thread.start()
-
     track_start_s = time.time()
-    with tqdm(total=100, desc="tracking", unit="%", leave=False) as tbar:
-        while thread.is_alive():
-            elapsed = time.time() - track_start_s
-            if use_coarse_progress_proxy and est_s is not None and est_s > 0:
-                proxy = min(98.0, 100.0 * elapsed / est_s)
-                tbar.n = int(proxy)
-                tbar.set_postfix_str(f"elapsed={elapsed:,.1f}s | proxy={proxy:5.1f}% | est={est_s:,.1f}s")
-            else:
-                tbar.set_postfix_str(f"elapsed={elapsed:,.1f}s")
-            tbar.refresh()
-            time.sleep(max(0.1, float(poll_interval_s)))
-        thread.join()
-        tbar.n = 100
-        tbar.refresh()
 
-    if "error" in _track_state:
-        pbar.close()
-        raise _track_state["error"]
+    est_for_proxy = None
+    if est_s is not None and np.isfinite(est_s) and est_s > 0:
+        est_for_proxy = float(est_s)
+    elif use_coarse_progress_proxy:
+        est_for_proxy = float(heuristic_est_s)
+    else:
+        est_for_proxy = max(1.0, float(heuristic_est_s))
+
+    stop_event = mp.Event()
+    progress_proc = mp.Process(
+        target=_elapsed_progress_worker,
+        args=(stop_event, est_for_proxy, float(poll_interval_s)),
+        daemon=True,
+    )
+    progress_proc.start()
+
+    vol_params_track = vol_params_eff.replace(beam_loading_verbose=False)
+
+    try:
+        if len(z_snaps) > 0:
+            screen_params = _build_screen_params(tracking)
+            Bout, snaps = track_volume_with_screens(
+                rft,
+                Er_grid,
+                Ez_grid,
+                tracking.phi_deg,
+                vol_params_track,
+                B0,
+                z_snaps,
+                screen_params=screen_params,
+            )
+        else:
+            V = build_volume(rft, Er_grid, Ez_grid, tracking.phi_deg, vol_params_track)
+            Bout = V.track(B0)
+            snaps = []
+    finally:
+        stop_event.set()
+        progress_proc.join(timeout=2.0)
+        if progress_proc.is_alive():
+            progress_proc.terminate()
+            progress_proc.join(timeout=1.0)
+
+    M_snaps = [
+        np.array(s.get_phase_space(tracking.phase_fmt, "all"), copy=True) for s in snaps
+    ] if snaps else []
+    I_snaps = [s.get_info() if hasattr(s, "get_info") else None for s in snaps] if snaps else []
 
     track_elapsed_s = time.time() - track_start_s
+
     if est_s is None:
         _TRANSPORT_RUNTIME_HISTORY[runtime_key] = track_elapsed_s
     else:
         _TRANSPORT_RUNTIME_HISTORY[runtime_key] = 0.7 * float(est_s) + 0.3 * track_elapsed_s
-
-    Bout = _track_state["Bout"]
-    snaps = _track_state["snaps"]
-    pbar.update(1)
+    _save_transport_runtime_history(_TRANSPORT_RUNTIME_HISTORY)
 
     _set_stage(4)
-    M_snaps = [
-        np.array(s.get_phase_space(tracking.phase_fmt, "good"), copy=True) for s in snaps
-    ] if snaps else []
-    pbar.update(1)
+
+    if z_snaps and np.any(np.diff(np.asarray(z_snaps, dtype=float)) < 0.0):
+        print("Warning: z_screens_m is not monotonic increasing.")
+
+    if M_snaps:
+        prev_n = None
+        for i, (z_m, M) in enumerate(zip(z_snaps, M_snaps)):
+            stats = _snapshot_stats(M)
+            if prev_n is not None and np.isfinite(prev_n):
+                stats["N_lost_since_prev"] = float(prev_n - stats["N"])
+            prev_n = float(stats["N"])
+            if on_screen is not None:
+                on_screen(i, float(z_m), stats)
 
     _set_stage(5)
-    I_snaps = [s.get_info() if hasattr(s, "get_info") else None for s in snaps] if snaps else []
-    pbar.update(1)
-    pbar.close()
+    print("---- Simulation End ----")
 
     result = SimulationResult(
         B0=B0,
@@ -554,4 +744,7 @@ def run_transport_with_progress(
     return result, {
         "track_elapsed_s": float(track_elapsed_s),
         "track_estimate_s": float(_TRANSPORT_RUNTIME_HISTORY[runtime_key]),
+        "runtime_key_hash": runtime_key_hash,
+        "progress_mode": "elapsed",
+        "runtime_cache_file": str(_RUNTIME_HISTORY_CACHE),
     }

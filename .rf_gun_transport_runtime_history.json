@@ -1,0 +1,8 @@
+{
+  "history": {
+    "{\"beam_loading_enabled\":false,\"dt_mm\":0.5,\"emission_nsteps\":100,\"emission_range\":10.0,\"n_particles\":300,\"n_screens\":8,\"phi_deg\":0.0,\"sc_dt_mm\":0.5,\"sc_enabled\":false}": 157.77244305610657,
+    "{\"beam_loading_enabled\":true,\"dt_mm\":0.1,\"emission_nsteps\":100,\"emission_range\":10.0,\"n_particles\":1000,\"n_screens\":0,\"phi_deg\":0.0,\"sc_dt_mm\":0.2,\"sc_enabled\":true}": 168.40066029883627,
+    "{\"beam_loading_enabled\":true,\"dt_mm\":0.1,\"emission_nsteps\":100,\"emission_range\":10.0,\"n_particles\":1000,\"n_screens\":100,\"phi_deg\":0.0,\"sc_dt_mm\":0.2,\"sc_enabled\":true}": 88.92088222503662
+  },
+  "version": 1
+}

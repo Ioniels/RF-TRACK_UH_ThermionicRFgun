@@ -44,6 +44,23 @@ def _scatter_density(ax, x: np.ndarray, y: np.ndarray, bins: int = 80, cmap: str
     ax.scatter(x[order], y[order], c=density[order], cmap=cmap, s=10, alpha=0.7, edgecolors="none")
 
 
+def _extract_time_ns(info) -> float:
+    keys = ("t", "mean_t", "mean_T")
+    t_mm_c = np.nan
+    for key in keys:
+        try:
+            val = getattr(info, key)
+            val = val() if callable(val) else val
+            t_mm_c = float(val)
+            if np.isfinite(t_mm_c):
+                break
+        except Exception:
+            continue
+    if not np.isfinite(t_mm_c):
+        return np.nan
+    return float((t_mm_c * 1e-3 / c) * 1e9)
+
+
 def plot_spectra(
     Bout,
     transport_phase_deg: float,
@@ -226,7 +243,7 @@ def plot_phase_space(
 
     fig, axes = plt.subplots(2, 3, figsize=(13, 7))
 
-    _scatter_density(axes[0, 0], Mf_launch[:, 0], Mf_launch[:, 1], bins=80, cmap="hot")
+    _scatter_density(axes[0, 0], Mf_launch[:, 0], Mf_launch[:, 1], bins=80, cmap="hot_r")
     if show_zle0 and Mf_launch_bad.shape[0] > 0:
         axes[0, 0].scatter(Mf_launch_bad[:, 0], Mf_launch_bad[:, 1], s=8, alpha=0.55, c="red", edgecolors="none")
     axes[0, 0].set_xlabel("x [mm]")
@@ -234,7 +251,7 @@ def plot_phase_space(
     axes[0, 0].set_title("Launch: x-px")
     axes[0, 0].grid(alpha=0.3)
 
-    _scatter_density(axes[0, 1], Mf_launch[:, 2], Mf_launch[:, 3], bins=80, cmap="hot")
+    _scatter_density(axes[0, 1], Mf_launch[:, 2], Mf_launch[:, 3], bins=80, cmap="hot_r")
     if show_zle0 and Mf_launch_bad.shape[0] > 0:
         axes[0, 1].scatter(Mf_launch_bad[:, 2], Mf_launch_bad[:, 3], s=8, alpha=0.55, c="red", edgecolors="none")
     axes[0, 1].set_xlabel("y [mm]")
@@ -260,23 +277,179 @@ def plot_phase_space(
     axes[0, 2].legend(frameon=False)
     axes[0, 2].grid(alpha=0.3)
 
-    _scatter_density(axes[1, 0], Mf_f[:, 0], Mf_f[:, 1], bins=80, cmap="hot")
+    _scatter_density(axes[1, 0], Mf_f[:, 0], Mf_f[:, 1], bins=80, cmap="hot_r")
     axes[1, 0].set_xlabel("x [mm]")
     axes[1, 0].set_ylabel("px [MeV/c]")
     axes[1, 0].set_title("Exit: x-px")
     axes[1, 0].grid(alpha=0.3)
 
-    _scatter_density(axes[1, 1], Mf_f[:, 2], Mf_f[:, 3], bins=80, cmap="hot")
+    _scatter_density(axes[1, 1], Mf_f[:, 2], Mf_f[:, 3], bins=80, cmap="hot_r")
     axes[1, 1].set_xlabel("y [mm]")
     axes[1, 1].set_ylabel("py [MeV/c]")
     axes[1, 1].set_title("Exit: y-py")
     axes[1, 1].grid(alpha=0.3)
 
-    _scatter_density(axes[1, 2], Mf_f[:, 4], Mf_f[:, 5], bins=80, cmap="hot")
+    _scatter_density(axes[1, 2], Mf_f[:, 4], Mf_f[:, 5], bins=80, cmap="hot_r")
     axes[1, 2].set_xlabel("z [mm]")
     axes[1, 2].set_ylabel("pz [MeV/c]")
     axes[1, 2].set_title("Exit: z-pz")
     axes[1, 2].grid(alpha=0.3)
 
     plt.tight_layout()
+    plt.show()
+
+
+def plot_screen_phase_space_slider(
+    M_snaps: Sequence[np.ndarray],
+    z_snaps: Sequence[float],
+    info_snaps: Sequence[object] | None = None,
+    clean_e: bool = True,
+    bins: int = 80,
+):
+    """Interactive 3-panel phase-space view across screens.
+
+    Panels: x-px, y-py, z-pz at selected screen index.
+    Uses `ipywidgets` when available (works with inline backend), with a
+    matplotlib-slider fallback.
+    """
+    import matplotlib.pyplot as plt
+
+    if M_snaps is None or len(M_snaps) == 0:
+        print("No screen snapshots available.")
+        return
+
+    z_mm = 1e3 * np.asarray(z_snaps, dtype=float)
+    n = min(len(M_snaps), z_mm.size)
+    if n == 0:
+        print("No screen snapshots available.")
+        return
+
+    t_ns = None
+    if info_snaps is not None and len(info_snaps) >= n:
+        t_ns = np.asarray([_extract_time_ns(info_snaps[i]) for i in range(n)], dtype=float)
+
+    def _pick_data(i: int):
+        M = np.asarray(M_snaps[i], dtype=float)
+        if M.ndim != 2 or M.shape[1] < 6:
+            return np.empty((0, 6), dtype=float)
+        if clean_e:
+            good = np.isfinite(M[:, 4]) & (M[:, 4] > 0.0)
+            M = M[good]
+        else:
+            good = np.isfinite(M[:, 4])
+            M = M[good]
+        return M
+
+    def _title_for(i: int) -> str:
+        if t_ns is not None and np.isfinite(t_ns[i]):
+            return f"screen {i+1}/{n} | z={z_mm[i]:.3f} mm | t={t_ns[i]:.4f} ns"
+        return f"screen {i+1}/{n} | z={z_mm[i]:.3f} mm"
+
+    def _draw_figure(i: int):
+        fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.8))
+        M = _pick_data(i)
+        if M.shape[0] == 0:
+            for ax in axes:
+                ax.text(0.5, 0.5, "No particles", ha="center", va="center")
+                ax.grid(alpha=0.3)
+            fig.suptitle(_title_for(i))
+            plt.tight_layout()
+            plt.show()
+            return
+
+        _scatter_density(axes[0], M[:, 0], M[:, 1], bins=bins, cmap="hot_r")
+        axes[0].set_xlabel("x [mm]")
+        axes[0].set_ylabel("px [MeV/c]")
+        axes[0].set_title("x-px")
+        axes[0].grid(alpha=0.3)
+
+        _scatter_density(axes[1], M[:, 2], M[:, 3], bins=bins, cmap="hot_r")
+        axes[1].set_xlabel("y [mm]")
+        axes[1].set_ylabel("py [MeV/c]")
+        axes[1].set_title("y-py")
+        axes[1].grid(alpha=0.3)
+
+        _scatter_density(axes[2], M[:, 4], M[:, 5], bins=bins, cmap="hot_r")
+        axes[2].set_xlabel("z [mm]")
+        axes[2].set_ylabel("pz [MeV/c]")
+        axes[2].set_title("z-pz")
+        axes[2].grid(alpha=0.3)
+
+        fig.suptitle(_title_for(i))
+        plt.tight_layout()
+        plt.show()
+
+    try:
+        import ipywidgets as widgets
+        from IPython.display import clear_output, display
+
+        slider = widgets.IntSlider(
+            value=0,
+            min=0,
+            max=n - 1,
+            step=1,
+            description="Screen",
+            continuous_update=False,
+        )
+        output = widgets.Output()
+
+        def _on_value_change(change):
+            i = int(change["new"])
+            with output:
+                clear_output(wait=True)
+                _draw_figure(i)
+
+        slider.observe(_on_value_change, names="value")
+        with output:
+            _draw_figure(0)
+        display(widgets.VBox([slider, output]))
+        return
+    except Exception:
+        pass
+
+    from matplotlib.widgets import Slider
+
+    fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.8))
+    plt.subplots_adjust(bottom=0.2)
+    ax_slider = plt.axes([0.16, 0.08, 0.68, 0.04])
+    slider = Slider(ax=ax_slider, label="Screen", valmin=0, valmax=n - 1, valinit=0, valstep=1)
+
+    def _draw_fallback(i: int):
+        M = _pick_data(i)
+        for ax in axes:
+            ax.clear()
+        if M.shape[0] == 0:
+            for ax in axes:
+                ax.text(0.5, 0.5, "No particles", ha="center", va="center")
+                ax.grid(alpha=0.3)
+            fig.suptitle(_title_for(i))
+            fig.canvas.draw_idle()
+            return
+
+        _scatter_density(axes[0], M[:, 0], M[:, 1], bins=bins, cmap="hot_r")
+        axes[0].set_xlabel("x [mm]")
+        axes[0].set_ylabel("px [MeV/c]")
+        axes[0].set_title("x-px")
+        axes[0].grid(alpha=0.3)
+
+        _scatter_density(axes[1], M[:, 2], M[:, 3], bins=bins, cmap="hot_r")
+        axes[1].set_xlabel("y [mm]")
+        axes[1].set_ylabel("py [MeV/c]")
+        axes[1].set_title("y-py")
+        axes[1].grid(alpha=0.3)
+
+        _scatter_density(axes[2], M[:, 4], M[:, 5], bins=bins, cmap="hot_r")
+        axes[2].set_xlabel("z [mm]")
+        axes[2].set_ylabel("pz [MeV/c]")
+        axes[2].set_title("z-pz")
+        axes[2].grid(alpha=0.3)
+
+        fig.suptitle(_title_for(i))
+        fig.canvas.draw_idle()
+
+    def _on_change(val):
+        _draw_fallback(int(slider.val))
+
+    slider.on_changed(_on_change)
+    _draw_fallback(0)
     plt.show()

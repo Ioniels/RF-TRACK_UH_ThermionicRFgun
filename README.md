@@ -4,7 +4,19 @@ Thermionic cathode electron beam tracking in a TM010 λ/4 RF cavity at 2.856 GHz
 
 ## Overview
 
-This project simulates electron beam dynamics from a heated thermionic cathode through an RF photoinjector cavity. The cavity operates in TM010 mode at f = 2.856 GHz with a half-wavelength (λ/4) geometry.
+This project simulates electron beam dynamics from a heated thermionic cathode through an RF cavity (S-band - λ/4 - 1 MW - 1 MeV) using RF-Track (developed at CERN: link to RF-Track github). The simulation code includes:
+
+- Helpers for thermionic emission model self-consistent as a function of T, includes cathode surface roughness
+- Loads field maps from an FDTD (3D Yee-Cell) EM solver and phasor builder for evolution vers time during transients
+- Particle tracking from RF-Track includes space-charge and beam loading
+
+To be included next:
+- load cathode surface temperature from heating simulation
+- e- beam back-bombardment and beam-beam interactions
+- corrector magnet for e- beam back-bombardment
+- Ionization and recombination with neutrals (vacuum pressure impact)
+
+The main parameters used for the simulations are currently according to the UH Linac microwave gun.
 
 ### Physics
 
@@ -23,7 +35,9 @@ This project simulates electron beam dynamics from a heated thermionic cathode t
 
 ```
 .
-├── UH_gun_tracking.ipynb       # Main analysis notebook
+├── UH_gun_tracking_demo.ipynb  # Main analysis notebook
+├── run_thermionic_tm010.py     # Batch-friendly non-notebook runner
+├── run_thermionic_tm010.slurm  # Slurm job script for cluster runs
 ├── config.py                   # RF-Track setup
 ├── utils.py                    # Helper functions
 ├── load_fieldmap_mat.py        # Field map loader
@@ -85,6 +99,75 @@ jupyter notebook UH_gun_tracking.ipynb
 ```
 
 All tunable parameters are clearly defined at the top of the notebook under "Configuration" cells.
+
+### Batch runner (recommended for laptop/cluster)
+
+```bash
+python run_thermionic_tm010.py --preset quick --output outputs/smoke_quick
+```
+
+### Re-run with full knobs (copy/paste)
+
+```bash
+python run_thermionic_tm010.py \
+	--output outputs/manual_rerun \
+	--threads 6 \
+	--phase_deg 0.0 \
+	--n_particles 100000 \
+	--f_hz 2.856e9 \
+	--y_cathode_mm 12.75 \
+	--r_max_m 0.01 \
+	--dr_um 4.0 \
+	--dz_um 13.0 \
+	--z_min 0.0 \
+	--ext_zmax 0.0075 \
+	--dt_mm 0.1 \
+	--sc_dt_mm 0.2 \
+	--emission_nsteps 100 \
+	--emission_range 10.0 \
+	--fm_nsteps 100 \
+	--fm_tt_nsteps 100 \
+	--cfx_dt_mm 0.1 \
+	--ode_algorithm rk2 \
+	--ode_epsabs 1e-6 \
+	--aperture_m 0.01 \
+	--sc_enabled \
+	--beam_loading \
+	--bl_q0 4000 \
+	--bl_qext 3500 \
+	--bl_p_fwd_w 1.0e6 \
+	--bl_r_over_q_ohm_per_m 1.0 \
+	--bl_ncells 1 \
+	--bl_tinj_mode auto_from_emission \
+	--bl_tinj_manual_mm_c 0.0 \
+	--n_z_snap 100 \
+	--screen_t0_mode unset \
+	--screen_t0_manual_mm_c 0.0 \
+	--r_cathode_mm 1.57 \
+	--emission_scale 1.0 \
+	--no-use_const_pz \
+	--pz_init_mevc 4.0e-3 \
+	--ra_um 1.0 \
+	--re_um 10.0 \
+	--emission_law RD_schottky \
+	--t_cathode_k 1700.0 \
+	--phi_eff_ev 2.1 \
+	--beta_f 1.0 \
+	--emission_phase_start 0.0 \
+	--emission_phase_range 180.0 \
+	--poll_interval_s 0.5 \
+	--save-figures \
+	--save-screen-json
+```
+
+For the complete CLI surface, run:
+
+```bash
+python run_thermionic_tm010.py --help
+```
+
+The transport progress implementation is intentionally **elapsed-only** for clarity and stability.
+There is no segmented transport mode in the current code path.
 
 ## Helper Functions
 

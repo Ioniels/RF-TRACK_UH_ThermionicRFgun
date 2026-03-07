@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple, Literal
 
 import numpy as np
 
@@ -42,6 +42,82 @@ class VolumeBuildParams:
     bl_ncells: int = 1
     bl_tinj_mode: str = "auto_from_emission"
     bl_tinj_manual_mm_c: float = 0.0
+    beam_loading_verbose: bool = True
+
+
+@dataclass(frozen=True)
+class ScreenBuildParams:
+    width_mm: float | None = None
+    height_mm: float | None = None
+    time_window_mm_c: float | None = None
+    t0_mode: Literal["unset", "sync_to_first_crossing", "manual"] = "unset"
+    t0_manual_mm_c: float = 0.0
+    log: bool = False
+
+
+def _configure_screen(S, screen_params: ScreenBuildParams, index: int, z_m: float):
+    if screen_params.width_mm is not None:
+        for name in ("set_width", "set_xwidth", "set_size_x"):
+            fn = getattr(S, name, None)
+            if callable(fn):
+                try:
+                    fn(float(screen_params.width_mm))
+                    break
+                except Exception:
+                    pass
+
+    if screen_params.height_mm is not None:
+        for name in ("set_height", "set_ywidth", "set_size_y"):
+            fn = getattr(S, name, None)
+            if callable(fn):
+                try:
+                    fn(float(screen_params.height_mm))
+                    break
+                except Exception:
+                    pass
+
+    if screen_params.time_window_mm_c is not None:
+        for name in ("set_time_window", "set_twindow", "set_dt", "set_time_width"):
+            fn = getattr(S, name, None)
+            if callable(fn):
+                try:
+                    fn(float(screen_params.time_window_mm_c))
+                    break
+                except Exception:
+                    pass
+
+    mode = str(screen_params.t0_mode).strip().lower()
+    if mode not in ("unset", "sync_to_first_crossing", "manual"):
+        raise ValueError(f"Unknown screen t0 mode: {screen_params.t0_mode}")
+    if mode == "manual":
+        for name in ("set_t0", "set_ref_time", "set_reference_time"):
+            fn = getattr(S, name, None)
+            if callable(fn):
+                try:
+                    fn(float(screen_params.t0_manual_mm_c))
+                    break
+                except Exception:
+                    pass
+    elif mode == "unset":
+        for name in ("unset_t0", "clear_t0"):
+            fn = getattr(S, name, None)
+            if callable(fn):
+                try:
+                    fn()
+                    break
+                except Exception:
+                    pass
+
+    if screen_params.log:
+        tw = (
+            "inf" if screen_params.time_window_mm_c is None else f"{float(screen_params.time_window_mm_c):.4g} mm/c"
+        )
+        w = "inf" if screen_params.width_mm is None else f"{float(screen_params.width_mm):.4g} mm"
+        h = "inf" if screen_params.height_mm is None else f"{float(screen_params.height_mm):.4g} mm"
+        print(
+            f"Screen {index}: z={float(z_m):.6g} m | width={w} | height={h} | "
+            f"time_window={tw} | t0_mode={mode}"
+        )
 
 
 def _attach_beam_loading_sw(rft, FM, p: VolumeBuildParams):
@@ -98,12 +174,13 @@ def _attach_beam_loading_sw(rft, FM, p: VolumeBuildParams):
 
     FM.add_collective_effect(bl_obj)
 
-    print(
-        "Beam loading ON | "
-        f"Q_loaded={p.bl_Q_loaded:.4g}, r/Q={p.bl_r_over_q_ohm_per_m:.4g} Ohm/m, ncells={int(p.bl_ncells)}, "
-        f"f={p.f_hz:.6g} Hz, tau={tau_s:.4e} s, "
-        f"tinj={tinj_mm_c:.4e} mm/c (tinj/tau={tinj_tau:.4e})"
-    )
+    if p.beam_loading_verbose:
+        print(
+            "Beam loading ON | "
+            f"Q_loaded={p.bl_Q_loaded:.6g}, ncells={int(p.bl_ncells)}, "
+            f"f={p.f_hz:.6g} Hz, tau={tau_s:.4e} s, "
+            f"tinj={tinj_mm_c:.4e} mm/c (tinj/tau={tinj_tau:.4e})"
+        )
 
 
 def _coerce_volume_params(p: VolumeBuildParams | dict) -> VolumeBuildParams:
@@ -121,6 +198,7 @@ def build_volume(
     phi_deg: float,
     p: VolumeBuildParams,
     add_screens_z_m: Optional[Sequence[float]] = None,
+    screen_params: Optional[ScreenBuildParams] = None,
 ):
     """Construct a Volume containing a single RF_FieldMap_2d and optional Screens."""
     p = _coerce_volume_params(p)
@@ -148,18 +226,38 @@ def build_volume(
     if hasattr(FM, "set_odeint_epsabs"):
         FM.set_odeint_epsabs(p.ode_epsabs)
 
-    _attach_beam_loading_sw(rft, FM, p)
-
     FM.set_phid(float(phi_deg))
-    if hasattr(FM, "set_t0"):
-        FM.set_t0(0.0)
+
+    t0_set = False
+    for name in ("set_t0", "set_ref_time", "set_reference_time"):
+        method = getattr(FM, name, None)
+        if callable(method):
+            try:
+                method(0.0)
+                t0_set = True
+                break
+            except Exception:
+                pass
+    if not t0_set:
+        for attr in ("t0", "ref_time", "reference_time"):
+            if hasattr(FM, attr):
+                try:
+                    setattr(FM, attr, 0.0)
+                    t0_set = True
+                    break
+                except Exception:
+                    pass
+
+    _attach_beam_loading_sw(rft, FM, p)
 
     V = rft.Volume()
     V.add(FM, 0.0, 0.0, 0.0, "entrance")
 
     if add_screens_z_m:
-        for z in add_screens_z_m:
+        screen_cfg = screen_params if screen_params is not None else ScreenBuildParams()
+        for index, z in enumerate(add_screens_z_m):
             S = rft.Screen()
+            _configure_screen(S, screen_cfg, index=index, z_m=float(z))
             V.add(S, 0.0, 0.0, float(z), "entrance")
 
     V.dt_mm = float(p.dt_mm)
@@ -168,6 +266,11 @@ def build_volume(
     else:
         if p.beam_loading_enabled:
             print("Warning: Volume has no cfx_dt_mm attribute; beam loading convergence may be unreliable.")
+    if p.beam_loading_enabled and float(p.cfx_dt_mm) < float(p.dt_mm):
+        print(
+            f"Warning: cfx_dt_mm ({float(p.cfx_dt_mm):.4g}) < dt_mm ({float(p.dt_mm):.4g}); "
+            "this may be unnecessarily expensive."
+        )
     V.odeint_algorithm = p.ode_algorithm
     V.odeint_epsabs = float(p.ode_epsabs)
     V.set_s0(float(p.z_min_m))
@@ -196,7 +299,7 @@ def build_volume(
         if hasattr(V, "emission_range"):
             V.emission_range = float(p.emission_range)
 
-    if p.beam_loading_enabled:
+    if p.beam_loading_enabled and p.beam_loading_verbose:
         print(f"Volume steps: dt_mm={float(p.dt_mm):.4g}, cfx_dt_mm={float(p.cfx_dt_mm):.4g}")
 
     return V
@@ -210,10 +313,19 @@ def track_volume_with_screens(
     p: VolumeBuildParams,
     B0,
     z_screens_m: Sequence[float],
+    screen_params: Optional[ScreenBuildParams] = None,
 ):
     """Track once, capturing phase-space snapshots at `z_screens_m`."""
     z_screens_m = [float(z) for z in z_screens_m]
-    V = build_volume(rft, Er_grid, Ez_grid, phi_deg, p, add_screens_z_m=z_screens_m)
+    V = build_volume(
+        rft,
+        Er_grid,
+        Ez_grid,
+        phi_deg,
+        p,
+        add_screens_z_m=z_screens_m,
+        screen_params=screen_params,
+    )
     Bout = V.track(B0)
     snaps = V.get_bunch_at_screens() if hasattr(V, "get_bunch_at_screens") else []
     return Bout, snaps

@@ -54,3 +54,10 @@ Run the notebook cells in order:
 2. Envelope analysis (should show proper crest location)
 3. I/Q snapshot selection (should show dt_err << 100%)
 4. Field map visualization (should display two plots with colorbars)
+
+## Progress / Runtime Consolidation
+
+- Removed segmented transport progress mode from the production simulation path.
+- `run_transport_with_progress(...)` now uses a single elapsed/proxy progress implementation.
+- Added robust heartbeat lines (`[tracking] elapsed=... proxy=...`) during RF-Track transport to keep progress visible even when terminal tqdm rendering is limited.
+- CLI and Slurm interfaces were simplified to match elapsed-only operation.
