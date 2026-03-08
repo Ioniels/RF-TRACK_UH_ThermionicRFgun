@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=tm010_campaign
+#SBATCH --job-name=tm010_campaign_p2
 #SBATCH --partition=shared
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

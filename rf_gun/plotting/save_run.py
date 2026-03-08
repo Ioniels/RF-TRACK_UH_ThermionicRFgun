@@ -113,6 +113,7 @@ def save_beam_phase_space_json(
     *,
     phase_space_columns: Sequence[str] | None = None,
     label: str | None = None,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> Path:
     """Save one phase-space matrix to JSON with explicit schema fields."""
     output_path = Path(output_path)
@@ -128,8 +129,12 @@ def save_beam_phase_space_json(
         "label": str(label) if label is not None else None,
         "phase_space_columns": cols,
         "particle_count": int(arr.shape[0]),
+        "coordinate_system": "Bunch6dT phase space: X Px Y Py Z Pz",
+        "timing_note": "Creation time t0 is stored separately from Z in Bunch6dT and is not one of the 6 phase-space columns.",
         "phase_space": arr.tolist(),
     }
+    if extra_metadata:
+        payload.update(dict(extra_metadata))
 
     with output_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
@@ -262,7 +267,8 @@ def save_run_figures(
     I_snaps: Sequence[Any],
     *,
     phase_fmt: str = "%X %Px %Y %Py %Z %Pz",
-    clean_e: bool = False,
+    clean_e: bool = True,
+    clean_except_zpz: bool = True,
     show_zle0: bool = True,
     n_real_ref: float | None = None,
     n_macroparticles: int | None = None,
@@ -275,7 +281,15 @@ def save_run_figures(
     output_dir.mkdir(parents=True, exist_ok=True)
     saved: list[str] = []
 
-    plot_phase_space(B0, Bout, transport_phase_deg, clean_e=clean_e, show_zle0=show_zle0, phase_fmt=phase_fmt)
+    plot_phase_space(
+        B0,
+        Bout,
+        transport_phase_deg,
+        clean_e=clean_e,
+        clean_except_zpz=clean_except_zpz,
+        show_zle0=show_zle0,
+        phase_fmt=phase_fmt,
+    )
     saved += _capture_current_figure("initial_phase_space_x_px", output_dir)
 
     plot_spectra(Bout, transport_phase_deg, B0=B0, thermo_info=thermo_info, clean_e=clean_e, show_zle0=show_zle0, phase_fmt=phase_fmt)

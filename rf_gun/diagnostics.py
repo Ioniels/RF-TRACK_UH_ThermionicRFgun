@@ -75,32 +75,147 @@ def snapshot_stats(M: np.ndarray) -> Dict[str, float]:
     return out
 
 
+def summarize_array(values: np.ndarray) -> Dict[str, Any]:
+    """Return robust numeric summary, preserving count and finite_count."""
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    finite = arr[np.isfinite(arr)]
+    out: Dict[str, Any] = {
+        "count": int(arr.size),
+        "finite_count": int(finite.size),
+        "min": None,
+        "max": None,
+        "mean": None,
+        "std": None,
+    }
+    if finite.size == 0:
+        return out
+    out["min"] = float(np.min(finite))
+    out["max"] = float(np.max(finite))
+    out["mean"] = float(np.mean(finite))
+    out["std"] = float(np.std(finite))
+    return out
+
+
+def summarize_phase_space(M: np.ndarray, columns: Sequence[str] | None = None) -> Dict[str, Any]:
+    """Column-wise summary for a 2D phase-space matrix."""
+    arr = np.asarray(M, dtype=float)
+    col_names = list(columns) if columns is not None else ["x_mm", "px_MeV_c", "y_mm", "py_MeV_c", "z_mm", "pz_MeV_c"]
+    out: Dict[str, Any] = {
+        "particle_count": int(arr.shape[0]) if arr.ndim == 2 else 0,
+        "columns": col_names,
+        "summary": {},
+    }
+    if arr.ndim != 2 or arr.shape[0] == 0:
+        for i, name in enumerate(col_names):
+            if i < (arr.shape[1] if arr.ndim == 2 else 0):
+                out["summary"][name] = summarize_array(arr[:, i])
+            else:
+                out["summary"][name] = summarize_array(np.asarray([], dtype=float))
+        return out
+
+    n_cols = arr.shape[1]
+    for i, name in enumerate(col_names):
+        if i < n_cols:
+            out["summary"][name] = summarize_array(arr[:, i])
+        else:
+            out["summary"][name] = summarize_array(np.asarray([], dtype=float))
+    return out
+
+
+def build_screen_summary_from_phase_space(
+    M_screen: np.ndarray | None,
+    screen_index: int,
+    z_m: float,
+    n_initial: int,
+    n_previous: int | None = None,
+) -> Dict[str, Any]:
+    """Build robust per-screen summary from explicit phase-space array only."""
+    arr = np.asarray(M_screen, dtype=float) if M_screen is not None else np.zeros((0, 6), dtype=float)
+    if arr.ndim != 2:
+        arr = np.zeros((0, 6), dtype=float)
+
+    n_screen = int(arr.shape[0])
+    n_prev = int(n_previous) if n_previous is not None else int(n_initial)
+
+    pz = arr[:, 5] if arr.shape[1] > 5 else np.asarray([], dtype=float)
+    z = arr[:, 4] if arr.shape[1] > 4 else np.asarray([], dtype=float)
+    x = arr[:, 0] if arr.shape[1] > 0 else np.asarray([], dtype=float)
+    y = arr[:, 2] if arr.shape[1] > 2 else np.asarray([], dtype=float)
+
+    pz_f = pz[np.isfinite(pz)]
+    z_f = z[np.isfinite(z)]
+    x_f = x[np.isfinite(x)]
+    y_f = y[np.isfinite(y)]
+
+    def _mean_or_none(vals: np.ndarray, scale: float = 1.0):
+        if vals.size == 0:
+            return None
+        return float(scale * np.mean(vals))
+
+    def _std_or_none(vals: np.ndarray, scale: float = 1.0):
+        if vals.size == 0:
+            return None
+        return float(scale * np.std(vals))
+
+    tr_init = (float(n_screen) / float(n_initial)) if int(n_initial) > 0 else None
+    tr_prev = (float(n_screen) / float(n_prev)) if int(n_prev) > 0 else None
+
+    summary: Dict[str, Any] = {
+        "screen_index": int(screen_index),
+        "z_m": float(z_m),
+        "N": int(n_screen),
+        "transmission_from_initial": tr_init,
+        "transmission_from_previous": tr_prev,
+        "mean_pz_MeV_c": _mean_or_none(pz_f),
+        "sigma_pz_MeV_c": _std_or_none(pz_f),
+        "mean_x_mm": _mean_or_none(x_f),
+        "sigma_x_mm": _std_or_none(x_f),
+        "mean_y_mm": _mean_or_none(y_f),
+        "sigma_y_mm": _std_or_none(y_f),
+        "mean_z_mm": _mean_or_none(z_f, scale=1e3),
+        "sigma_z_mm": _std_or_none(z_f, scale=1e3),
+        # Backward-compatible aliases used by existing callers.
+        "transmission": tr_init,
+        "mean_pz": _mean_or_none(pz_f),
+        "sigma_pz": _std_or_none(pz_f),
+    }
+    return summary
+
+
 def build_screen_summaries(
     z_snaps: Sequence[float],
     info_snaps: Sequence[Any] | None,
     phase_spaces: Sequence[np.ndarray] | None,
-) -> list[Dict[str, float]]:
-    """Build one summary record per screen from info and/or phase space."""
+) -> list[Dict[str, Any]]:
+    """Build robust summary records from phase-space arrays, with optional RF-Track raw info."""
     n = int(len(z_snaps))
-    out: list[Dict[str, float]] = []
-    for i in range(n):
-        rec: Dict[str, float] = {"screen_index": float(i), "z_m": float(z_snaps[i])}
+    out: list[Dict[str, Any]] = []
+    n_initial = 0
+    if phase_spaces is not None and len(phase_spaces) > 0:
+        first = np.asarray(phase_spaces[0])
+        if first.ndim == 2:
+            n_initial = int(first.shape[0])
+    n_previous = n_initial
 
+    for i in range(n):
+        rec: Dict[str, Any] = {"screen_index": int(i), "z_m": float(z_snaps[i])}
         info_i = info_snaps[i] if info_snaps is not None and i < len(info_snaps) else None
-        rec["transmission"] = info_get_first(info_i, ["transmission", "Transmission"])
-        rec["mean_pz_info"] = info_get_first(info_i, ["mean_Pz", "mean_P", "mean_pz"])
-        rec["sigma_pz_info"] = info_get_first(info_i, ["sigma_Pz", "sigma_P", "sigma_pz"])
+        rec["rftrack_raw_info"] = {
+            "transmission": info_get_first(info_i, ["transmission", "Transmission"]),
+            "mean_pz": info_get_first(info_i, ["mean_Pz", "mean_P", "mean_pz"]),
+            "sigma_pz": info_get_first(info_i, ["sigma_Pz", "sigma_P", "sigma_pz"]),
+        }
 
         m_i = phase_spaces[i] if phase_spaces is not None and i < len(phase_spaces) else None
-        if m_i is not None and np.asarray(m_i).ndim == 2:
-            stats = snapshot_stats(np.asarray(m_i))
-            rec["N"] = stats["N"]
-            rec["mean_pz"] = stats["mean_pz"]
-            rec["sigma_pz"] = stats["sigma_pz"]
-        else:
-            rec["N"] = np.nan
-            rec["mean_pz"] = np.nan
-            rec["sigma_pz"] = np.nan
+        robust = build_screen_summary_from_phase_space(
+            m_i,
+            screen_index=i,
+            z_m=float(z_snaps[i]),
+            n_initial=n_initial,
+            n_previous=n_previous,
+        )
+        n_previous = int(robust["N"])
+        rec.update(robust)
 
         out.append(rec)
     return out

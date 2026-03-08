@@ -31,7 +31,13 @@ from .rftrack_volume import (
     VolumeBuildParams,
     ScreenBuildParams,
 )
-from .diagnostics import snapshot_stats, build_screen_summaries, classify_particle_outcomes, to_lost_table_array
+from .diagnostics import (
+    snapshot_stats,
+    build_screen_summary_from_phase_space,
+    info_get_first,
+    classify_particle_outcomes,
+    to_lost_table_array,
+)
 
 
 @dataclass(frozen=True)
@@ -995,6 +1001,11 @@ def _assemble_thermionic_diagnostics(
         "Q_cum_C": wf.get("Q_cum_C", None),
         "t_emit_s": wf.get("t_emit_s", None),
         "has_t0": bool(has_t0),
+        "bunch_constructor": "extended_matrix_with_T0",
+        "bunch_constructor_full": "Bunch6dT_extended_matrix_with_T0",
+        "timing_coordinate_note": (
+            "In Bunch6dT, Z is position and T0 is creation time; T0 is separate from the 6D coordinates."
+        ),
         "reference_particle_reordered": bool(reference_particle_reordered),
     }
 
@@ -1108,18 +1119,18 @@ def run_transport(
     keep_idx = _select_screen_indices(len(snaps), diagnostics)
     z_snaps_kept = [z_snaps[i] for i in keep_idx] if z_snaps else []
 
-    if diagnostics.store_screen_phase_space and snaps:
-        M_snaps = []
-        for i in keep_idx:
-            raw = np.array(snaps[i].get_phase_space(tracking.phase_fmt, "all"), copy=True)
-            M_snaps.append(
-                _maybe_subsample_phase_space(
-                    raw,
-                    diagnostics.max_screen_particles,
-                    rng,
-                    diagnostics.subsample_screens_random,
-                )
+    full_M_snaps = [np.array(snaps[i].get_phase_space(tracking.phase_fmt, "all"), copy=True) for i in keep_idx] if snaps else []
+
+    if diagnostics.store_screen_phase_space and full_M_snaps:
+        M_snaps = [
+            _maybe_subsample_phase_space(
+                raw,
+                diagnostics.max_screen_particles,
+                rng,
+                diagnostics.subsample_screens_random,
             )
+            for raw in full_M_snaps
+        ]
     else:
         M_snaps = []
 
@@ -1130,7 +1141,25 @@ def run_transport(
     if z_snaps and np.any(np.diff(np.asarray(z_snaps, dtype=float)) < 0.0):
         print("Warning: z_screens_m is not monotonic increasing.")
 
-    screen_summaries = build_screen_summaries(z_snaps_kept, I_snaps, M_snaps if M_snaps else None)
+    n_initial = int(np.asarray(B0.get_phase_space(tracking.phase_fmt, "all")).shape[0])
+    screen_summaries = []
+    n_prev = n_initial
+    for i, z_m in enumerate(z_snaps_kept):
+        rec = build_screen_summary_from_phase_space(
+            full_M_snaps[i] if i < len(full_M_snaps) else None,
+            screen_index=i,
+            z_m=float(z_m),
+            n_initial=n_initial,
+            n_previous=n_prev,
+        )
+        info_i = I_snaps[i] if i < len(I_snaps) else None
+        rec["rftrack_raw_info"] = {
+            "transmission": float(info_get_first(info_i, ["transmission", "Transmission"])) if info_i is not None else np.nan,
+            "mean_pz": float(info_get_first(info_i, ["mean_Pz", "mean_P", "mean_pz"])) if info_i is not None else np.nan,
+            "sigma_pz": float(info_get_first(info_i, ["sigma_Pz", "sigma_P", "sigma_pz"])) if info_i is not None else np.nan,
+        }
+        screen_summaries.append(rec)
+        n_prev = int(rec.get("N", 0))
 
     if on_screen is not None and screen_summaries:
         prev_n = None
@@ -1550,18 +1579,18 @@ def run_transport_with_progress(
     keep_idx = _select_screen_indices(len(snaps), diagnostics)
     z_snaps_kept = [z_snaps[i] for i in keep_idx] if z_snaps else []
 
-    if diagnostics.store_screen_phase_space and snaps:
-        M_snaps = []
-        for i in keep_idx:
-            raw = np.array(snaps[i].get_phase_space(tracking.phase_fmt, "all"), copy=True)
-            M_snaps.append(
-                _maybe_subsample_phase_space(
-                    raw,
-                    diagnostics.max_screen_particles,
-                    rng,
-                    diagnostics.subsample_screens_random,
-                )
+    full_M_snaps = [np.array(snaps[i].get_phase_space(tracking.phase_fmt, "all"), copy=True) for i in keep_idx] if snaps else []
+
+    if diagnostics.store_screen_phase_space and full_M_snaps:
+        M_snaps = [
+            _maybe_subsample_phase_space(
+                raw,
+                diagnostics.max_screen_particles,
+                rng,
+                diagnostics.subsample_screens_random,
             )
+            for raw in full_M_snaps
+        ]
     else:
         M_snaps = []
     extract_phase_elapsed_s = time.time() - t_extract_phase_s
@@ -1598,7 +1627,25 @@ def run_transport_with_progress(
         print("Warning: z_screens_m is not monotonic increasing.", flush=True)
 
     t_callbacks_s = time.time()
-    screen_summaries = build_screen_summaries(z_snaps_kept, I_snaps, M_snaps if M_snaps else None)
+    n_initial = int(np.asarray(B0.get_phase_space(tracking.phase_fmt, "all")).shape[0])
+    screen_summaries = []
+    n_prev = n_initial
+    for i, z_m in enumerate(z_snaps_kept):
+        rec = build_screen_summary_from_phase_space(
+            full_M_snaps[i] if i < len(full_M_snaps) else None,
+            screen_index=i,
+            z_m=float(z_m),
+            n_initial=n_initial,
+            n_previous=n_prev,
+        )
+        info_i = I_snaps[i] if i < len(I_snaps) else None
+        rec["rftrack_raw_info"] = {
+            "transmission": float(info_get_first(info_i, ["transmission", "Transmission"])) if info_i is not None else np.nan,
+            "mean_pz": float(info_get_first(info_i, ["mean_Pz", "mean_P", "mean_pz"])) if info_i is not None else np.nan,
+            "sigma_pz": float(info_get_first(info_i, ["sigma_Pz", "sigma_P", "sigma_pz"])) if info_i is not None else np.nan,
+        }
+        screen_summaries.append(rec)
+        n_prev = int(rec.get("N", 0))
 
     if screen_summaries:
         prev_n = None

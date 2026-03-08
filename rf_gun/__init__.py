@@ -49,10 +49,13 @@ from .diagnostics import (
 	info_get,
 	info_get_first,
 	snapshot_stats,
+	summarize_array,
+	summarize_phase_space,
+	build_screen_summary_from_phase_space,
 	build_screen_summaries,
 	classify_particle_outcomes,
 )
-from .io import save_screen_distributions_json, save_lost_particles_json
+from .io import save_screen_distributions_json, save_lost_particles_json, to_json_safe
 from .plotting import (
 	field_maps,
 	axis_phase,
@@ -123,10 +126,14 @@ __all__ = [
 	"info_get",
 	"info_get_first",
 	"snapshot_stats",
+	"summarize_array",
+	"summarize_phase_space",
+	"build_screen_summary_from_phase_space",
 	"build_screen_summaries",
 	"classify_particle_outcomes",
 	"save_screen_distributions_json",
 	"save_lost_particles_json",
+	"to_json_safe",
 	"field_maps",
 	"axis_phase",
 	"plot_emission_history",
