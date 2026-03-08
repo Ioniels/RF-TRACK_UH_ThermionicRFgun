@@ -707,7 +707,6 @@ def build_bunch_thermionic(
     rng = np.random.default_rng() if rng is None else rng
     phi_rad = np.deg2rad(phi_deg)
 
-    # Schottky lowering at cathode field and RF phase
     Ez0 = float(np.real(Ez0_phasor_axis * np.exp(1j * phi_rad)))
     beta_enh = float(params.beta_enh) if params.beta_enh is not None else float(params.beta_field)
     dphi = schottky_delta_phi_eV(Ez0, beta=beta_enh)
@@ -716,7 +715,6 @@ def build_bunch_thermionic(
     area_m2 = np.pi * (params.cathode_radius_mm * 1e-3) ** 2
     area_cm2 = area_m2 * 1e4
 
-    # Richardson-Dushman current (or unified law) over emission waveform
     wf = _compute_emission_waveform_and_current_history(
         n,
         phi_rad,
@@ -728,7 +726,6 @@ def build_bunch_thermionic(
         rng,
     )
 
-    # Sample initial momentum distribution (flux-weighted normal energy if pz_model='flux')
     x, y = sample_disk(n, params.cathode_radius_mm, rng=rng)
     px, py, pz, mean_eps_eV, exp_eps_eV = sample_thermionic_momenta(
         n,
@@ -738,27 +735,48 @@ def build_bunch_thermionic(
         rng=rng,
     )
 
-    # Roughness angular kick
     px_rms0 = float(np.std(px)) if px.size else np.nan
     py_rms0 = float(np.std(py)) if py.size else np.nan
-    px, py, sigma_theta = apply_roughness(px, py, pz, params.roughness.Ra_um, params.roughness.Re_um, rng=rng)
+    px, py, sigma_theta = apply_roughness(
+        px, py, pz, params.roughness.Ra_um, params.roughness.Re_um, rng=rng
+    )
     px_rms = float(np.std(px)) if px.size else np.nan
     py_rms = float(np.std(py)) if py.size else np.nan
 
     if params.pz_model == "flux":
-        print(f"Normal energy: <eps_z>={mean_eps_eV:.4f} eV (expected {exp_eps_eV:.4f} eV)")
+        print(f"Normal energy: <eps_z>={mean_eps_eV:.4f} eV (expected {exp_eps_eV:.4f} eV)", flush=True)
 
     t_emit_s = np.asarray(wf.get("t_emit_s", np.zeros(n)), dtype=float)
     t0_mm_c = t_emit_s * c * 1e3
-    z = np.zeros(n)
-    M = np.column_stack([x, px, y, py, z, pz])
-    M, t0_mm_c, ref_reordered = _promote_stable_reference_particle(M, t0_mm_c)
 
+    # Real-particle normalization
     Q_total_C = float(wf.get("Q_total_C", 0.0))
     N_real = float(abs(Q_total_C) / q_e) if Q_total_C > 0.0 else 0.0
-    B0 = rft.Bunch6dT(ME_MEV, N_real, -1.0, M)
-    if hasattr(B0, "set_t0"):
-        B0.set_t0(t0_mm_c)
+
+    z = np.zeros(n, dtype=float)
+    M = np.column_stack([x, px, y, py, z, pz])
+
+    ref_reordered = False
+    # M, t0_mm_c, ref_reordered = _promote_stable_reference_particle(M, t0_mm_c)
+
+    mass_col = np.full(n, ME_MEV, dtype=float)
+    q_col = np.full(n, -1.0, dtype=float)
+    N_col = np.full(n, N_real / n if n > 0 else 0.0, dtype=float)
+
+    Mext = np.column_stack([
+        x,        # X
+        px,       # Px
+        y,        # Y
+        py,       # Py
+        z,        # Z
+        pz,       # Pz
+        mass_col, # MASS
+        q_col,    # Q
+        N_col,    # N
+        t0_mm_c,  # T0
+    ])
+
+    B0 = rft.Bunch6dT(Mext)
 
     info = _assemble_thermionic_diagnostics(
         wf,
@@ -776,11 +794,15 @@ def build_bunch_thermionic(
         py_rms0=py_rms0,
         px_rms=px_rms,
         py_rms=py_rms,
-        has_t0=(hasattr(B0, "set_t0") or hasattr(B0, "get_t0")),
+        has_t0=True,
         reference_particle_reordered=bool(ref_reordered),
     )
+
+    info["initial_phase_space"] = np.asarray(M, dtype=float)
     info["initial_pz_MeV_c"] = np.asarray(M[:, 5], dtype=float)
     info["initial_t0_mm_c"] = np.asarray(t0_mm_c, dtype=float)
+    info["t0_span_mm_c"] = float(np.max(t0_mm_c) - np.min(t0_mm_c)) if t0_mm_c.size else 0.0
+
     return B0, info
 
 

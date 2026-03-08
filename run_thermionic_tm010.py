@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
@@ -755,7 +755,7 @@ def main() -> None:
             classes_summary.pop(heavy_key)
 
     run_metadata: Dict[str, Any] = {
-        "timestamp_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "timestamp_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "run_family": str(args.run_family),
         "scan_tags": [str(x) for x in (args.scan_tags or [])],
         "args": to_jsonable(vars(args)),

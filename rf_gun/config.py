@@ -2,6 +2,7 @@
 import os
 
 import RF_Track as rft
+from typing import Optional
 
 
 def show_versions():
@@ -10,7 +11,8 @@ def show_versions():
     print("Max threads:", rft.max_number_of_threads)
 
 
-def resolve_threads(requested: int | None = None, default: int = 1) -> int:
+
+def resolve_threads(requested: Optional[int] = None, default: int = 1) -> int:
     """Resolve runtime thread count from explicit value or scheduler environment."""
     if requested is not None:
         try:

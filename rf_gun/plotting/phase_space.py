@@ -469,8 +469,10 @@ def plot_spectra(
             ):
                 t_by_id = {pid: tval for pid, tval in zip(ids_launch, t_emit_s)}
                 t_emit_exit = np.array([t_by_id.get(pid, np.nan) for pid in ids_exit], dtype=float)
-                t_emit_ns_good = t_emit_exit[mask_good := (finite_z & (Mf_f_all[:, 4] > 0.0))] * 1e9
-                t_emit_ns_bad = t_emit_exit[mask_bad := (finite_z & (Mf_f_all[:, 4] <= 0.0))] * 1e9
+                mask_good = finite_z & (Mf_f_all[:, 4] > 0.0)
+                t_emit_ns_good = t_emit_exit[mask_good] * 1e9
+                mask_bad = finite_z & (Mf_f_all[:, 4] <= 0.0)
+                t_emit_ns_bad = t_emit_exit[mask_bad] * 1e9
             elif t_emit_s.size == Mf_f_all.shape[0]:
                 mask_good = finite_z & (Mf_f_all[:, 4] > 0.0)
                 mask_bad = finite_z & (Mf_f_all[:, 4] <= 0.0)
