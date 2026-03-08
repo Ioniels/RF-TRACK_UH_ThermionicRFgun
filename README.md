@@ -29,24 +29,42 @@ Important coordinate note:
 
 ```text
 .
+├── .gitignore
+├── CORRECTIONS.md
+├── README.md
 ├── UH_gun_tracking_demo.ipynb
 ├── run_thermionic_tm010.py
-├── run_thermionic_tm010.slurm
-├── run_thermionic_tm010_campaignPart1.slurm
-├── run_thermionic_tm010_campaignPart2.slurm
-├── run_thermionic_tm010_campaignPart3.slurm
-├── run_thermionic_tm010_campaignPart4.slurm
-├── rf_gun/
-│   ├── simulation.py
-│   ├── rf_params.py
-│   ├── diagnostics.py
-│   ├── io.py
-│   └── plotting/
+├── .slurm examples
 ├── field_maps/
-├── outputs/
-├── outputs_Koa/              # local heavy data (git-ignored)
-└── manual_references/        # local references (git-ignored)
+│   ├── XYplanarSensorData.mat
+│   └── YZplanarSensorData.mat
+├── rf_gun/
+│   ├── __init__.py
+│   ├── config.py
+│   ├── constants.py
+│   ├── diagnostics.py
+│   ├── emission_models.py
+│   ├── emission_sampling.py
+│   ├── field_io.py
+│   ├── helpers.py
+│   ├── io.py
+│   ├── phasor.py
+│   ├── rf_params.py
+│   ├── rftrack_volume.py
+│   ├── simulation.py
+│   └── plotting/
+│       ├── __init__.py
+│       ├── emission.py
+│       ├── evolution.py
+│       ├── fields.py
+│       ├── phase_scan.py
+│       ├── phase_space.py
+│       ├── save_run.py
+│       └── style.py
+└── .venv/                    # currently tracked in this repository
 ```
+
+Local runtime folders (not versioned): `outputs/`, `outputs_Koa/`, `manual_references/`, `archive/`.
 
 ## Core Workflow
 
@@ -76,7 +94,19 @@ Screen summaries are derived from explicit phase-space arrays (counts and moment
 Quick validation run:
 
 ```bash
-python run_thermionic_tm010.py --preset quick --output outputs/smoke_quick
+python run_thermionic_tm010.py --preset quick
+```
+
+By default, the run directory is auto-named with machine settings, for example:
+
+```text
+outputs/tm010_SC1_BL1_N1000_ZSNAPS3_YYYYMMDD_HHMMSS
+```
+
+You can still override the output path explicitly:
+
+```bash
+python run_thermionic_tm010.py --preset quick --output outputs/tm010_SC1_BL1_N1000_ZSNAPS3_test
 ```
 
 Campaign production runs are launched through the `run_thermionic_tm010_campaignPart*.slurm` scripts.

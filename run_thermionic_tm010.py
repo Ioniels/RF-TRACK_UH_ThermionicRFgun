@@ -21,7 +21,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run thermionic TM010 transport with RF-Track.")
 
     parser.add_argument("--preset", choices=["none", "quick"], default="none")
-    parser.add_argument("--output", type=Path, default=Path("outputs") / f"tm010_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    parser.add_argument("--output", type=Path, default=None)
 
     parser.add_argument("--threads", type=int, default=None)
     parser.add_argument("--phase_deg", type=float, default=0.0)
@@ -137,6 +137,30 @@ def apply_preset(args: argparse.Namespace) -> None:
     args.phase_scan_n = 90
     args.phase_scan_n_part = 2
     args.phase_scan_dt_mm = 2.0
+
+
+def _requested_screen_count(args: argparse.Namespace) -> int:
+    if bool(args.no_screens):
+        return 0
+    if args.screens_z:
+        return int(len(args.screens_z))
+    n_snap = int(args.n_z_snap) if args.n_z_snap is not None else int(args.n_screens)
+    return max(0, int(n_snap))
+
+
+def build_scientific_run_name(args: argparse.Namespace) -> str:
+    sc_flag = 1 if bool(args.sc_enabled) else 0
+    bl_flag = 1 if bool(args.beam_loading) else 0
+    n_particles = int(args.n_particles)
+    n_screens = _requested_screen_count(args)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"tm010_SC{sc_flag}_BL{bl_flag}_N{n_particles}_ZSNAPS{n_screens}_{stamp}"
+
+
+def resolve_output_dir(args: argparse.Namespace) -> Path:
+    if args.output is not None:
+        return Path(args.output)
+    return Path("outputs") / build_scientific_run_name(args)
 
 
 def sanitize_for_json(value: Any) -> Any:
@@ -454,6 +478,8 @@ def main() -> None:
 
     args = parse_args()
     apply_preset(args)
+    output_dir = resolve_output_dir(args)
+    args.output = output_dir
     rng = np.random.default_rng(int(args.seed) if args.seed is not None else None)
 
     if args.threads is not None:
@@ -512,7 +538,6 @@ def main() -> None:
     else:
         print("Timing diagnostics: OFF")
 
-    output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     xy = rg.load_fieldmap_mat(str(args.xy_fieldmap), verbose=False)
