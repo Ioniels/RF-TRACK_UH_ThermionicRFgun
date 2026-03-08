@@ -12,6 +12,8 @@ venv/
 # Project-specific
 archive/
 outputs/
+outputs_Koa/
+manual_references/
 logs/
 .rf_gun_transport_runtime_history.json
 

@@ -1,217 +1,112 @@
-# UH Gun RF-Track Beam Dynamics Simulation
+# UH Gun Thermionic RF-Track Project
 
-Thermionic cathode electron beam tracking in a TM010 λ/4 RF cavity at 2.856 GHz using RF-Track.
+Thermionic electron-beam dynamics in an S-band TM010 (lambda/4) RF gun using **RF-Track** for 6D transport, space charge, and beam loading.
 
-## Overview
+## Scope
 
-This project simulates electron beam dynamics from a heated thermionic cathode through an RF cavity (S-band, λ/4, ~1 MW, ~1 MeV class) using RF-Track (developed at CERN). The simulation code includes:
+This repository provides a consolidated simulation workflow for:
 
-- Helpers for thermionic emission model self-consistent as a function of T, includes cathode surface roughness
-- Loads field maps from an FDTD (3D Yee-cell) EM solver and builds RF phasors for time evolution during transients
-- Particle tracking from RF-Track includes space-charge and beam loading
+- RF phasor reconstruction from measured field maps
+- thermionic emission (Richardson-Dushman with Schottky lowering)
+- roughness-aware launch (`Ra`, `Re`)
+- RF-Track transport with optional space charge and beam loading
+- robust physics-oriented diagnostics and JSON exports for campaign post-analysis
 
-To be included next:
-- load cathode surface temperature from heating simulation
-- e- beam back-bombardment and beam-beam interactions
-- corrector magnet for e- beam back-bombardment
-- Ionization and recombination with neutrals (vacuum pressure impact)
+## Physics Model (Current)
 
-The main parameters used for the simulations are currently according to the UH Linac microwave gun.
+- Cavity frequency: `f = 2.856 GHz` (TM010)
+- Axisymmetric field map used by RF-Track is built from XY/YZ measurements
+- Emission timing is phase-windowed (`emission_phase_start`, `emission_phase_range`)
+- Time-dependent emission current is sampled and injected into RF-Track
+- **Bunch timing injection uses extended `Bunch6dT` matrix with explicit `T0`**, not optional Python binding methods
 
-### Physics
+Important coordinate note:
 
-**TM010 Cavity:**
-- Resonant frequency: 2.856 GHz
-- Mode: TM010 (transverse magnetic, axially symmetric)
-- Length: λ/4
-- Accelerating gradient determined by field maps
+- In `Bunch6dT`, `Z` is spatial coordinate
+- `T0` is particle creation time and is stored separately from the 6D phase-space columns
 
-**Thermionic Emission:**
-- Hot cathode model: DC electron emission
-- Electrons emitted when local Ez > 0
-- Phase-averaged sampling simulates continuous emission
+## Project Layout
 
-## Project Structure
-
-```
+```text
 .
-├── UH_gun_tracking_demo.ipynb  # Main analysis notebook
-├── run_thermionic_tm010.py     # Batch-friendly non-notebook runner
-├── run_thermionic_tm010.slurm  # Slurm job script for cluster runs
-├── config.py                   # RF-Track setup
-├── utils.py                    # Helper functions
-├── load_fieldmap_mat.py        # Field map loader
-├── field_maps/                 # Field map data
-│   ├── XYplanarSensorData.mat
-│   └── YZplanarSensorData.mat
-└── archive/                    # Previous notebook versions
+├── UH_gun_tracking_demo.ipynb
+├── run_thermionic_tm010.py
+├── run_thermionic_tm010.slurm
+├── run_thermionic_tm010_campaignPart1.slurm
+├── run_thermionic_tm010_campaignPart2.slurm
+├── run_thermionic_tm010_campaignPart3.slurm
+├── run_thermionic_tm010_campaignPart4.slurm
+├── rf_gun/
+│   ├── simulation.py
+│   ├── rf_params.py
+│   ├── diagnostics.py
+│   ├── io.py
+│   └── plotting/
+├── field_maps/
+├── outputs/
+├── outputs_Koa/              # local heavy data (git-ignored)
+└── manual_references/        # local references (git-ignored)
 ```
 
-## Workflow
+## Core Workflow
 
-### 1. Field Map Processing
-- Load field maps (XY and YZ planes)
-- Analyze temporal envelope via Ez_rms(t) spline fit
-- Select I/Q snapshots ~90° apart for phasor construction
-- Transform to axisymmetric (r,z) coordinates
+1. Load XY/YZ field maps and compute envelope diagnostics.
+2. Build RF phasor (`reconstruct` or `simplified`) and interpolate on `(r,z)` grid.
+3. Run fast phase scan for effective voltage / R-over-Q calibration.
+4. Run thermionic transport with RF-Track (SC/BL configurable).
+5. Export robust summaries and phase-space diagnostics.
 
-### 2. RF-Track Setup
-- Build complex phasor field map from I/Q snapshots
-- Interpolate to regular (r,z) grid
-- Configure RF_FieldMap_2d with f = 2.856 GHz
-- Set integration parameters (RK2, dt, aperture)
+## Robust Outputs (Current Standard)
 
-### 3. Tracking
-- **Phase scan:** Test single particles at various RF phases
-- **Thermionic emission:** Time-dependent emission from Richardson-Dushman + Schottky lowering, including roughness-induced angular spread
-- Volume tracking with space-charge and beam loading (if enabled)
+Per run, the batch workflow produces JSON outputs designed for campaign statistics:
 
-### 4. Analysis
-- Energy spectrum and phase correlation
-- Phase space distributions (x-px, y-py, z-pz)
-- Comparison with theoretical energy gain
+- `run_metadata.json`
+- `beam_summary.json`
+- `progress_stats.json`
+- `B0.json`, `Bout.json`
+- `B0_timing.json`
+- `particle_classes_summary.json`
+- `lost_particle_diagnostics.json` (when enabled)
+- `screen_distributions_json/`
 
-## Key Parameters
+Screen summaries are derived from explicit phase-space arrays (counts and moments), with RF-Track-native fields kept separately for traceability.
 
-**Cavity:**
-- `F_HZ = 2.856e9` - RF frequency
-- `Y_CATHODE_MM = 12.75` - Cathode position in solver frame
-- `R_MAX_M = 0.010` - Radial extent
-- `DR_UM = 4.0`, `DZ_UM = 13.0` - Field-map interpolation resolution
-- `EXT_ZMAX = 0.0075`, `EXT_ZMIN = 0.0` - Axial map extension around cavity
+## Batch Execution
 
-**Beam:**
-- `R_CATHODE_MM = 3.14/2` - Emission radius
-- `T_CATHODE_K = 1700.0` - Cathode temperature
-- `PHI_EFF_EV = 2.1` - Effective work function
-- `BETA_F = 1.0` - Field-enhancement factor
-- `RA_UM = 1.0`, `RE_UM = 10.0` - Roughness height/correlation length
-- `PZ_INIT_MEVC = 4.0e-3` - Initial longitudinal momentum (only for constant-`pz` mode)
-- `EMISSION_LAW = "RD_schottky"` - Emission law
-
-**Tracking:**
-- `DT_MM = 0.1` - Integration step
-- `APERTURE_M = 0.010` - Circular aperture
-- `ODE_ALGORITHM = "rk2"` - Integrator
-- `ODE_EPSABS = 1e-6` - Error tolerance
-- `SC_ENABLED = True`, `SC_DT_MM = 0.2` - Space-charge settings
-- `EMISSION_NSTEPS = 100`, `EMISSION_RANGE = 10.0` - Emission-time integration controls
-- `BEAM_LOADING = False` (default), `BL_CFX_DT_MM = 0.1` - Beam-loading controls
-- `EMISSION_PHASE_START = 0.0`, `EMISSION_PHASE_RANGE = 180.0` - Emission phase window
-- `TRANSPORT_N_PART = 10_000`, `N_Z_SNAP = 100` - Transport macroparticles and longitudinal diagnostics
-
-## Usage
-
-```python
-# Run the notebook
-jupyter notebook UH_gun_tracking.ipynb
-```
-
-All tunable parameters are clearly defined at the top of the notebook under "Configuration" cells.
-
-### Batch runner (recommended for laptop/cluster)
+Quick validation run:
 
 ```bash
 python run_thermionic_tm010.py --preset quick --output outputs/smoke_quick
 ```
 
-### Re-run with full knobs (copy/paste)
+Campaign production runs are launched through the `run_thermionic_tm010_campaignPart*.slurm` scripts.
 
-```bash
-python run_thermionic_tm010.py \
-	--output outputs/manual_rerun \
-	--threads 6 \
-	--phase_deg 0.0 \
-	--n_particles 100000 \
-	--f_hz 2.856e9 \
-	--y_cathode_mm 12.75 \
-	--r_max_m 0.01 \
-	--dr_um 4.0 \
-	--dz_um 13.0 \
-	--z_min 0.0 \
-	--ext_zmax 0.0075 \
-	--dt_mm 0.1 \
-	--sc_dt_mm 0.2 \
-	--emission_nsteps 100 \
-	--emission_range 10.0 \
-	--fm_nsteps 100 \
-	--fm_tt_nsteps 100 \
-	--cfx_dt_mm 0.1 \
-	--ode_algorithm rk2 \
-	--ode_epsabs 1e-6 \
-	--aperture_m 0.01 \
-	--sc_enabled \
-	--beam_loading \
-	--bl_q0 4000 \
-	--bl_qext 3500 \
-	--bl_p_fwd_w 1.0e6 \
-	--bl_r_over_q_ohm_per_m 1.0 \
-	--bl_ncells 1 \
-	--bl_tinj_mode auto_from_emission \
-	--bl_tinj_manual_mm_c 0.0 \
-	--n_z_snap 100 \
-	--screen_t0_mode unset \
-	--screen_t0_manual_mm_c 0.0 \
-	--r_cathode_mm 1.57 \
-	--emission_scale 1.0 \
-	--no-use_const_pz \
-	--pz_init_mevc 4.0e-3 \
-	--ra_um 1.0 \
-	--re_um 10.0 \
-	--emission_law RD_schottky \
-	--t_cathode_k 1700.0 \
-	--phi_eff_ev 2.1 \
-	--beta_f 1.0 \
-	--emission_phase_start 0.0 \
-	--emission_phase_range 180.0 \
-	--poll_interval_s 0.5 \
-	--save-figures \
-	--save-screen-json
-```
-
-For the complete CLI surface, run:
+CLI reference:
 
 ```bash
 python run_thermionic_tm010.py --help
 ```
 
-The transport progress implementation is intentionally **elapsed-only** for clarity and stability.
-There is no segmented transport mode in the current code path.
+## Plotting/Diagnostics Defaults
 
-## Helper Functions
+Saved diagnostics use explicit defaults aligned with transport interpretation:
 
-**utils.py:**
-- `kinetic_energy()` - Compute Ek from momenta
-- `select_iq_snapshots()` - Find optimal I/Q time indices
-- `build_iq_phasor()` - Construct complex field phasor
-- `sample_disk()` - Uniform disk distribution
-- `theoretical_energy_gain()` - Analytical ΔW for TM010
-- `cavity_wavelength()` - Wavelength parameters
+- `clean_e = True`
+- `clean_except_zpz = True`
+- `show_zle0 = True`
 
-**load_fieldmap_mat.py:**
-- `load_fieldmap_mat()` - Load .mat field-map files
-- `plot_fieldmap_on_mesh()` - Visualize raw field maps
+This preserves backward/reflected populations in `z-pz` while keeping other panels focused on transmitted-like particles.
 
-## References
+## Data and Git Policy
 
-- **RF-Track:** https://abpcomputing.web.cern.ch/codes/codes_pages/RF-Track/
-- **Manual:** `RF_Track_reference_manual.pdf`
-- **TM010 cavity physics:** Cylindrical cavity resonators, Jackson Ch. 8
+Heavy or local-only folders are intentionally ignored:
 
-## Notes
+- `outputs/`
+- `outputs_Koa/`
+- `manual_references/`
+- `archive/`
 
-**Coordinate Transformation:**
-- Source field maps use (x, y, z) with y = vertical
-- RF-Track uses axisymmetric (r, z) with z = beam direction
-- Mapping: r = |x|, z = y_cathode - y, Er = sign(x)·Ex, Ez = Ey
+## RF-Track Reference
 
-**Phasor Convention:**
-- Field evolves as Re{E_hat · exp(j·2πf·t + jφ)}
-- I/Q snapshots at 0° and 90° construct E_hat
-- RF phase φ set via FM.set_phid()
+- RF-Track project page: `https://abpcomputing.web.cern.ch/codes/codes_pages/RF-Track/`
 
-**Thermionic Model:**
-- Simulates a hot-cathode thermionic source with time-dependent emission current
-- Uses Richardson-Dushman current density with Schottky lowering from the local RF field
-- Includes optional roughness-driven angular broadening via `(Ra, Re)`
-- Generates emission times from the computed current waveform, then tracks in RF-Track with SC/BL options

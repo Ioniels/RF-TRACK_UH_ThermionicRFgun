@@ -461,7 +461,7 @@ def main() -> None:
         rg.set_thread_environment(args.threads, pin_blas_threads=True)
 
     import RF_Track as rft
-    from rf_params import (
+    from rf_gun.rf_params import (
         delivered_power_on_resonance,
         effective_length_from_abs_ez,
         r_over_q_per_m,
