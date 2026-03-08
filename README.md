@@ -8,7 +8,7 @@ This repository provides a consolidated simulation workflow for:
 
 - RF phasor reconstruction from measured field maps
 - thermionic emission (Richardson-Dushman with Schottky lowering)
-- roughness-aware launch (`Ra`, `Re`)
+- surface roughness on emitter (`Ra`, `Re`)
 - RF-Track transport with optional space charge and beam loading
 - robust physics-oriented diagnostics and JSON exports for campaign post-analysis
 
