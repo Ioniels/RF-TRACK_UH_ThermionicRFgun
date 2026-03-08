@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -11,27 +12,34 @@ from ..diagnostics import build_screen_summaries
 from ..constants import c
 from .emission import plot_emission_history, plot_j_vs_n
 from .evolution import plot_evolution, plot_twiss_evolution, plot_emittance_evolution, plot_transmission_evolution
-from .phase_space import plot_phase_space, plot_spectra, plot_screen_phase_space_slider
+from .phase_space import plot_phase_space, plot_spectra, render_screen_phase_space_figure
 
 
 PHASE_SPACE_COLUMNS = ["x_mm", "px_MeV_c", "y_mm", "py_MeV_c", "z_mm", "pz_MeV_c"]
 
 
-def _save_figure(fig, output_dir: Path, stem: str) -> list[str]:
-    png_path = output_dir / f"{stem}.png"
-    eps_path = output_dir / f"{stem}.eps"
-    fig.savefig(png_path, dpi=300, bbox_inches="tight")
-    fig.savefig(eps_path, format="eps", bbox_inches="tight")
-    return [png_path.name, eps_path.name]
+def _save_figure(fig, output_dir: Path, stem: str, *, formats: Sequence[str] = ("png", "eps")) -> list[str]:
+    saved: list[str] = []
+    fmts = [str(fmt).strip().lower() for fmt in formats if str(fmt).strip()]
+    if not fmts:
+        fmts = ["png"]
+    for fmt in fmts:
+        out_path = output_dir / f"{stem}.{fmt}"
+        if fmt == "png":
+            fig.savefig(out_path, dpi=300, bbox_inches="tight")
+        else:
+            fig.savefig(out_path, format=fmt, bbox_inches="tight")
+        saved.append(out_path.name)
+    return saved
 
 
-def _capture_current_figure(save_name: str, output_dir: Path) -> list[str]:
+def _capture_current_figure(save_name: str, output_dir: Path, *, formats: Sequence[str] = ("png", "eps")) -> list[str]:
     import matplotlib.pyplot as plt
 
     fig = plt.gcf()
     if fig is None:
         return []
-    saved = _save_figure(fig, output_dir, save_name)
+    saved = _save_figure(fig, output_dir, save_name, formats=formats)
     plt.close(fig)
     return saved
 
@@ -158,6 +166,8 @@ def save_screen_phase_space_batch(
     highlight_mode: str | None = None,
     show_colorbar: bool = False,
     save_json: bool = True,
+    figure_formats: Sequence[str] = ("png",),
+    timing_log: bool = False,
 ) -> dict[str, Any]:
     """Save non-interactive phase-space figures for B0, screens and Bout."""
     import matplotlib.pyplot as plt
@@ -182,34 +192,54 @@ def save_screen_phase_space_batch(
         M_local: np.ndarray,
         z_local: float | None = None,
         info_local: Any = None,
-        B0_local=None,
-        Bout_local=None,
     ) -> None:
         nonlocal frame_idx
-        plot_screen_phase_space_slider(
-            M_snaps=[np.asarray(M_local, dtype=float)] if M_local is not None else [],
-            z_snaps=[float(z_local)] if z_local is not None else [],
-            info_snaps=[info_local] if info_local is not None else None,
+        t0 = time.perf_counter()
+        z_mm_local = (1e3 * float(z_local)) if z_local is not None else None
+        t_render_start = time.perf_counter()
+        fig = render_screen_phase_space_figure(
+            np.asarray(M_local, dtype=float),
+            label=label,
+            z_mm=z_mm_local,
+            info=info_local,
             clean_e=clean_e,
-            n_real_ref=n_real_ref,
-            n_macroparticles=n_macroparticles,
             style=style,
             highlight_mode=highlight_mode,
+            highlight_zlt0=False,
+            highlight_pzlt0=False,
+            highlight_mask=None,
+            highlight_cmap=None,
             show_colorbar=show_colorbar,
-            B0=B0_local,
-            Bout=Bout_local,
-            phase_fmt=phase_fmt,
+            n_real_ref=n_real_ref,
+            n_macroparticles=n_macroparticles,
             clean_except_zpz=clean_except_zpz,
         )
-        fig_files = _capture_current_figure(stem, fig_dir)
+        t_render_s = float(time.perf_counter() - t_render_start)
+
+        t_save_start = time.perf_counter()
+        fig_files = _save_figure(fig, fig_dir, stem, formats=figure_formats)
+        t_save_s = float(time.perf_counter() - t_save_start)
+        plt.close(fig)
+
         json_file = None
+        t_json_s = 0.0
         if save_json:
+            t_json_start = time.perf_counter()
             json_path = save_beam_phase_space_json(
                 json_dir / f"{stem}.json",
                 np.asarray(M_local, dtype=float),
                 label=label,
             )
             json_file = json_path.name
+            t_json_s = float(time.perf_counter() - t_json_start)
+
+        t_total_s = float(time.perf_counter() - t0)
+        timing = {
+            "render_s": t_render_s,
+            "save_figure_s": t_save_s,
+            "save_json_s": t_json_s,
+            "total_s": t_total_s,
+        }
         manifest.append(
             {
                 "frame_index": int(frame_idx),
@@ -217,14 +247,20 @@ def save_screen_phase_space_batch(
                 "z_mm": float(z_local) if z_local is not None else None,
                 "figure_files": fig_files,
                 "json_file": json_file,
+                "timing": timing,
             }
         )
+        if bool(timing_log):
+            print(
+                f"[screen-frame {frame_idx:04d}] {label}: "
+                f"render={t_render_s:.3f}s save={t_save_s:.3f}s json={t_json_s:.3f}s total={t_total_s:.3f}s"
+            )
         frame_idx += 1
         plt.close("all")
 
     if B0 is not None:
         M0 = np.array(B0.get_phase_space(phase_fmt, "all"), copy=True)
-        _save_single("B0", f"frame_{frame_idx:04d}_B0", M_local=M0, B0_local=B0)
+        _save_single("B0", f"frame_{frame_idx:04d}_B0", M_local=M0)
 
     z_mm = 1e3 * np.asarray(z_snaps, dtype=float) if z_snaps is not None else np.asarray([], dtype=float)
     n_screens = min(len(M_snaps), int(z_mm.size))
@@ -242,17 +278,41 @@ def save_screen_phase_space_batch(
 
     if Bout is not None:
         Mf = np.array(Bout.get_phase_space(phase_fmt, "all"), copy=True)
-        _save_single("Bout", f"frame_{frame_idx:04d}_Bout", M_local=Mf, Bout_local=Bout)
+        _save_single("Bout", f"frame_{frame_idx:04d}_Bout", M_local=Mf)
 
     manifest_path = output_dir / "screen_phase_space_manifest.json"
+    timing_summary = {
+        "render_s_total": float(sum(float(rec.get("timing", {}).get("render_s", 0.0)) for rec in manifest)),
+        "save_figure_s_total": float(sum(float(rec.get("timing", {}).get("save_figure_s", 0.0)) for rec in manifest)),
+        "save_json_s_total": float(sum(float(rec.get("timing", {}).get("save_json_s", 0.0)) for rec in manifest)),
+        "total_s_total": float(sum(float(rec.get("timing", {}).get("total_s", 0.0)) for rec in manifest)),
+    }
+    if manifest:
+        n_frames = float(len(manifest))
+        timing_summary["total_s_mean"] = float(timing_summary["total_s_total"] / n_frames)
+        timing_summary["total_s_max"] = float(max(float(rec.get("timing", {}).get("total_s", 0.0)) for rec in manifest))
+    else:
+        timing_summary["total_s_mean"] = 0.0
+        timing_summary["total_s_max"] = 0.0
+
     with manifest_path.open("w", encoding="utf-8") as f:
-        json.dump({"frames": manifest}, f, indent=2)
+        json.dump({"frames": manifest, "timing_summary": timing_summary}, f, indent=2)
+
+    if bool(timing_log):
+        print(
+            "[screen-frame timing-summary] "
+            f"frames={len(manifest)} render_total={timing_summary['render_s_total']:.3f}s "
+            f"save_total={timing_summary['save_figure_s_total']:.3f}s "
+            f"json_total={timing_summary['save_json_s_total']:.3f}s "
+            f"total={timing_summary['total_s_total']:.3f}s"
+        )
 
     return {
         "frame_count": int(len(manifest)),
         "figure_dir": str(fig_dir),
         "json_dir": str(json_dir) if save_json else None,
         "manifest_file": str(manifest_path),
+        "timing_summary": timing_summary,
     }
 
 

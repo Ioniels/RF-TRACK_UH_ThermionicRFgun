@@ -126,9 +126,9 @@ run_case "thermionic_movie_T1700_SC1_BL1_N1000000_NZ10_RA0_RE0" \
   --ra_um 0 \
   --re_um 0 \
   --store-screen-phase-space \
-  --save-screen-json \
-  --screen-json-mode full \
   --save-screen-phase-space-batch \
-  --save-screen-phase-space-json
+  --screen-frame-timing-log \
+  --no-save-screen-phase-space-json \
+  --screen-frame-formats png
 
 echo "Campaign completed successfully."

@@ -422,6 +422,115 @@ def _extract_transmission(info) -> float:
     return info_get_first(info, ["transmission", "Transmission"])
 
 
+def render_screen_phase_space_figure(
+    M: np.ndarray,
+    *,
+    label: str,
+    z_mm: float | None = None,
+    info: object | None = None,
+    clean_e: bool = True,
+    style: PlotStyleConfig | None = None,
+    highlight_mode: str | None = None,
+    highlight_zlt0: bool = False,
+    highlight_pzlt0: bool = False,
+    highlight_mask: np.ndarray | None = None,
+    highlight_cmap: str | None = None,
+    show_colorbar: bool = False,
+    n_real_ref: float | None = None,
+    n_macroparticles: int | None = None,
+    n_ref: int | None = None,
+    frame_position: tuple[int, int] | None = None,
+    clean_except_zpz: bool = False,
+):
+    """Render one screen-style phase-space figure without widgets/display side effects."""
+    import matplotlib.pyplot as plt
+
+    style = DEFAULT_PLOT_STYLE if style is None else style
+
+    M_raw = np.asarray(M, dtype=float)
+    if M_raw.ndim != 2 or M_raw.shape[1] < 6:
+        M_raw = np.zeros((0, 6), dtype=float)
+
+    M_logic = M_raw
+    if M_raw.shape[0] > 0 and z_mm is not None and np.isfinite(float(z_mm)):
+        M_logic = np.array(M_raw, copy=True)
+        M_logic[:, 4] = np.asarray(M_logic[:, 4], dtype=float) + float(z_mm)
+
+    hm = _resolve_highlight_mask(
+        M_logic,
+        highlight_mode=highlight_mode,
+        highlight_zlt0=bool(highlight_zlt0),
+        highlight_pzlt0=bool(highlight_pzlt0),
+        highlight_mask=highlight_mask,
+    )
+
+    if clean_e and M_raw.shape[0] > 0:
+        good = np.isfinite(M_logic[:, 4]) & np.isfinite(M_logic[:, 5]) & (M_logic[:, 4] >= 0.0) & (M_logic[:, 5] > 0.0)
+    else:
+        good = np.isfinite(M_logic[:, 4]) & np.isfinite(M_logic[:, 5]) if M_raw.shape[0] > 0 else np.zeros((0,), dtype=bool)
+
+    M_plot = M_raw[good] if M_raw.shape[0] > 0 else M_raw
+    hm_plot = hm[good] if (hm is not None and hm.size == M_raw.shape[0]) else None
+
+    transmission_raw = _extract_transmission(info) if info is not None else np.nan
+    if n_real_ref is not None and np.isfinite(float(n_real_ref)) and float(n_real_ref) > 0.0 and np.isfinite(transmission_raw):
+        transmission_txt = f"{100.0 * float(transmission_raw) / float(n_real_ref):.2f}%"
+    elif n_macroparticles is not None and int(n_macroparticles) > 0:
+        transmission_txt = f"{100.0 * float(M_plot.shape[0]) / float(int(n_macroparticles)):.2f}%"
+    elif n_ref is not None and int(n_ref) > 0:
+        transmission_txt = f"{100.0 * float(M_plot.shape[0]) / float(int(n_ref)):.2f}%"
+    else:
+        transmission_txt = "n/a"
+
+    prefix = f"{label}"
+    if frame_position is not None and len(frame_position) == 2:
+        prefix = f"{label} {int(frame_position[0])}/{int(frame_position[1])}"
+
+    t_val = _extract_time_ns(info) if info is not None else np.nan
+    if z_mm is not None and np.isfinite(float(z_mm)) and np.isfinite(t_val):
+        title = f"{prefix} | z={float(z_mm):.3f} mm | t={t_val:.4f} ns | N={int(M_plot.shape[0])} | transmission={transmission_txt}"
+    elif z_mm is not None and np.isfinite(float(z_mm)):
+        title = f"{prefix} | z={float(z_mm):.3f} mm | N={int(M_plot.shape[0])} | transmission={transmission_txt}"
+    else:
+        title = f"{prefix} | N={int(M_plot.shape[0])} | transmission={transmission_txt}"
+
+    fig = plt.figure(figsize=(16.5, 5.4))
+    row = fig.add_gridspec(1, 3, wspace=0.18)
+    if M_plot.shape[0] == 0:
+        axes = [fig.add_subplot(row[j]) for j in range(3)]
+        for ax in axes:
+            ax.text(0.5, 0.5, "No particles", ha="center", va="center")
+            ax.grid(alpha=0.3)
+        fig.suptitle(title)
+        fig.tight_layout()
+        return fig
+
+    _phase_space_triplet(
+        fig,
+        row,
+        M_plot,
+        style=style,
+        highlight_mask=(hm_plot if hm_plot is not None else np.zeros(M_plot.shape[0], dtype=bool)),
+        highlight_cmap=highlight_cmap,
+        show_colorbar=bool(show_colorbar),
+        prefix="",
+        zpz_override_M=(M_raw if (clean_e and clean_except_zpz) else None),
+        zpz_override_highlight_mask=(
+            _resolve_highlight_mask(
+                M_logic,
+                highlight_mode=highlight_mode,
+                highlight_zlt0=bool(highlight_zlt0),
+                highlight_pzlt0=bool(highlight_pzlt0),
+                highlight_mask=highlight_mask,
+            )
+            if (clean_e and clean_except_zpz) else None
+        ),
+    )
+    fig.suptitle(title)
+    fig.tight_layout()
+    return fig
+
+
 def plot_spectra(
     Bout,
     transport_phase_deg: float,
@@ -886,43 +995,26 @@ def plot_screen_phase_space_slider(
         )
 
     def _draw_figure(i: int):
-        fig = plt.figure(figsize=(16.5, 5.4))
-        row = fig.add_gridspec(1, 3, wspace=0.18)
-        M, hm = _pick_data(i)
-        if M.shape[0] == 0:
-            axes = [fig.add_subplot(row[j]) for j in range(3)]
-            for ax in axes:
-                ax.text(0.5, 0.5, "No particles", ha="center", va="center")
-                ax.grid(alpha=0.3)
-            fig.suptitle(_title_for(i))
-            plt.tight_layout()
-            plt.show()
-            return
-
-        _phase_space_triplet(
-            fig,
-            row,
-            M,
+        rec = datasets[i]
+        fig = render_screen_phase_space_figure(
+            np.asarray(rec["M"], dtype=float),
+            label=rec["label"],
+            z_mm=rec["z_mm"] if np.isfinite(rec["z_mm"]) else None,
+            info=rec["info"],
+            clean_e=clean_e,
             style=style,
-            highlight_mask=hm,
+            highlight_mode=highlight_mode,
+            highlight_zlt0=bool(highlight_zlt0),
+            highlight_pzlt0=bool(highlight_pzlt0),
+            highlight_mask=rec["hmask"],
             highlight_cmap=highlight_cmap,
             show_colorbar=bool(show_colorbar),
-            prefix="",
-            zpz_override_M=(datasets[i]["M"] if (clean_e and clean_except_zpz) else None),
-            zpz_override_highlight_mask=(
-                _resolve_highlight_mask(
-                    _matrix_for_logic(datasets[i]),
-                    highlight_mode=highlight_mode,
-                    highlight_zlt0=bool(highlight_zlt0),
-                    highlight_pzlt0=bool(highlight_pzlt0),
-                    highlight_mask=datasets[i]["hmask"],
-                )
-                if (clean_e and clean_except_zpz) else None
-            ),
+            n_real_ref=n_real_ref,
+            n_macroparticles=n_macroparticles,
+            n_ref=(int(np.max(screen_counts)) if screen_counts.size else 0),
+            frame_position=(i + 1, n),
+            clean_except_zpz=clean_except_zpz,
         )
-
-        fig.suptitle(_title_for(i))
-        plt.tight_layout()
         plt.show()
 
     try:

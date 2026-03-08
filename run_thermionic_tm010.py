@@ -113,6 +113,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-beam-summary", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-screen-phase-space-batch", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--save-screen-phase-space-json", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--screen-frame-formats", type=str, nargs="+", default=["png"])
+    parser.add_argument("--screen-frame-timing-log", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--save-class-phase-space", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--clean-e", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--clean-except-zpz", action=argparse.BooleanOptionalAction, default=True)
@@ -477,14 +479,15 @@ def main() -> None:
     import rf_gun as rg
 
     args = parse_args()
+    threads_requested_explicit = args.threads is not None
     apply_preset(args)
     output_dir = resolve_output_dir(args)
     args.output = output_dir
     rng = np.random.default_rng(int(args.seed) if args.seed is not None else None)
 
-    if args.threads is not None:
-        args.threads = rg.resolve_threads(requested=args.threads, default=1)
-        rg.set_thread_environment(args.threads, pin_blas_threads=True)
+    effective_threads = rg.resolve_threads(requested=args.threads, default=1)
+    rg.set_thread_environment(effective_threads, pin_blas_threads=True)
+    args.threads = int(effective_threads)
 
     import RF_Track as rft
     from rf_gun.rf_params import (
@@ -494,11 +497,10 @@ def main() -> None:
         veff_from_phase_scan_pz,
     )
 
-    if args.threads is not None:
-        try:
-            rft.cvar.number_of_threads = int(args.threads)
-        except Exception:
-            pass
+    try:
+        rft.cvar.number_of_threads = int(effective_threads)
+    except Exception:
+        pass
 
     slurm_cpus = os.environ.get("SLURM_CPUS_PER_TASK", "unset")
     rftrack_max_threads = getattr(rft, "max_number_of_threads", "n/a")
@@ -521,10 +523,10 @@ def main() -> None:
     print(f"dt_mm: {float(args.dt_mm)}")
     print(f"sc_dt_mm: {float(args.sc_dt_mm)}")
     print(f"cfx_dt_mm: {float(args.cfx_dt_mm)}")
-    if args.threads is None:
-        print("Thread policy: automatic detection")
+    if threads_requested_explicit:
+        print(f"Thread policy: forced --threads={int(effective_threads)}")
     else:
-        print(f"Thread policy: forced --threads={int(args.threads)}")
+        print(f"Thread policy: auto-resolved from scheduler/default -> {int(effective_threads)}")
     print(f"Env RF_TRACK_NUMBER_OF_THREADS={os.environ.get('RF_TRACK_NUMBER_OF_THREADS', 'unset')}")
     print(
         "BLAS thread env: "
@@ -921,6 +923,8 @@ def main() -> None:
             highlight_mode="zlt0",
             show_colorbar=False,
             save_json=bool(args.save_screen_phase_space_json),
+            figure_formats=tuple(str(fmt).strip().lower() for fmt in args.screen_frame_formats if str(fmt).strip()),
+            timing_log=bool(args.screen_frame_timing_log),
         )
 
     saved_screen_json = 0
@@ -1006,7 +1010,11 @@ def main() -> None:
         "rftrack": {
             "max_number_of_threads": sanitize_for_json(getattr(rft, "max_number_of_threads", None)),
             "number_of_threads": sanitize_for_json(getattr(rft.cvar, "number_of_threads", None)),
-            "thread_policy": "automatic detection" if args.threads is None else f"forced ({int(args.threads)})",
+            "thread_policy": (
+                f"forced ({int(effective_threads)})"
+                if threads_requested_explicit
+                else f"auto-resolved ({int(effective_threads)})"
+            ),
         },
         "thread_env": {
             "SLURM_CPUS_PER_TASK": os.environ.get("SLURM_CPUS_PER_TASK"),
