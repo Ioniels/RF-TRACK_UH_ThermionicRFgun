@@ -485,6 +485,14 @@ def main() -> None:
     args.output = output_dir
     rng = np.random.default_rng(int(args.seed) if args.seed is not None else None)
 
+    inherited_thread_env = {
+        "RF_TRACK_NUMBER_OF_THREADS": os.environ.get("RF_TRACK_NUMBER_OF_THREADS", "unset"),
+        "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", "unset"),
+        "OPENBLAS_NUM_THREADS": os.environ.get("OPENBLAS_NUM_THREADS", "unset"),
+        "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS", "unset"),
+        "NUMEXPR_NUM_THREADS": os.environ.get("NUMEXPR_NUM_THREADS", "unset"),
+    }
+
     effective_threads = rg.resolve_threads(requested=args.threads, default=1)
     rg.set_thread_environment(effective_threads, pin_blas_threads=True)
     args.threads = int(effective_threads)
@@ -506,7 +514,22 @@ def main() -> None:
     rftrack_max_threads = getattr(rft, "max_number_of_threads", "n/a")
     rftrack_chosen_threads = getattr(rft.cvar, "number_of_threads", "n/a")
 
+    print("---- Pre-configuration environment snapshot ----")
+    print(f"Inherited RF_TRACK_NUMBER_OF_THREADS={inherited_thread_env['RF_TRACK_NUMBER_OF_THREADS']}")
+    print(f"Inherited OMP_NUM_THREADS={inherited_thread_env['OMP_NUM_THREADS']}")
+    print(f"Inherited OPENBLAS_NUM_THREADS={inherited_thread_env['OPENBLAS_NUM_THREADS']}")
+    print(f"Inherited MKL_NUM_THREADS={inherited_thread_env['MKL_NUM_THREADS']}")
+    print(f"Inherited NUMEXPR_NUM_THREADS={inherited_thread_env['NUMEXPR_NUM_THREADS']}")
+
+    print("---- Applied thread configuration ----")
     print(f"SLURM_CPUS_PER_TASK: {slurm_cpus}")
+    print(f"Requested threads: {int(args.threads) if threads_requested_explicit else 'auto'}")
+    print(f"Resolved threads: {int(effective_threads)}")
+    print(f"Applied RF_TRACK_NUMBER_OF_THREADS={os.environ.get('RF_TRACK_NUMBER_OF_THREADS', 'unset')}")
+    print(f"Applied OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS', 'unset')}")
+    print(f"Applied OPENBLAS_NUM_THREADS={os.environ.get('OPENBLAS_NUM_THREADS', 'unset')}")
+    print(f"Applied MKL_NUM_THREADS={os.environ.get('MKL_NUM_THREADS', 'unset')}")
+    print(f"Applied NUMEXPR_NUM_THREADS={os.environ.get('NUMEXPR_NUM_THREADS', 'unset')}")
     print(f"RF-Track max threads (detected): {rftrack_max_threads}")
     print(f"RF-Track chosen threads (effective): {rftrack_chosen_threads}")
     print("---- Simulation Main Parameters ----")
@@ -527,14 +550,6 @@ def main() -> None:
         print(f"Thread policy: forced --threads={int(effective_threads)}")
     else:
         print(f"Thread policy: auto-resolved from scheduler/default -> {int(effective_threads)}")
-    print(f"Env RF_TRACK_NUMBER_OF_THREADS={os.environ.get('RF_TRACK_NUMBER_OF_THREADS', 'unset')}")
-    print(
-        "BLAS thread env: "
-        f"OMP={os.environ.get('OMP_NUM_THREADS', 'unset')} "
-        f"OPENBLAS={os.environ.get('OPENBLAS_NUM_THREADS', 'unset')} "
-        f"MKL={os.environ.get('MKL_NUM_THREADS', 'unset')} "
-        f"NUMEXPR={os.environ.get('NUMEXPR_NUM_THREADS', 'unset')}"
-    )
     if bool(args.timing_diagnostics):
         print(f"Timing diagnostics: ON (slow-step threshold={float(args.slow_step_warn_s):.2f} s)")
     else:
