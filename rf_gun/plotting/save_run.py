@@ -1,6 +1,7 @@
 """Batch plotting entry points for run outputs."""
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from pathlib import Path
@@ -8,14 +9,24 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from ..diagnostics import build_screen_summaries
-from ..constants import c
+from ..constants import c, ME_MEV
+from ..particle_tags import ParticleTags, build_particle_tags
+from ..beam_properties import compute_beam_properties, transmission_curves
 from .emission import plot_emission_history, plot_j_vs_n
-from .evolution import plot_evolution, plot_twiss_evolution, plot_emittance_evolution, plot_transmission_evolution
-from .phase_space import plot_phase_space, plot_spectra, render_screen_phase_space_figure
+from .evolution import plot_beam_moments_evolution, plot_beam_twiss_evolution
+from .phase_space import (
+    EXTENDED_PHASE_FMT_DEFAULT,
+    plot_phase_space,
+    plot_spectra,
+    render_screen_phase_space_figure,
+)
 
 
 PHASE_SPACE_COLUMNS = ["x_mm", "px_MeV_c", "y_mm", "py_MeV_c", "z_mm", "pz_MeV_c"]
+#: Column names for the 4 optional trailing columns of `EXTENDED_PHASE_FMT_DEFAULT`, appended to
+#: `PHASE_SPACE_COLUMNS` (by count, not by inspecting the caller's actual phase_fmt string) when a
+#: caller doesn't supply explicit `phase_space_columns`.
+_EXTENDED_EXTRA_COLUMNS = ["id", "t_mm_c", "E_MeV", "K_MeV"]
 
 
 def _save_figure(fig, output_dir: Path, stem: str, *, formats: Sequence[str] = ("png", "eps")) -> list[str]:
@@ -42,6 +53,107 @@ def _capture_current_figure(save_name: str, output_dir: Path, *, formats: Sequen
     saved = _save_figure(fig, output_dir, save_name, formats=formats)
     plt.close(fig)
     return saved
+
+
+def _save_figure_data(stem: Path, data: Any, *, data_format: str) -> Path:
+    """Write the numeric data behind a figure to `{stem}.npz` or `{stem}.json`."""
+    fmt = str(data_format).strip().lower()
+    if fmt == "npz":
+        arrays = {k: np.asarray(v) for k, v in dict(data).items() if v is not None}
+        out_path = stem.with_suffix(".npz")
+        np.savez_compressed(out_path, **arrays)
+        return out_path
+    if fmt == "json":
+        from ..io import to_json_safe
+
+        out_path = stem.with_suffix(".json")
+        with out_path.open("w", encoding="utf-8") as f:
+            json.dump(to_json_safe(data), f, indent=2, sort_keys=True)
+        return out_path
+    raise ValueError(f"Unknown data_format: {data_format!r} (expected 'npz' or 'json')")
+
+
+class FigureCapture:
+    """Holder yielded by `capture_figures`; set `.data` inside the `with` block when the value to
+    save is only available from the plotting call's return (e.g. `plot_back_bombardment_energy_density`
+    returns its histogram dict) rather than known upfront."""
+
+    def __init__(self, data: Any = None):
+        self.data = data
+
+
+@contextlib.contextmanager
+def capture_figures(
+    name: str,
+    output_dir: Path | str | None,
+    *,
+    formats: Sequence[str] = ("png",),
+    dpi: int = 200,
+    data: Any = None,
+    data_format: str = "npz",
+):
+    """Save every figure shown (via ``plt.show()``) inside this ``with`` block, before Jupyter's
+    inline backend destroys it -- and the numeric data behind that figure too.
+
+    Notebook cells that call a plotting helper ending in ``plt.show()`` -- e.g. `field_maps`,
+    `plot_spectra`, the back-bombardment figures -- never return the `Figure` object, so it can't
+    be saved from the caller after the fact: `%matplotlib inline`'s own `show()` (unlike the
+    default backend's) destroys every open figure right after displaying it. This wraps `plt.show`
+    for the duration of the block instead, so each figure is written to disk immediately before
+    that happens -- no change needed inside the plotting helpers themselves, and no dependency on
+    IPython's `InlineBackend.close_figures` config.
+
+    The data behind the figure -- typically a ``dict[str, array-like]`` of the exact x/y (and any
+    color/weight) arrays passed into the plot call -- is written alongside it as `{name}.npz`
+    (default; one array per key, `np.load(...)['key']` to read back) or, with `data_format="json"`
+    (via `rf_gun.io.to_json_safe`, for small/mixed-type payloads), as `{name}.json`. This is what
+    makes a saved figure independently reproducible/replottable later without re-running the
+    simulation. Two ways to supply it:
+
+    - Known before the plot call: pass `data=...` directly.
+    - Only available from the plot call's return value: bind the context with ``as``, and set
+      `.data` on it inside the block::
+
+          with rg.capture_figures("name", FIGURES_DIR) as cap:
+              cap.data = rg.plot_some_histogram(...)  # returns a dict of the binned data
+
+    Either way, the data is written once, at the end of the block (after the figure itself).
+
+    A no-op (yields a `FigureCapture` that discards `.data`, saves nothing) when `output_dir` is
+    `None` -- the intended behavior for a `SAVE_DATA=False` run in the notebook: wrap every plot
+    call in ``with rg.capture_figures("name", FIGURES_DIR):`` and pass `FIGURES_DIR=None` when
+    saving is disabled, rather than threading an extra `if SAVE_DATA:` through every plotting cell.
+    """
+    import matplotlib.pyplot as plt
+
+    holder = FigureCapture(data)
+
+    if output_dir is None:
+        yield holder
+        return
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    original_show = plt.show
+    counter = {"i": 0}
+
+    def _patched_show(*args, **kwargs):
+        for num in plt.get_fignums():
+            fig = plt.figure(num)
+            suffix = "" if counter["i"] == 0 else f"_{counter['i']}"
+            for fmt in formats:
+                fig.savefig(out_dir / f"{name}{suffix}.{fmt}", dpi=dpi, bbox_inches="tight")
+            counter["i"] += 1
+        return original_show(*args, **kwargs)
+
+    plt.show = _patched_show
+    try:
+        yield holder
+    finally:
+        plt.show = original_show
+        if holder.data is not None:
+            _save_figure_data(out_dir / name, holder.data, data_format=data_format)
 
 
 def plot_class_conditioned_histograms(
@@ -131,14 +243,20 @@ def save_beam_phase_space_json(
     if arr.ndim != 2:
         arr = np.zeros((0, 6), dtype=float)
 
-    cols = list(phase_space_columns) if phase_space_columns is not None else list(PHASE_SPACE_COLUMNS)
+    if phase_space_columns is not None:
+        cols = list(phase_space_columns)
+    else:
+        n_extra = max(0, arr.shape[1] - len(PHASE_SPACE_COLUMNS))
+        cols = list(PHASE_SPACE_COLUMNS) + _EXTENDED_EXTRA_COLUMNS[:n_extra]
+
     payload = {
         "schema_version": 1,
         "label": str(label) if label is not None else None,
         "phase_space_columns": cols,
         "particle_count": int(arr.shape[0]),
-        "coordinate_system": "Bunch6dT phase space: X Px Y Py Z Pz",
-        "timing_note": "Creation time t0 is stored separately from Z in Bunch6dT and is not one of the 6 phase-space columns.",
+        "coordinate_system": "Bunch6dT phase space: X Px Y Py Z Pz"
+        + (" (+ id, t, E, K when present)" if arr.shape[1] > len(PHASE_SPACE_COLUMNS) else ""),
+        "timing_note": "Creation time t0 is stored separately from Z in Bunch6dT and is not one of the 6 core phase-space columns.",
         "phase_space": arr.tolist(),
     }
     if extra_metadata:
@@ -153,23 +271,25 @@ def save_screen_phase_space_batch(
     output_dir: Path,
     M_snaps: Sequence[np.ndarray],
     z_snaps: Sequence[float],
-    info_snaps: Sequence[Any] | None = None,
     *,
     B0=None,
-    Bout=None,
-    phase_fmt: str = "%X %Px %Y %Py %Z %Pz",
-    clean_e: bool = True,
-    clean_except_zpz: bool = False,
-    n_real_ref: float | None = None,
+    tags: ParticleTags | None = None,
+    phase_fmt: str = EXTENDED_PHASE_FMT_DEFAULT,
+    exclude_backward_losses: bool = True,
+    exclude_aperture_losses: bool = True,
     n_macroparticles: int | None = None,
     style=None,
-    highlight_mode: str | None = None,
     show_colorbar: bool = False,
     save_json: bool = True,
     figure_formats: Sequence[str] = ("png",),
     timing_log: bool = False,
 ) -> dict[str, Any]:
-    """Save non-interactive phase-space figures for B0, screens and Bout."""
+    """Save non-interactive phase-space figures for B0 and every screen.
+
+    `Bout` is intentionally not included as a frame here -- see `rf_gun.plotting.phase_space`'s
+    module docstring for why (it is a fixed-time snapshot with a spread of z among its particles,
+    so it has no single z to plot against); the last screen serves as the final "exit-like" frame.
+    """
     import matplotlib.pyplot as plt
 
     output_dir = Path(output_dir)
@@ -191,7 +311,6 @@ def save_screen_phase_space_batch(
         *,
         M_local: np.ndarray,
         z_local: float | None = None,
-        info_local: Any = None,
     ) -> None:
         nonlocal frame_idx
         t0 = time.perf_counter()
@@ -201,18 +320,12 @@ def save_screen_phase_space_batch(
             np.asarray(M_local, dtype=float),
             label=label,
             z_mm=z_mm_local,
-            info=info_local,
-            clean_e=clean_e,
+            tags=tags,
+            exclude_backward_losses=exclude_backward_losses,
+            exclude_aperture_losses=exclude_aperture_losses,
             style=style,
-            highlight_mode=highlight_mode,
-            highlight_zlt0=False,
-            highlight_pzlt0=False,
-            highlight_mask=None,
-            highlight_cmap=None,
             show_colorbar=show_colorbar,
-            n_real_ref=n_real_ref,
             n_macroparticles=n_macroparticles,
-            clean_except_zpz=clean_except_zpz,
         )
         t_render_s = float(time.perf_counter() - t_render_start)
 
@@ -265,7 +378,6 @@ def save_screen_phase_space_batch(
     z_mm = 1e3 * np.asarray(z_snaps, dtype=float) if z_snaps is not None else np.asarray([], dtype=float)
     n_screens = min(len(M_snaps), int(z_mm.size))
     for i in range(n_screens):
-        info_i = info_snaps[i] if (info_snaps is not None and i < len(info_snaps)) else None
         z_i = float(z_mm[i])
         stem = f"frame_{frame_idx:04d}_screen_{i+1:03d}_z{_z_tag(z_i)}mm"
         _save_single(
@@ -273,12 +385,7 @@ def save_screen_phase_space_batch(
             stem,
             M_local=np.asarray(M_snaps[i], dtype=float),
             z_local=float(z_snaps[i]),
-            info_local=info_i,
         )
-
-    if Bout is not None:
-        Mf = np.array(Bout.get_phase_space(phase_fmt, "all"), copy=True)
-        _save_single("Bout", f"frame_{frame_idx:04d}_Bout", M_local=Mf)
 
     manifest_path = output_dir / "screen_phase_space_manifest.json"
     timing_summary = {
@@ -324,55 +431,84 @@ def save_run_figures(
     thermo_info: dict[str, Any],
     M_snaps: Sequence[np.ndarray],
     z_snaps: Sequence[float],
-    I_snaps: Sequence[Any],
     *,
-    phase_fmt: str = "%X %Px %Y %Py %Z %Pz",
-    clean_e: bool = True,
-    clean_except_zpz: bool = True,
-    show_zle0: bool = True,
-    n_real_ref: float | None = None,
+    tags: ParticleTags | None = None,
+    phase_fmt: str = EXTENDED_PHASE_FMT_DEFAULT,
+    exclude_backward_losses: bool = True,
+    exclude_aperture_losses: bool = True,
     n_macroparticles: int | None = None,
+    mass_MeV: float = ME_MEV,
     lost_table: np.ndarray | None = None,
 ) -> list[str]:
-    """Generate and save a standard figure bundle for one run."""
+    """Generate and save a standard figure bundle for one run.
+
+    `tags` (`rf_gun.particle_tags.ParticleTags`) drives every figure in this bundle -- pass one
+    built via `build_particle_tags` (from `Bout` plus, when available, post-hoc aperture
+    entrance/exit screens) so this bundle's tagging is identical to any other output (JSON
+    summaries, the notebook) built from the same run. If not supplied, falls back to
+    backward-tagging only (from `Bout`'s own reliable absolute z/pz), with no aperture-loss
+    tagging. The beam-properties table and transmission curves are always computed on the
+    forward-going + aperture-surviving population, matching
+    `rf_gun.beam_properties.compute_beam_properties`.
+    """
     import matplotlib.pyplot as plt
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     saved: list[str] = []
 
-    plot_phase_space(
-        B0,
+    M0 = np.array(B0.get_phase_space(phase_fmt, "all"), copy=True)
+    Bout_M = np.array(Bout.get_phase_space(phase_fmt, "all"), copy=True)
+
+    if tags is None:
+        tags = build_particle_tags(Bout_M, None, None, 0.0, False)
+
+    if M_snaps:
+        M_exit = np.asarray(M_snaps[-1], dtype=float)
+        plot_phase_space(
+            B0,
+            M_exit,
+            transport_phase_deg,
+            tags=tags,
+            exclude_backward_losses=exclude_backward_losses,
+            exclude_aperture_losses=exclude_aperture_losses,
+            phase_fmt=phase_fmt,
+            exit_z_m=float(z_snaps[-1]) if z_snaps else None,
+        )
+        saved += _capture_current_figure("initial_phase_space_x_px", output_dir)
+
+    plot_spectra(
         Bout,
         transport_phase_deg,
-        clean_e=clean_e,
-        clean_except_zpz=clean_except_zpz,
-        show_zle0=show_zle0,
+        B0=B0,
+        thermo_info=thermo_info,
+        tags=tags,
+        exclude_backward_losses=exclude_backward_losses,
         phase_fmt=phase_fmt,
     )
-    saved += _capture_current_figure("initial_phase_space_x_px", output_dir)
-
-    plot_spectra(Bout, transport_phase_deg, B0=B0, thermo_info=thermo_info, clean_e=clean_e, show_zle0=show_zle0, phase_fmt=phase_fmt)
     saved += _capture_current_figure("screen_spectra", output_dir)
 
     if M_snaps and z_snaps:
-        plot_evolution(M_snaps, z_snaps, info_snaps=I_snaps, clean_e=clean_e)
-        saved += _capture_current_figure("longitudinal_evolution", output_dir)
+        table = compute_beam_properties(M_snaps, z_snaps, tags, mass_MeV)
 
-        plot_twiss_evolution(M_snaps, z_snaps, info_snaps=I_snaps, clean_e=clean_e)
-        saved += _capture_current_figure("twiss_evolution", output_dir)
+        # Macroparticle count only -- every macroparticle represents an equal share of the real
+        # bunch (no per-particle weight column anywhere in the phase-space format), so a
+        # macroparticle-count ratio already *is* the real transmission fraction. `Q_total_C /
+        # q_e` (the *real*, charge-weighted electron count) is many orders of magnitude larger
+        # than the macroparticle count and must never be used as this denominator -- confirmed
+        # empirically to silently produce a "transmission" far too small (e.g. 1e-5% instead of
+        # ~40%) when it was used here previously.
+        if n_macroparticles is not None and int(n_macroparticles) > 0:
+            n_initial = int(n_macroparticles)
+        else:
+            n_initial = int(M0.shape[0]) if M0.ndim == 2 else 0
+        transmission = transmission_curves(M_snaps, z_snaps, tags, n_initial) if n_initial > 0 else None
 
-        plot_emittance_evolution(z_snaps, info_snaps=I_snaps)
-        saved += _capture_current_figure("emittance_evolution", output_dir)
+        plot_beam_moments_evolution(table)
+        saved += _capture_current_figure("beam_moments_evolution", output_dir)
 
-    if z_snaps and I_snaps:
-        plot_transmission_evolution(
-            z_snaps,
-            I_snaps,
-            n_real_ref=n_real_ref,
-            n_macroparticles=n_macroparticles,
-        )
-        saved += _capture_current_figure("screen_transmission", output_dir)
+        plot_beam_twiss_evolution(table, transmission=transmission)
+        saved += _capture_current_figure("beam_twiss_evolution", output_dir)
 
     if thermo_info:
         plot_emission_history(thermo_info, show_components=True)
@@ -381,31 +517,9 @@ def save_run_figures(
         plot_j_vs_n(thermo_info)
         saved += _capture_current_figure("emission_j_vs_n", output_dir)
 
-    # Summary screen diagnostics figure
-    if z_snaps:
-        summaries = build_screen_summaries(z_snaps, I_snaps, M_snaps if M_snaps else None)
-        if summaries:
-            z_mm = np.asarray([1e3 * rec["z_m"] for rec in summaries], dtype=float)
-            n_vals = np.asarray([rec.get("N", np.nan) for rec in summaries], dtype=float)
-            trans = np.asarray([rec.get("transmission", np.nan) for rec in summaries], dtype=float)
-            fig, axes = plt.subplots(2, 1, figsize=(7, 6), sharex=True)
-            axes[0].plot(z_mm, n_vals, "o-", ms=3)
-            axes[0].set_ylabel("screen N")
-            axes[0].grid(alpha=0.3)
-            axes[1].plot(z_mm, trans, "o-", ms=3, color="tab:green")
-            axes[1].set_ylabel("transmission")
-            axes[1].set_xlabel("z [mm]")
-            axes[1].grid(alpha=0.3)
-            fig.suptitle("screen summary diagnostics")
-            fig.tight_layout()
-            saved += _save_figure(fig, output_dir, "screen_summary")
-            plt.close(fig)
-
-    M0 = np.array(B0.get_phase_space(phase_fmt, "all"), copy=True)
-    Mf = np.array(Bout.get_phase_space(phase_fmt, "all"), copy=True)
     fig_cls = plot_class_conditioned_histograms(
         M0,
-        Mf,
+        Bout_M,
         lost_table=lost_table,
         t0_mm_c=np.asarray(thermo_info.get("t_emit_s", []), dtype=float) * c * 1e3 if thermo_info.get("t_emit_s", None) is not None else None,
     )

@@ -3,16 +3,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Literal
+import math
 import time
 import os
 import json
 import hashlib
-import multiprocessing as mp
 import threading
-import signal
 from pathlib import Path
 
 import numpy as np
+from scipy.optimize import minimize_scalar
 
 from .constants import ME_MEV, c, q_e
 from .helpers import sample_disk
@@ -61,12 +61,22 @@ class EmissionParams:
     time_dependent: bool = True
 
 
+#: The project's core 6-column phase-space convention (X, Px, Y, Py, Z, Pz), all in RF-Track's
+#: native Bunch6dT units (mm, MeV/c). Extended with %id (particle id, for cross-referencing a
+#: row's identity across B0/screens/Bout -- a Screen's own Pz does not reliably carry the true
+#: lab-frame sign, so id-based lookups against Bout's classification are the reliable way to tag
+#: forward/backward status at a screen), %t (arrival time, mm/c), %E (total energy, MeV), and %K
+#: (kinetic energy, MeV) -- all confirmed valid RF-Track format codes. Every consumer that needs
+#: exactly the core 6 columns already slices `[:, :6]` explicitly, so this extension is additive.
+EXTENDED_PHASE_FMT = "%X %Px %Y %Py %Z %Pz %id %t %E %K"
+
+
 @dataclass(frozen=True)
 class TrackingParams:
     phi_deg: float
     n_particles: int
     z_screens_m: Optional[Sequence[float]] = None
-    phase_fmt: str = "%X %Px %Y %Py %Z %Pz"
+    phase_fmt: str = EXTENDED_PHASE_FMT
     screen_width_mm: float | None = None
     screen_height_mm: float | None = None
     screen_time_window_mm_c: float | None = None
@@ -145,251 +155,92 @@ def _save_transport_runtime_history(history: Dict[str, float]) -> None:
 
 
 _TRANSPORT_RUNTIME_HISTORY: Dict[str, float] = _load_transport_runtime_history()
-_ACTIVE_PROGRESS_STOP_EVENT = None
-_ACTIVE_PROGRESS_HANDLE = None
-_PROGRESS_WORKER_PID_FILE = Path(
-    os.environ.get(
-        "RF_GUN_PROGRESS_PID_FILE",
-        str(Path(__file__).resolve().parents[1] / ".rf_gun_progress_worker.pid"),
-    )
-)
+_ACTIVE_PROGRESS_STOP_EVENT: Optional[threading.Event] = None
+_ACTIVE_PROGRESS_THREAD: Optional[threading.Thread] = None
 
 
-def _cleanup_external_progress_worker() -> None:
-    try:
-        if not _PROGRESS_WORKER_PID_FILE.exists():
-            return
-        raw = _PROGRESS_WORKER_PID_FILE.read_text(encoding="utf-8").strip()
-        if not raw:
-            _PROGRESS_WORKER_PID_FILE.unlink(missing_ok=True)
-            return
-        pid = int(raw)
-        if pid <= 0 or pid == os.getpid():
-            _PROGRESS_WORKER_PID_FILE.unlink(missing_ok=True)
-            return
-
-        try:
-            os.kill(pid, signal.SIGTERM)
-            time.sleep(0.05)
-            try:
-                os.kill(pid, 0)
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
-        except OSError:
-            pass
-        _PROGRESS_WORKER_PID_FILE.unlink(missing_ok=True)
-    except Exception:
-        pass
-
-
-def _write_progress_worker_pid(pid: int) -> None:
-    try:
-        _PROGRESS_WORKER_PID_FILE.write_text(str(int(pid)), encoding="utf-8")
-    except Exception:
-        pass
-
-
-def _clear_progress_worker_pid() -> None:
-    try:
-        _PROGRESS_WORKER_PID_FILE.unlink(missing_ok=True)
-    except Exception:
-        pass
-
-
-def _stop_progress_worker(stop_event, handle, timeout_s: float = 2.0) -> None:
+def _stop_progress_worker(stop_event, thread, timeout_s: float = 2.0) -> None:
     if stop_event is not None:
         try:
             stop_event.set()
         except Exception:
             pass
-
-    if handle is not None and hasattr(handle, "join"):
+    if thread is not None:
         try:
-            handle.join(timeout=float(timeout_s))
+            thread.join(timeout=float(timeout_s))
         except Exception:
             pass
-
-    if handle is not None and hasattr(handle, "is_alive"):
-        try:
-            alive = bool(handle.is_alive())
-        except Exception:
-            alive = False
-        if alive and hasattr(handle, "terminate"):
-            try:
-                handle.terminate()
-                handle.join(timeout=1.0)
-            except Exception:
-                pass
-
-    if handle is not None and hasattr(handle, "pid"):
-        try:
-            pid = int(getattr(handle, "pid", 0) or 0)
-        except Exception:
-            pid = 0
-        if pid > 0:
-            try:
-                if _PROGRESS_WORKER_PID_FILE.exists():
-                    raw = _PROGRESS_WORKER_PID_FILE.read_text(encoding="utf-8").strip()
-                    if raw and int(raw) == pid:
-                        _clear_progress_worker_pid()
-            except Exception:
-                pass
 
 
 def _clear_active_progress_worker(timeout_s: float = 0.5) -> None:
-    global _ACTIVE_PROGRESS_STOP_EVENT, _ACTIVE_PROGRESS_HANDLE
-    _stop_progress_worker(_ACTIVE_PROGRESS_STOP_EVENT, _ACTIVE_PROGRESS_HANDLE, timeout_s=timeout_s)
+    global _ACTIVE_PROGRESS_STOP_EVENT, _ACTIVE_PROGRESS_THREAD
+    _stop_progress_worker(_ACTIVE_PROGRESS_STOP_EVENT, _ACTIVE_PROGRESS_THREAD, timeout_s=timeout_s)
     _ACTIVE_PROGRESS_STOP_EVENT = None
-    _ACTIVE_PROGRESS_HANDLE = None
+    _ACTIVE_PROGRESS_THREAD = None
 
 
-def _elapsed_progress_worker(
-    stop_event,
-    est_for_proxy_s: float,
-    poll_interval_s: float,
-    use_tqdm: bool = True,
-):
+def _progress_proxy_pct(elapsed_s: float, est_s: float) -> float:
+    """Wall-clock proxy percentage against a historical runtime estimate.
+
+    Not real RF-Track tracking progress -- RF-Track's Python bindings expose no
+    per-step callback (see `screen_progress_callback`'s docstring), so this is the
+    best available estimate: how far `elapsed_s` is through a runtime estimate drawn
+    from `_TRANSPORT_RUNTIME_HISTORY` (or a heuristic fallback), asymptoting toward
+    99% if the run overruns that estimate.
+    """
+    est = max(1e-9, float(est_s))
+    if elapsed_s <= est:
+        return min(98.0, 100.0 * elapsed_s / est)
+    over = (elapsed_s - est) / est
+    return min(99.0, 98.0 + (1.0 - math.exp(-over)))
+
+
+def _elapsed_progress_worker(stop_event, est_for_proxy_s: float, poll_interval_s: float) -> None:
+    """Background daemon thread only -- never touches RF-Track, numpy, or the tracked bunch.
+
+    A previous implementation ran this in a forked OS subprocess
+    (`multiprocessing.get_context("fork")`), concurrently with the blocking call into
+    RF-Track's tracking engine. Forking an already multi-threaded process (a Jupyter
+    kernel has its own ZMQ/heartbeat threads; RF-Track itself internally distributes
+    tracking across threads, per the RF-Track manual) is a well-documented crash/hang
+    hazard -- a lock held by any thread other than the calling one at the instant of
+    `fork()` is inherited already-locked, forever, in the child, with consequences that
+    land at an essentially random point in the run. That was the root cause of the
+    intermittent kernel crashes at random progress percentages this project saw. This
+    thread-only version never forks anything, and deliberately avoids numpy calls in
+    the loop body (plain `math.exp`, not `np.exp`) as further insurance against any
+    incidental interaction with a BLAS/OpenMP thread pool from a background thread.
+    """
     start_s = time.time()
-    if not bool(use_tqdm):
-        last_print = -1
-        while not stop_event.is_set():
-            elapsed_s = time.time() - start_s
-            est_s = max(1e-9, float(est_for_proxy_s))
-            if elapsed_s <= est_s:
-                proxy = min(98.0, 100.0 * elapsed_s / est_s)
-            else:
-                over = (elapsed_s - est_s) / est_s
-                proxy = min(99.0, 98.0 + (1.0 - np.exp(-over)))
-            pct = int(proxy)
-            if pct != last_print:
-                print(f"tracking {pct}% | elapsed={elapsed_s:,.1f}s est={est_s:,.1f}s", flush=True)
-                last_print = pct
-            time.sleep(max(0.1, float(poll_interval_s)))
-        print("tracking 100%", flush=True)
-        return
-
     try:
         from tqdm.auto import tqdm
     except Exception:
+        tqdm = None
+
+    if tqdm is None:
         last_print = -1
         while not stop_event.is_set():
             elapsed_s = time.time() - start_s
-            est_s = max(1e-9, float(est_for_proxy_s))
-            if elapsed_s <= est_s:
-                proxy = min(98.0, 100.0 * elapsed_s / est_s)
-            else:
-                over = (elapsed_s - est_s) / est_s
-                proxy = min(99.0, 98.0 + (1.0 - np.exp(-over)))
-            pct = int(proxy)
+            pct = int(_progress_proxy_pct(elapsed_s, est_for_proxy_s))
             if pct != last_print:
-                print(f"tracking {pct}% | elapsed={elapsed_s:,.1f}s est={est_s:,.1f}s", flush=True)
+                print(f"tracking {pct}% | elapsed={elapsed_s:,.1f}s est={float(est_for_proxy_s):,.1f}s", flush=True)
                 last_print = pct
             time.sleep(max(0.1, float(poll_interval_s)))
         print("tracking 100%", flush=True)
         return
 
+    # tqdm.auto already renders an ipywidgets bar in a live Jupyter kernel and a plain
+    # text bar otherwise -- this is the "smart progress bar by default in auto mode"
+    # with no separate notebook-vs-terminal branching needed on our side.
     with tqdm(total=100, desc="tracking", unit="%", leave=True) as tbar:
         while not stop_event.is_set():
             elapsed_s = time.time() - start_s
-            est_s = max(1e-9, float(est_for_proxy_s))
-            if elapsed_s <= est_s:
-                proxy = min(98.0, 100.0 * elapsed_s / est_s)
-            else:
-                over = (elapsed_s - est_s) / est_s
-                proxy = min(99.0, 98.0 + (1.0 - np.exp(-over)))
-            tbar.n = int(proxy)
-            tbar.set_postfix_str(f"elapsed={elapsed_s:,.1f}s est={est_s:,.1f}s")
+            tbar.n = int(_progress_proxy_pct(elapsed_s, est_for_proxy_s))
+            tbar.set_postfix_str(f"elapsed={elapsed_s:,.1f}s est={float(est_for_proxy_s):,.1f}s")
             tbar.refresh()
-
             time.sleep(max(0.1, float(poll_interval_s)))
-
         tbar.n = 100
         tbar.refresh()
-
-
-def _is_notebook_kernel() -> bool:
-    try:
-        from IPython import get_ipython
-
-        ip = get_ipython()
-        if ip is None:
-            return False
-        return ip.__class__.__name__ == "ZMQInteractiveShell"
-    except Exception:
-        return False
-
-
-def _start_notebook_elapsed_progress(
-    est_for_proxy_s: float,
-    poll_interval_s: float,
-):
-    try:
-        import ipywidgets as widgets
-        from IPython.display import display
-        from IPython import get_ipython
-    except Exception:
-        return None, None
-
-    bar = widgets.IntProgress(
-        value=0,
-        min=0,
-        max=100,
-        description="tracking",
-        bar_style="info",
-    )
-    text = widgets.HTML(value="0%")
-    display(widgets.VBox([bar, text]))
-
-    stop_event = threading.Event()
-    start_s = time.time()
-    ip = get_ipython()
-    io_loop = getattr(getattr(ip, "kernel", None), "io_loop", None)
-
-    def _compute_proxy(elapsed_s: float, est_s: float) -> int:
-        est_val = float(est_s)
-        if not np.isfinite(est_val) or est_val <= 0.0:
-            est_val = 300.0
-        if elapsed_s <= est_val:
-            proxy = min(98.0, 100.0 * elapsed_s / est_val)
-        else:
-            over = (elapsed_s - est_val) / est_val
-            proxy = min(99.0, 98.0 + (1.0 - np.exp(-over)))
-        return int(max(0, min(99, proxy)))
-
-    def _set_widget_state(pct: int, elapsed_s: float, est_s: float, final: bool = False) -> None:
-        if final:
-            bar.value = 100
-            bar.bar_style = "success"
-            text.value = "100%"
-            return
-        bar.value = int(max(0, min(99, pct)))
-        text.value = f"{int(max(0, min(99, pct)))}% | elapsed={elapsed_s:,.1f}s est={float(est_s):,.1f}s"
-
-    def _worker() -> None:
-        while not stop_event.is_set():
-            elapsed_s = time.time() - start_s
-            proxy = _compute_proxy(elapsed_s, float(est_for_proxy_s))
-            try:
-                if io_loop is not None and hasattr(io_loop, "add_callback"):
-                    io_loop.add_callback(_set_widget_state, int(proxy), float(elapsed_s), float(est_for_proxy_s), False)
-                else:
-                    _set_widget_state(int(proxy), float(elapsed_s), float(est_for_proxy_s), False)
-            except Exception:
-                pass
-            time.sleep(max(0.1, float(poll_interval_s)))
-
-        try:
-            if io_loop is not None and hasattr(io_loop, "add_callback"):
-                io_loop.add_callback(_set_widget_state, 100, 0.0, float(est_for_proxy_s), True)
-            else:
-                _set_widget_state(100, 0.0, float(est_for_proxy_s), True)
-        except Exception:
-            pass
-
-    thread = threading.Thread(target=_worker, daemon=True)
-    thread.start()
-    return stop_event, thread
 
 
 def _runtime_key_payload(vol_params_eff: VolumeBuildParams, tracking: TrackingParams, n_screens: int) -> Dict[str, Any]:
@@ -512,22 +363,6 @@ def _try_get_particle_ids(B, selection: str = "all"):
         return None
 
 
-def estimate_default_tmax_mm(
-    z_min_m: float,
-    z_max_m: float,
-    f_hz: float,
-    emission_phase_range_deg: float,
-    safety_factor: float = 2.0,
-) -> float:
-    """Finite production default for time-domain tracking horizon."""
-    cavity_len_m = abs(float(z_max_m) - float(z_min_m))
-    transit_s = cavity_len_m / c if cavity_len_m > 0 else 0.0
-    T = 1.0 / float(f_hz)
-    emission_window_s = max(0.0, float(emission_phase_range_deg) / 360.0) * T
-    t_total_s = max(transit_s + emission_window_s, 1e-12)
-    return float(safety_factor * t_total_s * c * 1e3)
-
-
 def screen_progress_callback(i: int, z_m: float, stats: Dict[str, float]) -> None:
     """
     Example callback for per-screen progress reporting during transport.
@@ -557,74 +392,6 @@ def screen_progress_callback(i: int, z_m: float, stats: Dict[str, float]) -> Non
         f"pz_mean={stats['mean_pz']:.4g} MeV/c{lost_str}",
         file=sys.stdout, flush=True
     )
-
-
-def _promote_stable_reference_particle(
-    M: np.ndarray,
-    t_mm_c: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, Optional[np.ndarray], bool]:
-    if M.ndim != 2 or M.shape[0] == 0 or M.shape[1] < 6:
-        return M, t_mm_c, False
-
-    x = np.asarray(M[:, 0], dtype=float)
-    px = np.asarray(M[:, 1], dtype=float)
-    y = np.asarray(M[:, 2], dtype=float)
-    py = np.asarray(M[:, 3], dtype=float)
-    pz = np.asarray(M[:, 5], dtype=float)
-
-    finite = np.isfinite(x) & np.isfinite(px) & np.isfinite(y) & np.isfinite(py) & np.isfinite(pz)
-    if t_mm_c is not None:
-        t_arr = np.asarray(t_mm_c, dtype=float).reshape(-1)
-        if t_arr.shape[0] == M.shape[0]:
-            finite = finite & np.isfinite(t_arr)
-        else:
-            t_arr = None
-    else:
-        t_arr = None
-
-    valid_idx = np.flatnonzero(finite)
-    if valid_idx.size == 0:
-        return M, t_mm_c, False
-
-    def _scale(v: np.ndarray, idx: np.ndarray) -> float:
-        vv = np.asarray(v[idx], dtype=float)
-        s = float(np.nanstd(vv))
-        if np.isfinite(s) and s > 0.0:
-            return s
-        a = float(np.nanmean(np.abs(vv)))
-        if np.isfinite(a) and a > 0.0:
-            return a
-        return 1.0
-
-    r2 = x * x + y * y
-    score = np.zeros(M.shape[0], dtype=float)
-    score += r2 / (_scale(np.sqrt(r2), valid_idx) ** 2)
-    score += (px / _scale(px, valid_idx)) ** 2
-    score += (py / _scale(py, valid_idx)) ** 2
-
-    pz_center = float(np.nanmedian(pz[valid_idx]))
-    pz_scale = _scale(pz, valid_idx)
-    score -= 0.5 * ((pz - pz_center) / pz_scale)
-
-    if t_arr is not None:
-        t_center = float(np.nanmedian(t_arr[valid_idx]))
-        t_scale = _scale(t_arr, valid_idx)
-        score += 0.2 * ((t_arr - t_center) / t_scale) ** 2
-
-    score[~finite] = np.inf
-    ref_idx = int(np.argmin(score))
-    if ref_idx == 0:
-        return M, t_mm_c, False
-
-    M_out = np.array(M, copy=True)
-    M_out[[0, ref_idx], :] = M_out[[ref_idx, 0], :]
-
-    t_out = t_mm_c
-    if t_arr is not None:
-        t_out = np.array(t_arr, copy=True)
-        t_out[[0, ref_idx]] = t_out[[ref_idx, 0]]
-
-    return M_out, t_out, True
 
 
 def _resolve_beam_loading_tinj(
@@ -763,7 +530,6 @@ def build_bunch_thermionic(
     M = np.column_stack([x, px, y, py, z, pz])
 
     ref_reordered = False
-    # M, t0_mm_c, ref_reordered = _promote_stable_reference_particle(M, t0_mm_c)
 
     mass_col = np.full(n, ME_MEV, dtype=float)
     q_col = np.full(n, -1.0, dtype=float)
@@ -1022,9 +788,21 @@ def run_phase_scan(
     pz0_MeV_c: float,
     q_total_C: float = 1e-12,
     rng: Optional[np.random.Generator] = None,
+    refine: bool = True,
+    refine_xatol_deg: float = 0.05,
+    refine_maxiter: int = 30,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Fast phase scan (on-axis, cold launch)."""
-    phase_scan = []
+    """Fast phase scan (on-axis, cold launch).
+
+    Runs a coarse scan over `phase_rel_deg` (kept full-range by default so a
+    change in the input field maps is still caught), then, unless
+    `refine=False`, brackets the coarse maximum and refines it with a bounded
+    scalar search. The refined point is folded back into the returned arrays,
+    so `np.max(pz_mean)` (as used by `veff_from_phase_scan_pz`) reflects the
+    refined crest rather than the coarse grid resolution. This lets the coarse
+    grid `phase_rel_deg` be much sparser than a fine grid would need to be,
+    without losing crest accuracy.
+    """
     z_span_mm = abs(float(vol_params.z_max_m) - float(vol_params.z_min_m)) * 1e3
     phase_scan_tmax_mm = max(60.0, 2.5 * z_span_mm)
 
@@ -1035,288 +813,46 @@ def run_phase_scan(
         t_max_mm=min(float(getattr(vol_params, "t_max_mm", 2000.0)), float(phase_scan_tmax_mm)),
     )
 
-    for phi in phase_rel_deg:
-        phi_abs = (float(phi) + float(transport_phase_deg)) % 360.0
+    def _mean_pz_at(phi_rel: float) -> float:
+        phi_abs = (float(phi_rel) + float(transport_phase_deg)) % 360.0
         V = build_volume(rft, Er_grid, Ez_grid, phi_abs, vol_params_fast)
         B0 = build_bunch_simple(rft, n_particles, cathode_radius_mm, pz0_MeV_c, q_total_C, rng=rng)
         Bout = V.track(B0)
         Mf = Bout.get_phase_space()
         if Mf.shape[0] == 0:
-            phase_scan.append((float(phi), float(phi_abs), np.nan, 0))
-            continue
-        pz = Mf[:, 5]
-        phase_scan.append((float(phi), float(phi_abs), float(np.mean(pz)), int(Mf.shape[0])))
+            return np.nan
+        return float(np.mean(Mf[:, 5]))
 
-    phase_scan = np.array(phase_scan, dtype=float)
+    phi_rel_coarse = np.asarray(phase_rel_deg, dtype=float)
+    phase_scan = []
+    for phi in phi_rel_coarse:
+        pz = _mean_pz_at(float(phi))
+        phi_abs = (float(phi) + float(transport_phase_deg)) % 360.0
+        n_ok = 0 if np.isnan(pz) else int(n_particles)
+        phase_scan.append((float(phi), float(phi_abs), pz, n_ok))
+
+    if refine and np.any(np.isfinite([row[2] for row in phase_scan])):
+        pz_coarse = np.array([row[2] for row in phase_scan], dtype=float)
+        i_max = int(np.nanargmax(pz_coarse))
+        lo = phi_rel_coarse[max(i_max - 1, 0)]
+        hi = phi_rel_coarse[min(i_max + 1, len(phi_rel_coarse) - 1)]
+        if hi > lo:
+            res = minimize_scalar(
+                lambda phi: -_mean_pz_at(phi),
+                bounds=(float(lo), float(hi)),
+                method="bounded",
+                options={"xatol": float(refine_xatol_deg), "maxiter": int(refine_maxiter)},
+            )
+            phi_rel_refined = float(res.x)
+            pz_refined = -float(res.fun)
+            phi_abs_refined = (phi_rel_refined + float(transport_phase_deg)) % 360.0
+            phase_scan.append((phi_rel_refined, phi_abs_refined, pz_refined, int(n_particles)))
+
+    phase_scan = np.array(sorted(phase_scan, key=lambda row: row[0]), dtype=float)
     phi_rel = phase_scan[:, 0]
     phi_abs = phase_scan[:, 1]
     pz_mean = phase_scan[:, 2]
     return phase_scan, phi_rel, phi_abs, pz_mean
-
-
-def run_transport(
-    rft,
-    Er_grid: np.ndarray,
-    Ez_grid: np.ndarray,
-    Ez0_phasor_axis: complex,
-    vol_params: VolumeBuildParams,
-    emission: EmissionParams,
-    tracking: TrackingParams,
-    diagnostics: DiagnosticsParams | None = None,
-    rng: Optional[np.random.Generator] = None,
-    on_screen: Optional[Callable[[int, float, Dict[str, float]], None]] = None,
-) -> SimulationResult:
-    """Run a thermionic transport simulation with optional screens."""
-    diagnostics = DiagnosticsParams() if diagnostics is None else diagnostics
-    B0, thermo_info = build_bunch_thermionic(
-        rft,
-        tracking.n_particles,
-        tracking.phi_deg,
-        f_hz=vol_params.f_hz,
-        params=emission,
-        Ez0_phasor_axis=Ez0_phasor_axis,
-        rng=rng,
-    )
-    vol_params_eff = _resolve_beam_loading_tinj(vol_params, B0, thermo_info)
-
-    z_snaps_in = list(tracking.z_screens_m) if tracking.z_screens_m is not None else []
-    z_snaps = _sanitize_screen_positions(z_snaps_in)
-    V = None
-    transport_table = None
-    if len(z_snaps) > 0:
-        screen_params = _maybe_screen_params(tracking)
-        Bout, snaps, V = track_volume_with_screens(
-            rft,
-            Er_grid,
-            Ez_grid,
-            tracking.phi_deg,
-            vol_params_eff,
-            B0,
-            z_snaps,
-            screen_params=screen_params,
-            return_volume=True,
-        )
-    else:
-        if diagnostics.use_transport_table_summary:
-            tt_dt = float(diagnostics.transport_table_dt_mm) if diagnostics.transport_table_dt_mm is not None else float(vol_params_eff.dt_mm)
-            Bout, transport_table, V = track_volume_transport_table(
-                rft,
-                Er_grid,
-                Ez_grid,
-                tracking.phi_deg,
-                vol_params_eff,
-                B0,
-                tt_dt_mm=tt_dt,
-                table_fmt=str(diagnostics.transport_table_fmt),
-                return_volume=True,
-            )
-        else:
-            V = build_volume(rft, Er_grid, Ez_grid, tracking.phi_deg, vol_params_eff)
-            Bout = V.track(B0)
-        snaps = []
-
-    full_I_snaps = [s.get_info() if hasattr(s, "get_info") else None for s in snaps] if snaps else []
-    keep_idx = _select_screen_indices(len(snaps), diagnostics)
-    z_snaps_kept = [z_snaps[i] for i in keep_idx] if z_snaps else []
-
-    full_M_snaps = [np.array(snaps[i].get_phase_space(tracking.phase_fmt, "all"), copy=True) for i in keep_idx] if snaps else []
-
-    if diagnostics.store_screen_phase_space and full_M_snaps:
-        M_snaps = [
-            _maybe_subsample_phase_space(
-                raw,
-                diagnostics.max_screen_particles,
-                rng,
-                diagnostics.subsample_screens_random,
-            )
-            for raw in full_M_snaps
-        ]
-    else:
-        M_snaps = []
-
-    I_snaps = [full_I_snaps[i] for i in keep_idx] if diagnostics.store_screen_info and full_I_snaps else []
-
-    lost_table = _extract_lost_particles(V) if diagnostics.save_lost_particles else None
-
-    if z_snaps and np.any(np.diff(np.asarray(z_snaps, dtype=float)) < 0.0):
-        print("Warning: z_screens_m is not monotonic increasing.")
-
-    n_initial = int(np.asarray(B0.get_phase_space(tracking.phase_fmt, "all")).shape[0])
-    screen_summaries = []
-    n_prev = n_initial
-    for i, z_m in enumerate(z_snaps_kept):
-        rec = build_screen_summary_from_phase_space(
-            full_M_snaps[i] if i < len(full_M_snaps) else None,
-            screen_index=i,
-            z_m=float(z_m),
-            n_initial=n_initial,
-            n_previous=n_prev,
-        )
-        info_i = I_snaps[i] if i < len(I_snaps) else None
-        rec["rftrack_raw_info"] = {
-            "transmission": float(info_get_first(info_i, ["transmission", "Transmission"])) if info_i is not None else np.nan,
-            "mean_pz": float(info_get_first(info_i, ["mean_Pz", "mean_P", "mean_pz"])) if info_i is not None else np.nan,
-            "sigma_pz": float(info_get_first(info_i, ["sigma_Pz", "sigma_P", "sigma_pz"])) if info_i is not None else np.nan,
-        }
-        screen_summaries.append(rec)
-        n_prev = int(rec.get("N", 0))
-
-    if on_screen is not None and screen_summaries:
-        prev_n = None
-        for i, (z_m, rec) in enumerate(zip(z_snaps_kept, screen_summaries)):
-            n_cur = float(rec.get("N", np.nan))
-            stats = {
-                "N": n_cur,
-                "mean_pz": float(rec.get("mean_pz", rec.get("mean_pz_info", np.nan))),
-                "N_lost_since_prev": float(prev_n - n_cur) if prev_n is not None and np.isfinite(prev_n) and np.isfinite(n_cur) else np.nan,
-            }
-            prev_n = n_cur
-            on_screen(i, float(z_m), stats)
-
-    m0 = np.array(B0.get_phase_space(tracking.phase_fmt, "all"), copy=True)
-    mf = np.array(Bout.get_phase_space(tracking.phase_fmt, "all"), copy=True)
-    t0_mm_c = np.asarray(thermo_info.get("initial_t0_mm_c", []), dtype=float)
-    classes = classify_particle_outcomes(m0, mf, t0_mm_c=t0_mm_c if t0_mm_c.size else None, lost_table=lost_table)
-    init_ids = _try_get_particle_ids(B0, selection="all")
-    classes["initial_t0_mm_c"] = t0_mm_c.tolist() if t0_mm_c.size else []
-    classes["initial_pz_MeV_c"] = np.asarray(m0[:, 5], dtype=float).tolist() if m0.ndim == 2 and m0.shape[1] > 5 else []
-    classes["particle_id"] = init_ids.tolist() if init_ids is not None else []
-
-    return SimulationResult(
-        B0=B0,
-        Bout=Bout,
-        thermo_info=thermo_info,
-        M_snaps=M_snaps,
-        z_snaps=z_snaps_kept,
-        I_snaps=I_snaps,
-        screen_summaries=screen_summaries,
-        transport_table=transport_table,
-        lost_table=lost_table,
-        particle_classes=classes,
-    )
-
-
-def run_transport_time_slices(
-    rft,
-    Er_grid: np.ndarray,
-    Ez_grid: np.ndarray,
-    B0,
-    phi_deg: float,
-    vol_params: VolumeBuildParams,
-    t_max_mm_values: Sequence[float],
-):
-    """Run repeated tracks with increasing t_max_mm for sign-reversal debugging."""
-    outputs = []
-    for t_max_mm in t_max_mm_values:
-        p_eff = vol_params.replace(t_max_mm=float(t_max_mm))
-        V = build_volume(rft, Er_grid, Ez_grid, float(phi_deg), p_eff)
-        Bout = V.track(B0)
-        outputs.append(Bout)
-    return outputs
-
-
-def build_probe_subset(
-    M0: np.ndarray,
-    *,
-    ids: np.ndarray | None = None,
-    t0_mm_c: np.ndarray | None = None,
-    n_select: int = 200,
-    strategy: Literal["lowest_initial_pz", "late_emission"] = "lowest_initial_pz",
-):
-    """Build reduced debug subset of suspect particles."""
-    arr = np.asarray(M0)
-    if arr.ndim != 2 or arr.shape[0] == 0:
-        return np.zeros((0, 6), dtype=float), np.zeros((0,), dtype=float)
-
-    n = min(int(n_select), arr.shape[0])
-    if ids is not None:
-        idx = np.asarray(ids, dtype=int).reshape(-1)
-        idx = idx[(idx >= 0) & (idx < arr.shape[0])]
-        idx = idx[:n]
-    elif strategy == "late_emission" and t0_mm_c is not None:
-        t0 = np.asarray(t0_mm_c, dtype=float).reshape(-1)
-        idx = np.argsort(t0)[-n:]
-    else:
-        idx = np.argsort(np.asarray(arr[:, 5], dtype=float))[:n]
-
-    t0_sub = np.asarray(t0_mm_c, dtype=float).reshape(-1)[idx] if t0_mm_c is not None else np.zeros(idx.size)
-    return np.array(arr[idx], copy=True), np.array(t0_sub, copy=True)
-
-
-def run_transport_probe_subset(
-    rft,
-    Er_grid: np.ndarray,
-    Ez_grid: np.ndarray,
-    phi_deg: float,
-    vol_params: VolumeBuildParams,
-    M_probe: np.ndarray,
-    t0_probe_mm_c: np.ndarray | None = None,
-    *,
-    use_space_charge: bool = False,
-):
-    """Track reduced probe subset with dense settings for diagnostics."""
-    V = build_volume(
-        rft,
-        Er_grid,
-        Ez_grid,
-        float(phi_deg),
-        vol_params.replace(sc_enabled=bool(use_space_charge)),
-    )
-    B0_probe = rft.Bunch6dT(ME_MEV, float(M_probe.shape[0]), -1.0, np.array(M_probe, copy=True))
-    if t0_probe_mm_c is not None and hasattr(B0_probe, "set_t0"):
-        B0_probe.set_t0(np.asarray(t0_probe_mm_c, dtype=float).reshape(-1))
-    Bout_probe = V.track(B0_probe)
-    return B0_probe, Bout_probe
-
-
-def run_transport_convergence_scan(
-    rft,
-    Er_grid: np.ndarray,
-    Ez_grid: np.ndarray,
-    Ez0_phasor_axis: complex,
-    vol_params: VolumeBuildParams,
-    emission: EmissionParams,
-    tracking: TrackingParams,
-    diagnostics: DiagnosticsParams,
-    grid: Sequence[Dict[str, float]],
-    rng_seed: int | None = None,
-):
-    """Scan runtime and key beam metrics for convergence studies."""
-    rows: list[Dict[str, float]] = []
-    for i, cfg in enumerate(grid):
-        p_eff = vol_params.replace(
-            dt_mm=float(cfg.get("dt_mm", vol_params.dt_mm)),
-            sc_dt_mm=float(cfg.get("sc_dt_mm", vol_params.sc_dt_mm)),
-            fm_nsteps=int(cfg.get("fm_nsteps", vol_params.fm_nsteps)),
-            cfx_dt_mm=float(cfg.get("cfx_dt_mm", vol_params.cfx_dt_mm)),
-        )
-        rng = np.random.default_rng(None if rng_seed is None else int(rng_seed) + int(i))
-        t0 = time.time()
-        res = run_transport(
-            rft,
-            Er_grid,
-            Ez_grid,
-            Ez0_phasor_axis,
-            p_eff,
-            emission,
-            tracking,
-            diagnostics=diagnostics,
-            rng=rng,
-        )
-        elapsed = time.time() - t0
-        Mf = np.array(res.Bout.get_phase_space(tracking.phase_fmt, "all"), copy=True)
-        row = {
-            "dt_mm": float(p_eff.dt_mm),
-            "sc_dt_mm": float(p_eff.sc_dt_mm),
-            "fm_nsteps": float(p_eff.fm_nsteps),
-            "cfx_dt_mm": float(p_eff.cfx_dt_mm),
-            "runtime_s": float(elapsed),
-            "transmission_fraction": float(res.particle_classes.get("transmitted", {}).get("fraction", np.nan)) if res.particle_classes else np.nan,
-            "mean_output_pz": float(np.mean(Mf[:, 5])) if Mf.ndim == 2 and Mf.shape[0] else np.nan,
-            "sigma_output_pz": float(np.std(Mf[:, 5])) if Mf.ndim == 2 and Mf.shape[0] else np.nan,
-        }
-        rows.append(row)
-    return rows
 
 
 def run_transport_with_progress(
@@ -1329,7 +865,6 @@ def run_transport_with_progress(
     tracking: TrackingParams,
     diagnostics: DiagnosticsParams | None = None,
     progress_bar: bool = True,
-    progress_notebook_mode: Literal["auto", "minimal", "verbose"] = "auto",
     use_coarse_progress_proxy: bool = True,
     poll_interval_s: float = 0.5,
     timing_diagnostics: bool = False,
@@ -1474,93 +1009,40 @@ def run_transport_with_progress(
         V = build_volume(rft, Er_grid, Ez_grid, tracking.phi_deg, vol_params_track)
         return V.track(B0), [], V, None
 
-    global _ACTIVE_PROGRESS_STOP_EVENT, _ACTIVE_PROGRESS_HANDLE
+    global _ACTIVE_PROGRESS_STOP_EVENT, _ACTIVE_PROGRESS_THREAD
 
     progress_enabled = bool(progress_bar)
-    progress_stop_event = None
-    progress_handle = None
-    in_notebook = _is_notebook_kernel()
-    notebook_mode_raw = str(progress_notebook_mode).strip().lower()
-    if notebook_mode_raw not in ("auto", "minimal", "verbose"):
-        notebook_mode_raw = "auto"
-    notebook_mode_eff = (
-        "minimal" if (in_notebook and notebook_mode_raw == "auto") else notebook_mode_raw
-    )
-    use_minimal_notebook_progress = bool(in_notebook and notebook_mode_eff == "minimal")
 
-    if progress_enabled and not use_minimal_notebook_progress:
-        _cleanup_external_progress_worker()
+    if progress_enabled:
+        # In-process daemon thread only -- no subprocess/fork. See
+        # `_elapsed_progress_worker`'s docstring for why the previous fork-based
+        # design was the root cause of intermittent crashes.
         _clear_active_progress_worker(timeout_s=0.25)
-        try:
-            prefer_fork = (os.name == "posix")
-            mp_ctx = mp.get_context("fork" if prefer_fork else "spawn")
-            progress_stop_event = mp_ctx.Event()
-            progress_handle = mp_ctx.Process(
-                target=_elapsed_progress_worker,
-                args=(progress_stop_event, est_for_proxy, float(poll_interval_s), not in_notebook),
-                name="rftrack-progress",
-                daemon=True,
-            )
-            progress_handle.start()
-            if hasattr(progress_handle, "pid") and getattr(progress_handle, "pid", None):
-                _write_progress_worker_pid(int(progress_handle.pid))
-        except Exception:
-            progress_stop_event = None
-            progress_handle = None
-
-        if progress_stop_event is None or progress_handle is None:
-            if in_notebook:
-                print(
-                    "Warning: notebook progress worker fell back to thread mode; "
-                    "live progress may appear stalled during RF-Track solver call.",
-                    flush=True,
-                )
-            progress_stop_event = threading.Event()
-            progress_handle = threading.Thread(
-                target=_elapsed_progress_worker,
-                args=(progress_stop_event, est_for_proxy, float(poll_interval_s), False),
-                name="rftrack-progress",
-                daemon=True,
-            )
-            progress_handle.start()
-
+        progress_stop_event = threading.Event()
+        progress_thread = threading.Thread(
+            target=_elapsed_progress_worker,
+            args=(progress_stop_event, est_for_proxy, float(poll_interval_s)),
+            name="rftrack-progress",
+            daemon=True,
+        )
+        progress_thread.start()
         _ACTIVE_PROGRESS_STOP_EVENT = progress_stop_event
-        _ACTIVE_PROGRESS_HANDLE = progress_handle
+        _ACTIVE_PROGRESS_THREAD = progress_thread
 
         t_solver_s = time.time()
         try:
             run_out = _run_tracking_once()
         finally:
-            _stop_progress_worker(progress_stop_event, progress_handle, timeout_s=2.0)
-            if progress_handle is _ACTIVE_PROGRESS_HANDLE:
+            _stop_progress_worker(progress_stop_event, progress_thread, timeout_s=2.0)
+            if progress_thread is _ACTIVE_PROGRESS_THREAD:
                 _ACTIVE_PROGRESS_STOP_EVENT = None
-                _ACTIVE_PROGRESS_HANDLE = None
-            _clear_progress_worker_pid()
+                _ACTIVE_PROGRESS_THREAD = None
         if len(run_out) == 3:
             Bout, snaps, V = run_out
             transport_table = None
         else:
             Bout, snaps, V, transport_table = run_out
         solver_elapsed_s = time.time() - t_solver_s
-        _diag(f"RF-Track solver return: {solver_elapsed_s:.2f} s")
-        _warn_slow("RF-Track solver return", solver_elapsed_s)
-    elif progress_enabled and use_minimal_notebook_progress:
-        print(
-            f"tracking start | est={float(est_for_proxy):.1f}s",
-            flush=True,
-        )
-        t_solver_s = time.time()
-        run_out = _run_tracking_once()
-        if len(run_out) == 3:
-            Bout, snaps, V = run_out
-            transport_table = None
-        else:
-            Bout, snaps, V, transport_table = run_out
-        solver_elapsed_s = time.time() - t_solver_s
-        print(
-            f"tracking done  | elapsed={float(solver_elapsed_s):.1f}s | est={float(est_for_proxy):.1f}s",
-            flush=True,
-        )
         _diag(f"RF-Track solver return: {solver_elapsed_s:.2f} s")
         _warn_slow("RF-Track solver return", solver_elapsed_s)
     else:
@@ -1700,7 +1182,6 @@ def run_transport_with_progress(
         "track_estimate_s": float(_TRANSPORT_RUNTIME_HISTORY[runtime_key]),
         "runtime_key_hash": runtime_key_hash,
         "progress_mode": "elapsed",
-        "progress_notebook_mode": notebook_mode_eff,
         "progress_enabled": bool(progress_enabled),
         "runtime_cache_file": str(_RUNTIME_HISTORY_CACHE),
         "timing_diagnostics": bool(diag_enabled),

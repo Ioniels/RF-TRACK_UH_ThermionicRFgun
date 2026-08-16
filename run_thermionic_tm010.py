@@ -54,6 +54,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ode_epsabs", type=float, default=1e-6)
     parser.add_argument("--aperture_m", type=float, default=1.0)
 
+    # Physical exit-aperture channel (post-hoc geometric cut + explicit entrance/exit screens) --
+    # a separate concept from --aperture_m (RF-Track's own whole-Volume aperture bound above).
+    # Matches the notebook's APERTURE_ENABLED/APERTURE_START_M/APERTURE_END_M/APERTURE_DIAMETER_MM;
+    # opt-in (default disabled) so existing scripts/SLURM jobs that don't pass these flags are
+    # unaffected. See `--save-openpmd-beam` for the aperture-aware exit-beam export this enables.
+    parser.add_argument("--aperture_enabled", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--aperture_start_m", type=float, default=0.028854)
+    parser.add_argument("--aperture_end_m", type=float, default=0.040589)
+    parser.add_argument("--aperture_diameter_mm", type=float, default=5.0546)
+
     parser.add_argument("--sc_enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--beam_loading", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--bl_q0", type=float, default=4000.0)
@@ -94,14 +104,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--phase_scan_n_part", type=int, default=20)
     parser.add_argument("--phase_scan_dt_mm", type=float, default=0.5)
 
+    parser.add_argument("--deflection_enabled", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--deflection_current_A", type=float, default=0.0)
+    parser.add_argument("--deflection_B_pk_per_A_T", type=float, default=None)
+    parser.add_argument("--deflection_z_p_mm", type=float, default=None)
+    parser.add_argument("--deflection_w_mm", type=float, default=None)
+
     parser.add_argument("--poll_interval_s", type=float, default=0.5)
     parser.add_argument("--progress-bar", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--progress-notebook-mode", choices=["minimal", "verbose", "auto"], default="auto")
+    # Accepted for compatibility with existing SLURM scripts; this script never renders a
+    # notebook progress widget, so the value has no effect beyond being echoed in run_metadata.
+    parser.add_argument("--progress-notebook-mode", choices=["auto", "on", "off"], default="auto")
     parser.add_argument("--timing-diagnostics", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--slow-step-warn-s", type=float, default=20.0)
     parser.add_argument("--save-figures", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-screen-json", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--screen-json-mode", choices=["summary", "full"], default="summary")
+    parser.add_argument("--save-screen-hdf5", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--store-screen-phase-space", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--store-screen-info", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--screen-stride", type=int, default=1)
@@ -111,14 +130,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-lost-particles", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-beam-json", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-beam-summary", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--save-openpmd-beam", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--save-screen-phase-space-batch", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--save-screen-phase-space-json", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--screen-frame-formats", type=str, nargs="+", default=["png"])
     parser.add_argument("--screen-frame-timing-log", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--save-class-phase-space", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--clean-e", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--clean-except-zpz", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--show-zle0", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--exclude-backward-losses", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--exclude-aperture-losses", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--calibrate-bl-r-over-q", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--t_max_mm", type=float, default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -151,18 +170,25 @@ def _requested_screen_count(args: argparse.Namespace) -> int:
 
 
 def build_scientific_run_name(args: argparse.Namespace) -> str:
-    sc_flag = 1 if bool(args.sc_enabled) else 0
-    bl_flag = 1 if bool(args.beam_loading) else 0
+    """Date/time first, then the parameters that most determine a run's physics -- matching the
+    `outputs/runs/<stamp>_T<T>K_SC<on/off>_BL<on/off>` convention used by the notebook's own
+    `SAVE_DATA` run-directory setup, so runs from either entry point sort and group the same way.
+    """
+    sc_tag = "on" if bool(args.sc_enabled) else "off"
+    bl_tag = "on" if bool(args.beam_loading) else "off"
     n_particles = int(args.n_particles)
     n_screens = _requested_screen_count(args)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"tm010_SC{sc_flag}_BL{bl_flag}_N{n_particles}_ZSNAPS{n_screens}_{stamp}"
+    return (
+        f"{stamp}_T{float(args.t_cathode_k):.0f}K_SC{sc_tag}_BL{bl_tag}"
+        f"_N{n_particles}_ZSNAPS{n_screens}"
+    )
 
 
 def resolve_output_dir(args: argparse.Namespace) -> Path:
     if args.output is not None:
         return Path(args.output)
-    return Path("outputs") / build_scientific_run_name(args)
+    return Path("outputs") / "runs" / build_scientific_run_name(args)
 
 
 def sanitize_for_json(value: Any) -> Any:
@@ -219,63 +245,40 @@ def summarize_array(values: np.ndarray, *, with_span: bool = False) -> dict[str,
     return out
 
 
-def _twiss_summary_from_phase_space(rg, M_snaps: list[np.ndarray]) -> dict[str, Any]:
-    alpha_x = []
-    beta_x = []
-    alpha_y = []
-    beta_y = []
-    alpha_z = []
-    beta_z = []
-    for M in M_snaps:
-        M_arr = np.asarray(M, dtype=float)
-        if M_arr.ndim != 2 or M_arr.shape[0] < 2 or M_arr.shape[1] < 6:
-            alpha_x.append(np.nan)
-            beta_x.append(np.nan)
-            alpha_y.append(np.nan)
-            beta_y.append(np.nan)
-            alpha_z.append(np.nan)
-            beta_z.append(np.nan)
-            continue
-        ax, bx, _ = rg.twiss_from_moments(M_arr[:, 0], M_arr[:, 1])
-        ay, by, _ = rg.twiss_from_moments(M_arr[:, 2], M_arr[:, 3])
-        az, bz, _ = rg.twiss_from_moments(M_arr[:, 4], M_arr[:, 5])
-        alpha_x.append(ax)
-        beta_x.append(bx)
-        alpha_y.append(ay)
-        beta_y.append(by)
-        alpha_z.append(az)
-        beta_z.append(bz)
-    return {
+def _beam_parameters_summary_from_table(table: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Twiss + emittance summaries from `rg.compute_beam_properties`'s per-screen table.
+
+    Replaces two previous, independent implementations: a hand-rolled Twiss computation that
+    passed raw `px` (not `px/pz`) as the divergence, and an emittance summary read from RF-Track's
+    per-screen `get_info()` (`info_snaps`) -- found unreliable since a `Screen`'s `get_info()`
+    returns an internal `Bunch6d` object, not `Bunch6dT` (confirmed against RF-Track 2.5.4 and
+    2.6.3 -- see `UPGRADE_PLAN_notebook_and_architecture.md`). `compute_beam_properties` forward-
+    filters via `%id` lookup against `Bout`'s own reliable absolute z/pz
+    (`rf_gun.particle_tags.ParticleTags`) instead of a raw z/pz sign check on the screen's own
+    columns, and additionally restricts to the aperture-surviving population when tagged -- the
+    same population used by every other summary and figure built from this run.
+    """
+
+    def _col(key):
+        return np.asarray([row.get(key, np.nan) for row in table], dtype=float)
+
+    twiss_summary = {
         "available": True,
-        "alpha_x": summarize_array(np.asarray(alpha_x, dtype=float)),
-        "beta_x": summarize_array(np.asarray(beta_x, dtype=float)),
-        "alpha_y": summarize_array(np.asarray(alpha_y, dtype=float)),
-        "beta_y": summarize_array(np.asarray(beta_y, dtype=float)),
-        "alpha_z": summarize_array(np.asarray(alpha_z, dtype=float)),
-        "beta_z": summarize_array(np.asarray(beta_z, dtype=float)),
+        "alpha_x": summarize_array(_col("alpha_x")),
+        "beta_x": summarize_array(_col("beta_x")),
+        "alpha_y": summarize_array(_col("alpha_y")),
+        "beta_y": summarize_array(_col("beta_y")),
+        "alpha_t": summarize_array(_col("alpha_t")),
+        "beta_t": summarize_array(_col("beta_t")),
     }
-
-
-def _emittance_summary_from_info(rg, info_snaps: list[Any]) -> dict[str, Any]:
-    geom_keys = {
-        "x": ["emit_x", "emittance_x", "eps_x", "epsilon_x", "ex"],
-        "y": ["emit_y", "emittance_y", "eps_y", "epsilon_y", "ey"],
-        "z": ["emit_z", "emittance_z", "eps_z", "epsilon_z", "ez"],
+    emittance_summary = {
+        "available": True,
+        "eps_nx": summarize_array(_col("emitt_x_norm")),
+        "eps_ny": summarize_array(_col("emitt_y_norm")),
+        "eps_nt": summarize_array(_col("emitt_t")),
+        "note": "normalized emittance only (mm*mrad for x/y; this project's (ToF, pz/mean(pz)) convention for the longitudinal plane, using %t rather than %Z since a screen's own %Z is not a lab-frame position) -- no separate geometric emittance is computed",
     }
-    norm_keys = {
-        "x": ["emitt_x", "emit_nx", "emitnx", "norm_emit_x", "normalized_emittance_x", "eps_nx", "epsilon_nx"],
-        "y": ["emitt_y", "emit_ny", "emitny", "norm_emit_y", "normalized_emittance_y", "eps_ny", "epsilon_ny"],
-        "z": ["emitt_z", "emit_nz", "emitnz", "norm_emit_z", "normalized_emittance_z", "eps_nz", "epsilon_nz"],
-    }
-    out: dict[str, Any] = {"available": bool(len(info_snaps) > 0)}
-    for axis in ("x", "y", "z"):
-        geom = np.asarray([rg.info_get_first(info, geom_keys[axis]) for info in info_snaps], dtype=float)
-        norm = np.asarray([rg.info_get_first(info, norm_keys[axis]) for info in info_snaps], dtype=float)
-        out[f"eps_{axis}"] = summarize_array(geom)
-        out[f"eps_n{axis}"] = summarize_array(norm)
-    if not bool(len(info_snaps) > 0):
-        out["note"] = "No RF-Track info snapshots were returned"
-    return out
+    return twiss_summary, emittance_summary
 
 
 def _screen_summaries_from_arrays(
@@ -379,6 +382,7 @@ def _build_beam_summary(
     result,
     M0: np.ndarray,
     Mf: np.ndarray,
+    tags,
     phase_deg_transport: float,
     phi_zero_deg: float,
     phi_crest_deg: float,
@@ -409,12 +413,13 @@ def _build_beam_summary(
     pz0_summary = summarize_array(np.asarray(M0[:, 5], dtype=float) if M0.ndim == 2 and M0.shape[1] > 5 else np.asarray([], dtype=float))
 
     twiss_summary: dict[str, Any]
+    emittance_summary: dict[str, Any]
     if M_snaps:
-        twiss_summary = _twiss_summary_from_phase_space(rg, M_snaps)
+        beam_properties_table = rg.compute_beam_properties(M_snaps, z_snaps, tags, rg.ME_MEV)
+        twiss_summary, emittance_summary = _beam_parameters_summary_from_table(beam_properties_table)
     else:
         twiss_summary = {"available": False, "reason": "Twiss data not returned in current run"}
-
-    emittance_summary = _emittance_summary_from_info(rg, I_snaps)
+        emittance_summary = {"available": False, "reason": "Twiss data not returned in current run"}
 
     warnings = _consistency_warnings(
         n_initial=n_initial,
@@ -693,7 +698,7 @@ def main() -> None:
         flush=True,
     )
     t_phase_scan_start = time.time()
-    _, _, _, pz_mean_scan = rg.run_phase_scan(
+    _, _, phi_abs_scan, pz_mean_scan = rg.run_phase_scan(
         rft,
         er_grid,
         ez_grid,
@@ -707,9 +712,16 @@ def main() -> None:
         rng=rng,
     )
     t_phase_scan_elapsed = time.time() - t_phase_scan_start
+    i_peak_scan = int(np.argmax(pz_mean_scan))
+    crest_phase_deg = float(np.asarray(phi_abs_scan, dtype=float)[i_peak_scan])
     veff_v = veff_from_phase_scan_pz(np.asarray(pz_mean_scan, dtype=float), float(args.pz_init_mevc), me_MeV=rg.ME_MEV)
     r_over_q_ohm = (veff_v**2) / (p_del_w * q_loaded)
-    bl_r_over_q_ohm_per_m = r_over_q_per_m(veff_v, p_del_w, q_loaded, l_eff_m)
+    # Kept distinct from `bl_r_over_q_ohm_per_m` (the value actually used in transport, below) so
+    # the from-scan estimate is still reported correctly even when --no-calibrate-bl-r-over-q
+    # overrides it with the fixed CLI/default value -- previously both prints read the same
+    # (possibly-overridden) variable, so "from scan" silently showed the fixed value instead.
+    bl_r_over_q_ohm_per_m_from_scan = r_over_q_per_m(veff_v, p_del_w, q_loaded, l_eff_m)
+    bl_r_over_q_ohm_per_m = bl_r_over_q_ohm_per_m_from_scan
 
     if bool(args.beam_loading) and bool(args.calibrate_bl_r_over_q):
         print("Beam-loading R/Q per m updated from phase scan.")
@@ -717,19 +729,28 @@ def main() -> None:
         bl_r_over_q_ohm_per_m = float(args.bl_r_over_q_ohm_per_m)
         print("Beam-loading R/Q per m kept fixed from CLI/default value.")
     print(f"Phase scan elapsed: {format_duration(t_phase_scan_elapsed)}")
+    print(f"Phase scan: {phase_scan_n} coarse points -> crest at {crest_phase_deg:.3f} deg")
     print(f"Veff = {veff_v/1e6:.6f} MV")
     print(f"(R/Q) from scan = {r_over_q_ohm:.3e} Ω")
-    print(f"(R/Q)/m from scan = {bl_r_over_q_ohm_per_m:.3e} Ω/m")
+    print(f"(R/Q)/m from scan = {bl_r_over_q_ohm_per_m_from_scan:.3e} Ω/m")
     print(f"(R/Q)/m used in transport = {bl_r_over_q_ohm_per_m:.3e} Ω/m")
 
-    tmax_default_mm = rg.estimate_default_tmax_mm(
-        z_min,
-        z_max,
-        f_hz,
-        float(args.emission_phase_range),
-        safety_factor=2.0,
+    # NOTE: estimate_default_tmax_mm() assumes light-speed transit (cavity_length / c), which
+    # badly underestimates the time a thermionic gun needs: particles start near rest and
+    # accelerate gradually, so light-speed transit time is not a valid proxy for tracking
+    # duration here. Confirmed empirically: at the ~120-200 mm/c this produces for this gun's
+    # parameters, Volume.get_bunch_at_screens() returns an empty list (not screens with zero
+    # rows) because no particle reaches even the first screen in time -- and Bout itself would
+    # reflect a run cut off before slower/backward-turning particles finish evolving. The
+    # notebook never calls this estimator at all and instead relies on VolumeBuildParams's own
+    # t_max_mm default (2000.0 mm/c); match that here unless the user overrides explicitly.
+    t_max_mm = float(args.t_max_mm) if args.t_max_mm is not None else 2000.0
+
+    deflection_B_pk_per_A_T = (
+        float(args.deflection_B_pk_per_A_T) if args.deflection_B_pk_per_A_T is not None else rg.DEFAULT_B_PK_PER_A_T
     )
-    t_max_mm = float(args.t_max_mm) if args.t_max_mm is not None else float(tmax_default_mm)
+    deflection_z_p_mm = float(args.deflection_z_p_mm) if args.deflection_z_p_mm is not None else rg.DEFAULT_Z_P_MM
+    deflection_w_mm = float(args.deflection_w_mm) if args.deflection_w_mm is not None else rg.DEFAULT_W_MM
 
     vol_params = rg.VolumeBuildParams(
         f_hz=f_hz,
@@ -756,6 +777,11 @@ def main() -> None:
         bl_tinj_mode=str(args.bl_tinj_mode),
         bl_tinj_manual_mm_c=float(args.bl_tinj_manual_mm_c),
         t_max_mm=t_max_mm,
+        deflection_enabled=bool(args.deflection_enabled),
+        deflection_current_A=float(args.deflection_current_A),
+        deflection_B_pk_per_A_T=deflection_B_pk_per_A_T,
+        deflection_z_p_mm=deflection_z_p_mm,
+        deflection_w_mm=deflection_w_mm,
     )
 
     pz_model = "constant" if bool(args.use_const_pz) else "flux"
@@ -790,11 +816,17 @@ def main() -> None:
         else:
             z_snaps = np.linspace(float(z_min), float(z_max), n_screens + 2)[1:-1].tolist()
 
+    # Insert explicit aperture entrance/exit screens ("before"/"after" views), matching the
+    # notebook's APERTURE_ENABLED handling -- needed so the openPMD exit-beam export below (see
+    # --save-openpmd-beam) has an exact screen at the aperture-exit z to select from.
+    if bool(args.aperture_enabled):
+        z_snaps = sorted(set(z_snaps or []) | {float(args.aperture_start_m), float(args.aperture_end_m)})
+
     tracking = rg.TrackingParams(
         phi_deg=float(phase_deg_transport),
         n_particles=int(args.n_particles),
         z_screens_m=z_snaps,
-        phase_fmt="%X %Px %Y %Py %Z %Pz",
+        phase_fmt=rg.EXTENDED_PHASE_FMT,
         screen_width_mm=args.screen_width_mm,
         screen_height_mm=args.screen_height_mm,
         screen_time_window_mm_c=args.screen_time_window_mm_c,
@@ -802,6 +834,13 @@ def main() -> None:
         screen_t0_manual_mm_c=float(args.screen_t0_manual_mm_c),
         screen_log=bool(args.screen_log),
     )
+
+    if (bool(args.save_screen_hdf5) or bool(args.save_openpmd_beam)) and not bool(args.store_screen_phase_space):
+        print(
+            "Note: --save-screen-hdf5/--save-openpmd-beam need each screen's raw phase-space "
+            "array; auto-enabling --store-screen-phase-space."
+        )
+        args.store_screen_phase_space = True
 
     diagnostics = rg.DiagnosticsParams(
         store_screen_phase_space=bool(args.store_screen_phase_space),
@@ -828,7 +867,6 @@ def main() -> None:
         tracking,
         diagnostics=diagnostics,
         progress_bar=bool(args.progress_bar),
-        progress_notebook_mode=str(args.progress_notebook_mode),
         use_coarse_progress_proxy=True,
         poll_interval_s=float(args.poll_interval_s),
         timing_diagnostics=bool(args.timing_diagnostics),
@@ -836,10 +874,124 @@ def main() -> None:
         rng=rng,
     )
 
-    phase_fmt = "%X %Px %Y %Py %Z %Pz"
+    phase_fmt = rg.EXTENDED_PHASE_FMT
     m0 = np.array(result.B0.get_phase_space(phase_fmt, "all"), copy=True)
     mf = np.array(result.Bout.get_phase_space(phase_fmt, "all"), copy=True)
     z_snaps_arr = np.asarray(result.z_snaps, dtype=float)
+
+    # Backward-tagging only: this pipeline has no post-hoc aperture entrance/exit screens (the
+    # notebook's aperture cell is the only place that pairing exists -- see rf_gun/aperture.py's
+    # module docstring), so aperture-loss tagging is empty here and `--exclude-aperture-losses` is
+    # a no-op until/unless this script grows an equivalent post-hoc aperture. Computed once and
+    # reused by every figure and every JSON summary built from this run.
+    #
+    # CAVEAT (confirmed empirically with --preset quick, default --aperture_m 1.0, seed 123): a
+    # particle whose radius exceeds the field map's r_max_m grid extent can pick up an unphysical,
+    # runaway-large Pz from that point on, yet still read as forward (z>0, pz>0) at Bout -- so it
+    # is not excluded by backward-tagging either, and *does* corrupt compute_beam_properties's
+    # Twiss/emittance for any screen it reaches (seen: ~1/3 of a 1000-particle run, emitt_x_norm
+    # inflated to O(1e9) mm*mrad). In the notebook this population is caught for free by the
+    # aperture radius cut (a particle can't exceed r_max_m=10mm while also clearing a ~2.5mm
+    # aperture), but this script has no equivalent geometric screen, so a loose/default
+    # --aperture_m plus a beam that genuinely spreads past r_max_m can leak this into
+    # beam_summary.json's twiss_summary/emittance_summary and into the two evolution figures.
+    # Not filtered here -- flagged for a human decision (e.g. always pairing a tight --aperture_m
+    # with this script's field-map r_max_m in production, or adding a real geometric screen) rather
+    # than papering over it with an ad hoc numeric cutoff.
+    tags = rg.build_particle_tags(mf, None, None, 0.0, False)
+
+    # Save the final (forward-going, aperture-clipped when --aperture_enabled) 6D beam as
+    # openPMD-beamphysics HDF5 -- mirrors the notebook's "Export the exit beam" cell exactly
+    # (same source-selection logic, same `Bout_sout<mm>mm_T<K>K_SC<on/off>_BL<on/off>.h5` naming).
+    openpmd_h5_path = None
+    openpmd_exit_beam_summary = None
+    if bool(args.save_openpmd_beam):
+        openpmd_dir = output_dir / "openpmd"
+        _sc_tag = "on" if bool(args.sc_enabled) else "off"
+        _bl_tag = "on" if bool(args.beam_loading) else "off"
+        _skip_export = False
+
+        if bool(args.aperture_enabled):
+            aperture_radius_mm = float(args.aperture_diameter_mm) / 2.0
+            _i_ext_save = int(np.argmin(np.abs(z_snaps_arr - float(args.aperture_end_m))))
+            _M_ap_exit_raw = np.asarray(result.M_snaps[_i_ext_save], dtype=float)
+            _is_bw_save, _ = rg.tag_mask(_M_ap_exit_raw, tags, screen_z_m=float(z_snaps_arr[_i_ext_save]))
+            _M_ap_exit_fwd = _M_ap_exit_raw[~_is_bw_save] if _M_ap_exit_raw.shape[0] else _M_ap_exit_raw
+            _r_mask_save = rg.aperture_survival_mask(_M_ap_exit_fwd, aperture_radius_mm)
+            _M_to_save = _M_ap_exit_fwd[_r_mask_save] if _M_ap_exit_fwd.shape[0] else _M_ap_exit_fwd
+
+            print(
+                f"Aperture-exit screen (z={z_snaps_arr[_i_ext_save]*1e3:.3f} mm): "
+                f"{_M_ap_exit_raw.shape[0]} particles reached this plane, "
+                f"{_M_ap_exit_fwd.shape[0]} forward-going, "
+                f"{_M_to_save.shape[0]} within aperture radius ({aperture_radius_mm:.4f} mm)."
+            )
+
+            if _M_to_save.shape[0] == 0:
+                print("WARNING: no particles within the aperture radius -- skipping openPMD exit-beam export.")
+                _skip_export = True
+            else:
+                # Uniform per-macroparticle weighting (matches build_bunch_thermionic's own N
+                # column, split evenly across all requested macroparticles).
+                _n_real_per_macro = (abs(float(result.thermo_info.get("Q_total_C", 0.0))) / rg.q_e) / float(args.n_particles)
+                _N_real_saved = _n_real_per_macro * _M_to_save.shape[0]
+                _bunch_to_save = rft.Bunch6dT(rg.ME_MEV, float(_N_real_saved), -1.0, _M_to_save[:, :6])
+                _which = "all"
+                _forward_only_save = False
+                _aperture_radius_for_save = None  # already filtered above
+                s_out_m = float(z_snaps_arr[_i_ext_save])
+                _save_source = "aperture-exit screen (exact z of aperture crossing)"
+        else:
+            _bunch_to_save = result.Bout
+            _which = "good"
+            _forward_only_save = True
+            _aperture_radius_for_save = None
+            s_out_m = float(z_max)
+            _save_source = "Bout (final tracking time, no aperture)"
+
+        if not _skip_export:
+            s_out_mm = s_out_m * 1e3
+            _stem = f"Bout_sout{s_out_mm:.1f}mm_T{float(args.t_cathode_k):.0f}K_SC{_sc_tag}_BL{_bl_tag}"
+            _meta = {
+                "run_name": output_dir.name,
+                "s_out_m": s_out_m,
+                "save_source": _save_source,
+                "aperture_radius_mm": (float(args.aperture_diameter_mm) / 2.0) if bool(args.aperture_enabled) else None,
+                "transport_phase_deg": float(phase_deg_transport),
+                "f_hz": float(f_hz),
+                "cathode_T_K": float(args.t_cathode_k),
+                "work_function_eV": float(args.phi_eff_ev),
+                "space_charge": bool(args.sc_enabled),
+                "beam_loading": bool(args.beam_loading),
+                "Q_total_C": float(result.thermo_info.get("Q_total_C", float("nan"))),
+            }
+            openpmd_h5_path = rg.save_beam_openpmd(
+                openpmd_dir / f"{_stem}.h5",
+                _bunch_to_save,
+                which=_which,
+                forward_only=_forward_only_save,
+                aperture_radius_mm=_aperture_radius_for_save,
+                species="electron",
+                extra_attrs=_meta,
+            )
+
+            from pmd_beamphysics import ParticleGroup
+
+            _pg = ParticleGroup(h5=str(openpmd_h5_path))
+            openpmd_exit_beam_summary = {
+                "file": str(openpmd_h5_path.resolve()),
+                "source": _save_source,
+                "s_out_m": s_out_m,
+                "n_saved": int(_pg.n_particle),
+                "total_charge_C": float(_pg.charge),
+                "mean_energy_eV": float(_pg["mean_energy"]),
+                "norm_emit_x_m": float(_pg["norm_emit_x"]),
+                "norm_emit_y_m": float(_pg["norm_emit_y"]),
+            }
+            print(f"Saved exit beam to: {openpmd_h5_path.resolve()}")
+            print(f"Source                   : {_save_source}")
+            print(f"z of saved distribution  : s_out = {s_out_mm:.3f} mm from cathode (z=0)")
+            print(f"Saved                    : {_pg.n_particle}")
 
     npz_path = output_dir / "beam_data.npz"
     npz_payload: Dict[str, Any] = {"M0": m0, "Mf": mf, "z_snaps": z_snaps_arr}
@@ -899,43 +1051,36 @@ def main() -> None:
 
     saved_figures = []
     if bool(args.save_figures):
-        n_real_ref = abs(float(result.thermo_info.get("Q_total_C", np.nan))) / rg.q_e if result.thermo_info else None
         saved_figures = rg.save_run_figures(
-            output_dir=output_dir,
+            output_dir=output_dir / "figures",
             B0=result.B0,
             Bout=result.Bout,
             transport_phase_deg=float(phase_deg_transport),
             thermo_info=dict(result.thermo_info),
             M_snaps=list(result.M_snaps),
             z_snaps=list(result.z_snaps),
-            I_snaps=list(result.I_snaps),
+            tags=tags,
             phase_fmt=phase_fmt,
-            clean_e=bool(args.clean_e),
-            clean_except_zpz=bool(args.clean_except_zpz),
-            show_zle0=bool(args.show_zle0),
-            n_real_ref=n_real_ref,
+            exclude_backward_losses=bool(args.exclude_backward_losses),
+            exclude_aperture_losses=bool(args.exclude_aperture_losses),
             n_macroparticles=int(args.n_particles),
             lost_table=result.lost_table,
         )
 
     screen_phase_space_batch = None
     if bool(args.save_screen_phase_space_batch):
-        n_real_ref = abs(float(result.thermo_info.get("Q_total_C", np.nan))) / rg.q_e if result.thermo_info else None
         plot_style = rg.PlotStyleConfig(dezoom_frac=0.05)
         screen_phase_space_batch = rg.save_screen_phase_space_batch(
             output_dir=output_dir,
             M_snaps=list(result.M_snaps),
             z_snaps=list(result.z_snaps),
-            info_snaps=list(result.I_snaps),
             B0=result.B0,
-            Bout=result.Bout,
+            tags=tags,
             phase_fmt=phase_fmt,
-            clean_e=bool(args.clean_e),
-            clean_except_zpz=bool(args.clean_except_zpz),
-            n_real_ref=n_real_ref,
+            exclude_backward_losses=bool(args.exclude_backward_losses),
+            exclude_aperture_losses=bool(args.exclude_aperture_losses),
             n_macroparticles=int(args.n_particles),
             style=plot_style,
-            highlight_mode="zlt0",
             show_colorbar=False,
             save_json=bool(args.save_screen_phase_space_json),
             figure_formats=tuple(str(fmt).strip().lower() for fmt in args.screen_frame_formats if str(fmt).strip()),
@@ -954,6 +1099,28 @@ def main() -> None:
             robust_summaries=list(result.screen_summaries),
         )
 
+    saved_screen_hdf5_paths: List[Path] = []
+    if bool(args.save_screen_hdf5):
+        _sc_tag = "on" if bool(args.sc_enabled) else "off"
+        _bl_tag = "on" if bool(args.beam_loading) else "off"
+        saved_screen_hdf5_paths = rg.save_screen_distributions_hdf5(
+            output_dir=output_dir / "screen_distributions_hdf5",
+            z_snaps=list(result.z_snaps),
+            M_snaps=list(result.M_snaps),
+            I_snaps=list(result.I_snaps),
+            n_initial=int(m0.shape[0]) if m0.ndim == 2 else 0,
+            q_total_C=float(result.thermo_info.get("Q_total_C", 0.0)),
+            filename_stem=f"screen_T{float(args.t_cathode_k):.0f}K_SC{_sc_tag}_BL{_bl_tag}",
+            extra_attrs={
+                "run_name": output_dir.name,
+                "cathode_T_K": float(args.t_cathode_k),
+                "space_charge": bool(args.sc_enabled),
+                "beam_loading": bool(args.beam_loading),
+                "transport_phase_deg": float(phase_deg_transport),
+            },
+            robust_summaries=list(result.screen_summaries),
+        )
+
     lost_path = rg.save_lost_particles_json(output_dir, result.lost_table) if bool(args.save_lost_particles) else None
 
     beam_summary_path = None
@@ -966,6 +1133,7 @@ def main() -> None:
             result=result,
             M0=m0,
             Mf=mf,
+            tags=tags,
             phase_deg_transport=float(phase_deg_transport),
             phi_zero_deg=float(phi_zero_deg),
             phi_crest_deg=float(phi_crest_deg),
@@ -1018,9 +1186,8 @@ def main() -> None:
         "scan_tags": [str(x) for x in (args.scan_tags or [])],
         "args": sanitize_for_json(vars(args)),
         "plotting_defaults": {
-            "clean_e": bool(args.clean_e),
-            "clean_except_zpz": bool(args.clean_except_zpz),
-            "show_zle0": bool(args.show_zle0),
+            "exclude_backward_losses": bool(args.exclude_backward_losses),
+            "exclude_aperture_losses": bool(args.exclude_aperture_losses),
         },
         "rftrack": {
             "max_number_of_threads": sanitize_for_json(getattr(rft, "max_number_of_threads", None)),
@@ -1089,6 +1256,7 @@ def main() -> None:
         "saved_figures": saved_figures,
         "screen_phase_space_batch": sanitize_for_json(screen_phase_space_batch),
         "saved_screen_json_count": int(saved_screen_json),
+        "saved_screen_hdf5_files": [str(p) for p in saved_screen_hdf5_paths],
         "beam_json": {
             "B0": str(b0_json_path) if b0_json_path is not None else None,
             "Bout": str(bout_json_path) if bout_json_path is not None else None,
@@ -1106,6 +1274,143 @@ def main() -> None:
     progress_path = output_dir / "progress_stats.json"
     with progress_path.open("w", encoding="utf-8") as f:
         json.dump(sanitize_for_json(progress_stats), f, indent=2, sort_keys=True)
+
+    # Same `run_summary.json` shape as the notebook's `SAVE_DATA` run -- both call
+    # `rg.save_run_summary` so a run started either way is read the same way later.
+    # `openpmd_exit_beam` is populated when `--save-openpmd-beam` was passed (see above, right
+    # after `tags`); `acceptance_scan`/`aperture_summary`/`back_bombardment`/`beam_properties_csv`
+    # stay None -- this script doesn't run those notebook-only diagnostics (acceptance scan,
+    # back-bombardment, beam-properties-vs-z).
+    run_summary_path = rg.save_run_summary(
+        output_dir,
+        run_name=output_dir.name,
+        source="script:run_thermionic_tm010.py",
+        hardcoded_parameters={
+            "cavity": {
+                "f_hz": f_hz,
+                "y_cathode_mm": float(args.y_cathode_mm),
+                "r_max_m": float(args.r_max_m),
+                "dr_um": float(args.dr_um),
+                "dz_um": float(args.dz_um),
+                "ext_zmax_m": float(args.ext_zmax),
+                "ext_zmin_m": z_min,
+                "xy_fieldmap": str(args.xy_fieldmap),
+                "yz_fieldmap": str(args.yz_fieldmap),
+                "phasor_mode": str(args.phasor_mode),
+            },
+            "cathode_emission": {
+                "r_cathode_mm": float(args.r_cathode_mm),
+                "emission_scale": float(args.emission_scale),
+                "use_const_pz": bool(args.use_const_pz),
+                "pz_init_mevc": float(args.pz_init_mevc),
+                "ra_um": float(args.ra_um),
+                "re_um": float(args.re_um),
+                "emission_law": str(args.emission_law),
+                "t_cathode_k": float(args.t_cathode_k),
+                "phi_eff_ev": float(args.phi_eff_ev),
+                "beta_f": float(args.beta_f),
+                "emission_phase_range_deg": float(args.emission_phase_range),
+                "emission_phase_start_deg": float(args.emission_phase_start),
+            },
+            "integration": {
+                "dt_mm": float(args.dt_mm),
+                "ode_algorithm": str(args.ode_algorithm),
+                "ode_epsabs": float(args.ode_epsabs),
+                "fm_nsteps": int(args.fm_nsteps),
+                "fm_tt_nsteps": int(args.fm_tt_nsteps),
+            },
+            "space_charge": {
+                "enabled": bool(args.sc_enabled),
+                "sc_dt_mm": float(args.sc_dt_mm),
+                "emission_nsteps": int(args.emission_nsteps),
+                "emission_range": float(args.emission_range),
+            },
+            "beam_loading": {
+                "enabled": bool(args.beam_loading),
+                "Q0": float(args.bl_q0),
+                "Qext": float(args.bl_qext),
+                "Q_loaded": float(q_loaded),
+                "P_fwd_W": float(args.bl_p_fwd_w),
+                "P_del_W": float(p_del_w),
+                "r_over_q_ohm_per_m_used": float(bl_r_over_q_ohm_per_m),
+                "calibrate_from_scan": bool(args.calibrate_bl_r_over_q),
+                "n_cells": int(args.bl_ncells),
+                "tinj_mode": str(args.bl_tinj_mode),
+                "tinj_manual_mm_c": float(args.bl_tinj_manual_mm_c),
+                "cfx_dt_mm": float(args.cfx_dt_mm),
+            },
+            "phase_scan_settings": {
+                "min_deg": float(args.phase_scan_min),
+                "max_deg": float(args.phase_scan_max),
+                "n_points": int(phase_scan_n),
+                "n_particles": int(phase_scan_n_part),
+            },
+            "transport": {
+                "n_particles": int(args.n_particles),
+                "n_z_snap": int(z_snaps_arr.size),
+                "screen_width_mm": args.screen_width_mm,
+                "screen_height_mm": args.screen_height_mm,
+                "screen_time_window_mm_c": args.screen_time_window_mm_c,
+                "screen_t0_mode": str(args.screen_t0_mode),
+                "screen_t0_manual_mm_c": float(args.screen_t0_manual_mm_c),
+            },
+            "aperture": {
+                "volume_aperture_m": args.aperture_m,
+                "physical_exit_aperture_enabled": bool(args.aperture_enabled),
+                "physical_exit_aperture_start_m": float(args.aperture_start_m) if bool(args.aperture_enabled) else None,
+                "physical_exit_aperture_end_m": float(args.aperture_end_m) if bool(args.aperture_enabled) else None,
+                "physical_exit_aperture_diameter_mm": float(args.aperture_diameter_mm) if bool(args.aperture_enabled) else None,
+                "note": (
+                    "'volume_aperture_m' is RF-Track's own whole-Volume aperture bound; the "
+                    "'physical_exit_aperture_*' fields are the separate, opt-in (--aperture_enabled) "
+                    "post-hoc geometric cut matching the notebook's APERTURE_START_M/END_M/"
+                    "APERTURE_DIAMETER_MM, used only for the --save-openpmd-beam export."
+                ),
+            },
+            "deflection_magnet": {
+                "enabled": bool(args.deflection_enabled),
+                "current_A": float(args.deflection_current_A),
+                "B_pk_per_A_T": deflection_B_pk_per_A_T,
+                "z_p_mm": deflection_z_p_mm,
+                "w_mm": deflection_w_mm,
+            },
+        },
+        derived_parameters={
+            "lambda_m": lambda_m,
+            "grid": {"nr": int(nr), "nz": int(nz)},
+            "z_min_m": z_min,
+            "z_max_m": z_max,
+            "l_eff_m": float(l_eff_m),
+            "phi_zero_deg": float(phi_zero_deg),
+            "phi_crest_deg": float(phi_crest_deg),
+            "transport_phase_deg": float(phase_deg_transport),
+            "phase_scan": {
+                "n_coarse_points": int(phase_scan_rel.size),
+                "crest_phase_deg": crest_phase_deg,
+                "veff_V": float(veff_v),
+                "r_over_q_ohm": float(r_over_q_ohm),
+                "r_over_q_ohm_per_m_from_scan": float(bl_r_over_q_ohm_per_m_from_scan),
+                "r_over_q_ohm_per_m_used": float(bl_r_over_q_ohm_per_m),
+            },
+        },
+        results={
+            "thermo_info": thermo_summary,
+            "progress_stats": dict(progress_stats),
+            "particle_classes_summary": classes_summary,
+            "acceptance_scan": None,
+            "aperture_summary": None,
+            "back_bombardment": None,
+            "openpmd_exit_beam": openpmd_exit_beam_summary,
+            "screen_summaries": robust_screen_summaries,
+        },
+        output_files={
+            "figures_dir": str((output_dir / "figures").resolve()) if saved_figures else None,
+            "openpmd_dir": str(openpmd_h5_path.parent.resolve()) if openpmd_h5_path is not None else None,
+            "screens_dir": str((output_dir / "screen_distributions_hdf5").resolve()) if saved_screen_hdf5_paths else None,
+            "beam_properties_csv": None,
+            "lost_particles_json": str(lost_path) if lost_path is not None else None,
+        },
+    )
 
     t_sim_elapsed = time.time() - t_sim_start
     print(f"\nRun complete, simulation time: {format_duration(t_sim_elapsed)}")
@@ -1131,14 +1436,19 @@ def main() -> None:
         print(f"Saved beam JSON: {b0_json_path.name}, {bout_json_path.name}")
     if beam_summary_path is not None:
         print(f"Saved beam summary: {beam_summary_path.name}")
+    if openpmd_h5_path is not None:
+        print(f"Saved openPMD exit beam: {openpmd_h5_path.relative_to(output_dir)}")
     if saved_figures:
-        print(f"Saved {len(saved_figures)} figure files (.png/.eps)")
+        print(f"Saved {len(saved_figures)} figure files (.png/.eps) to figures/")
     if screen_phase_space_batch is not None:
         print(f"Saved cinematic phase-space frames: {int(screen_phase_space_batch.get('frame_count', 0))}")
     if saved_screen_json:
         print(f"Saved {saved_screen_json} per-screen JSON files")
+    if saved_screen_hdf5_paths:
+        print(f"Saved {len(saved_screen_hdf5_paths)} per-screen HDF5 files")
     if lost_path is not None:
         print(f"Saved lost-particle diagnostics: {lost_path.name}")
+    print(f"Saved run summary: {run_summary_path.name}")
 
 
 if __name__ == "__main__":

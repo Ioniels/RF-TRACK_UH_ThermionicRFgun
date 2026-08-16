@@ -6,10 +6,17 @@ from typing import Any, Dict, Sequence
 import numpy as np
 
 
-def twiss_from_moments(u: np.ndarray, pu: np.ndarray):
-    """Twiss parameters from second moments."""
+def _second_moment_twiss(u: np.ndarray, pu: np.ndarray):
+    """Shared second-moment computation: returns (alpha, beta, gamma, eps_geom).
+
+    `eps_geom = sqrt(det(cov{u,pu}))` is the geometric emittance in whatever units
+    `u`/`pu` are given in (e.g. mm and rad -> mm*rad). Kept private since
+    `twiss_from_moments` (below) is the long-standing public 3-tuple return used
+    throughout this codebase; `manual_twiss_and_emittance` (below) is the only other
+    caller, added to expose `eps_geom` for the native-vs-manual comparison.
+    """
     if u.size < 2 or pu.size < 2:
-        return np.nan, np.nan, np.nan
+        return np.nan, np.nan, np.nan, np.nan
     u0 = u - np.mean(u)
     pu0 = pu - np.mean(pu)
     s11 = float(np.mean(u0 * u0))
@@ -17,12 +24,91 @@ def twiss_from_moments(u: np.ndarray, pu: np.ndarray):
     s12 = float(np.mean(u0 * pu0))
     det = s11 * s22 - s12 * s12
     if not np.isfinite(det) or det <= 0.0:
-        return np.nan, np.nan, np.nan
+        return np.nan, np.nan, np.nan, np.nan
     eps = np.sqrt(det)
     alpha = -s12 / eps
     beta = s11 / eps
     gamma = s22 / eps
-    return float(alpha), float(beta), float(gamma)
+    return float(alpha), float(beta), float(gamma), float(eps)
+
+
+def twiss_from_moments(u: np.ndarray, pu: np.ndarray):
+    """Twiss parameters (alpha, beta, gamma) from second moments."""
+    alpha, beta, gamma, _eps_geom = _second_moment_twiss(u, pu)
+    return alpha, beta, gamma
+
+
+def dispersion_from_moments(u: np.ndarray, delta: np.ndarray) -> float:
+    """D_u = Cov(u, delta) / Var(delta), mean-centered and population-normalized (ddof=0) to
+    match `_second_moment_twiss`'s convention exactly. `u` can be a position (-> D_x [mm]) or a
+    divergence `px/pz` (-> D_x' [rad]); `delta` is the relative momentum deviation
+    `(pz - mean(pz)) / mean(pz)`.
+    """
+    if u.size < 2 or delta.size < 2:
+        return np.nan
+    u0 = u - np.mean(u)
+    d0 = delta - np.mean(delta)
+    var_d = float(np.mean(d0 * d0))
+    if not np.isfinite(var_d) or var_d <= 0.0:
+        return np.nan
+    return float(np.mean(u0 * d0) / var_d)
+
+
+def manual_twiss_and_emittance(M: np.ndarray, mass_MeV: float) -> Dict[str, float]:
+    """Twiss/emittance for [x,px,y,py,z,pz] via plain numpy second moments.
+
+    This is the project's sole Twiss/emittance computation. RF-Track's own native
+    `Bunch6dT.get_info()` Twiss (`alpha_x`/`alpha_y`) was empirically found to be
+    unreliable under real (non-negligible) x-x'/y-y' correlation -- reproduced
+    against both RF-Track 2.5.4 and 2.6.3, so not a version-specific defect -- and
+    a `Screen`'s own `get_info()` returns an internal `Bunch6d` (not `Bunch6dT`)
+    object whose field names collide with this project's `Bunch6dT`-style lookups
+    (e.g. its `sigma_px`/`sigma_py` are mrad angle spreads, not MeV/c momentum
+    spreads, but a case-insensitive field lookup for "sigma_Px" matches them
+    anyway). Neither RF-Track-native path is used here; see the notebook's
+    beam-parameter cell and `UPGRADE_PLAN_notebook_and_architecture.md` for the
+    full empirical writeup.
+
+    `beta_x`/`beta_y` in mm, `emitt_x`/`emitt_y` (and `_norm` aliases) normalized in mm*mrad (via
+    the paraxial beta*gamma = mean_pz / mass_MeV relation); `emitt_x_geom`/`emitt_y_geom` are the
+    same quantity before that scaling (mm*rad). `gamma_x`/`gamma_y`/`gamma_z` = (1+alpha^2)/beta,
+    from the same second-moment computation as alpha/beta (no separate formula/pass needed).
+
+    Longitudinal (`alpha_z`/`beta_z`/`emitt_z`) uses this project's own convention
+    -- `z` [mm] vs. `delta = pz / mean(pz)` [dimensionless] -- since RF-Track's own
+    manual documents a different, incompletely-specified longitudinal convention
+    (`emitt_z` in mm.permille, no closed-form alpha_z/beta_z formula given) that
+    does not reduce to a simple unit rescaling of (z, delta). `emitt_z` is already the
+    geometric value (z, delta) itself has no natural "normalized" counterpart here.
+    """
+    out_keys = [
+        "alpha_x", "beta_x", "gamma_x", "emitt_x", "emitt_x_norm", "emitt_x_geom",
+        "alpha_y", "beta_y", "gamma_y", "emitt_y", "emitt_y_norm", "emitt_y_geom",
+        "alpha_z", "beta_z", "gamma_z", "emitt_z",
+    ]
+    arr = np.asarray(M, dtype=float)
+    if arr.ndim != 2 or arr.shape[0] < 4 or arr.shape[1] < 6:
+        return {k: np.nan for k in out_keys}
+
+    x, px, y, py, z, pz = (arr[:, i] for i in range(6))
+    pz_mean = float(np.mean(pz))
+    p0 = pz_mean if pz_mean > 0.0 else 1.0
+    betagamma = pz_mean / float(mass_MeV) if mass_MeV > 0.0 else np.nan
+
+    ax, bx, gx, ex = _second_moment_twiss(x, px / pz)
+    ay, by, gy, ey = _second_moment_twiss(y, py / pz)
+    az, bz, gz, ez = _second_moment_twiss(z, pz / p0)
+
+    ex_norm = ex * betagamma * 1e3 if np.isfinite(ex) else np.nan
+    ey_norm = ey * betagamma * 1e3 if np.isfinite(ey) else np.nan
+
+    return {
+        "alpha_x": ax, "beta_x": bx, "gamma_x": gx,
+        "emitt_x": ex_norm, "emitt_x_norm": ex_norm, "emitt_x_geom": ex,
+        "alpha_y": ay, "beta_y": by, "gamma_y": gy,
+        "emitt_y": ey_norm, "emitt_y_norm": ey_norm, "emitt_y_geom": ey,
+        "alpha_z": az, "beta_z": bz, "gamma_z": gz, "emitt_z": ez,
+    }
 
 
 def info_get(info: Any, key: str):

@@ -7,6 +7,12 @@ from typing import Optional, Sequence, Tuple, Literal
 import numpy as np
 
 from .constants import ME_MEV, c
+from .deflection_field import (
+    DEFAULT_B_PK_PER_A_T,
+    DEFAULT_W_MM,
+    DEFAULT_Z_P_MM,
+    DeflectionField,
+)
 
 
 def _call_first_available(obj, names, *args):
@@ -50,7 +56,7 @@ class VolumeBuildParams:
     dt_mm: float
     ode_algorithm: str = "rk2"
     ode_epsabs: float = 1e-10
-    aperture_m: float = 1.0
+    aperture_m: Optional[float] = 1.0
     t_max_mm: float = 2000.0
     fm_nsteps: int = 400
     fm_tt_nsteps: int = 200
@@ -66,6 +72,11 @@ class VolumeBuildParams:
     bl_tinj_mode: str = "auto_from_emission"
     bl_tinj_manual_mm_c: float = 0.0
     beam_loading_verbose: bool = True
+    deflection_enabled: bool = False
+    deflection_current_A: float = 0.0
+    deflection_B_pk_per_A_T: float = DEFAULT_B_PK_PER_A_T
+    deflection_z_p_mm: float = DEFAULT_Z_P_MM
+    deflection_w_mm: float = DEFAULT_W_MM
 
 
 @dataclass(frozen=True)
@@ -249,8 +260,31 @@ def build_volume(
     V.odeint_epsabs = float(p.ode_epsabs)
     V.set_s0(float(p.z_min_m))
     V.set_s1(float(p.z_max_m))
-    V.set_aperture(float(p.aperture_m), float(p.aperture_m), "circular")
+    if p.aperture_m is not None:
+        V.set_aperture(float(p.aperture_m), float(p.aperture_m), "circular")
     V.t_max_mm = float(p.t_max_mm)
+
+    if p.deflection_enabled:
+        if int(getattr(rft.cvar, "number_of_threads", 1)) != 1:
+            print(
+                "Deflection field (UserField) requires single-threaded RF-Track; "
+                "forcing rft.cvar.number_of_threads = 1."
+            )
+            rft.cvar.number_of_threads = 1
+        deflection_field = DeflectionField(
+            float(p.z_max_m) - float(p.z_min_m),
+            float(p.deflection_current_A),
+            B_pk_per_A_T=float(p.deflection_B_pk_per_A_T),
+            z_p_mm=float(p.deflection_z_p_mm),
+            w_mm=float(p.deflection_w_mm),
+        )
+        # UserField subclasses must be added by reference: V.add() copies the
+        # element, which severs the Python-side director binding and leaves the
+        # original object to be garbage-collected once this function returns,
+        # crashing tracking later. add_ref() keeps the live Python object wired
+        # in, and the explicit attribute below is a belt-and-braces keep-alive.
+        V.add_ref(deflection_field, 0.0, 0.0, float(p.z_min_m), "entrance")
+        V._rf_gun_deflection_field_ref = deflection_field
 
     if p.sc_enabled:
         _call_first_available(
