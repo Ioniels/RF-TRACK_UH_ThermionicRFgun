@@ -1,6 +1,6 @@
 # UH Gun Thermionic RF-Track Project
 
-Thermionic electron-beam dynamics in an S-band TM010 (lambda/4) RF gun using **RF-Track** for 6D transport, space charge, beam loading, and a post-hoc physical exit aperture / deflection magnet.
+Thermionic electron-beam dynamics in an S-band TM010 (lambda/4) RF gun using **RF-Track** for 6D transport, space charge, beam loading, and a deflection magnet.
 
 ## Scope
 
@@ -10,7 +10,7 @@ This repository provides a consolidated simulation workflow for:
 - Thermionic emission (Richardson-Dushman with Schottky lowering, or the unified thermionic+field-emission law), including surface roughness (`Ra`, `Re`)
 - RF-Track transport with optional space charge, beam loading, and a deflection magnet
 - A post-hoc physical exit-aperture channel (entrance/exit screens + a geometric radius cut), independent of RF-Track's own whole-Volume aperture bound
-- Robust, self-describing diagnostics and exports (JSON, HDF5, openPMD-beamphysics) for single runs and SLURM parameter scans
+- Diagnostics and exports (JSON, HDF5, openPMD-beamphysics) for single runs and SLURM parameter scans
 
 Two entry points share the same `rf_gun` package and produce output in the same shape:
 
@@ -22,7 +22,7 @@ Two entry points share the same `rf_gun` package and produce output in the same 
 - Cavity frequency: `f = 2.856 GHz` (TM010)
 - Axisymmetric field map used by RF-Track is built from XY/YZ measurements (I/Q phasor reconstruction or crest-only)
 - Emission timing is phase-windowed (`emission_phase_start`, `emission_phase_range`) and the time-dependent emission current is sampled and injected into RF-Track
-- **Bunch timing injection uses the extended `Bunch6dT` matrix with explicit `T0`**, not optional Python binding methods
+- **Bunch timing injection uses the extended `Bunch6dT` matrix with explicit `T0`**
 - Beam-loading `R/Q` is calibrated from a fast on-axis phase scan (`veff_from_phase_scan_pz`, `r_over_q_per_m`) unless fixed explicitly
 - The physical exit aperture (`APERTURE_START_M`/`APERTURE_END_M`/`APERTURE_DIAMETER_MM` in the notebook; `--aperture_enabled/--aperture_start_m/--aperture_end_m/--aperture_diameter_mm` in the script) is a separate concept from RF-Track's own whole-Volume aperture bound (`--aperture_m`): it is a post-hoc geometric cut plus explicit entrance/exit screens, used for forward/backward particle tagging and for selecting the beam saved as the openPMD exit beam
 - An optional deflection magnet (`Bx(z) = B_pk(I) / (1 + ((z - z_p)/w)^2)`) can be enabled on either entry point

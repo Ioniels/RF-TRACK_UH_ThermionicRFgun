@@ -24,7 +24,7 @@ cd /home/nbidault/rf-track
 
 mkdir -p logs outputs/runs
 
-source /home/nbidault/venvs/rftrack/bin/activate
+source /home/nbidault/rf-track/.venv/bin/activate
 
 export PYTHONUNBUFFERED=1
 
