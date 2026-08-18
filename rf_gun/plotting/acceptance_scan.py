@@ -36,7 +36,16 @@ def plot_acceptance_scan(result: AcceptanceScanResult):
     ax = axes[1]
     ax.plot(k, eps, "o-", ms=3, color=COLOR_PRIMARY)
     ax.set_xscale("log")
-    ax.set_yscale("log")
+    # eps is all-NaN when too few particles are forward for a Courant-Snyder fit; a log scale on
+    # non-positive data raises ValueError, so fall back to linear and annotate why.
+    eps_finite_positive = eps[np.isfinite(eps) & (eps > 0)]
+    if eps_finite_positive.size >= 2:
+        ax.set_yscale("log")
+    else:
+        ax.text(
+            0.5, 0.5, "insufficient forward particles\nfor an emittance scan",
+            transform=ax.transAxes, ha="center", va="center", fontsize=9, color="gray",
+        )
     ax.set_xlabel("$k$")
     ax.set_ylabel(r"$\varepsilon(k)\,(\mathrm{mm}\cdot\mathrm{MeV}/c)$")
     ax.set_title("Emittance vs acceptance")
@@ -55,14 +64,16 @@ def plot_acceptance_scan(result: AcceptanceScanResult):
     n = result.n_forward
     n_core = int(result.kept_mask_core.sum())
     n_trailing = int(result.kept_mask_trailing.sum())
+    pct_core = 100.0 * n_core / n if n else float("nan")
+    pct_trailing = 100.0 * n_trailing / n if n else float("nan")
     for ax in axes:
         ax.axvline(
             result.k_core, color="tab:purple", ls="--", lw=1.5,
-            label=rf"$k_{{\mathrm{{core}}}}={result.k_core:.2f}$ ($T={100*n_core/n:.1f}\%$, reference only)",
+            label=rf"$k_{{\mathrm{{core}}}}={result.k_core:.2f}$ ($T={pct_core:.1f}\%$, reference only)",
         )
         ax.axvline(
             result.k_trailing, color="tab:red", ls="-", lw=1.5,
-            label=rf"$k_{{\mathrm{{trailing}}}}={result.k_trailing:.2f}$ ($T={100*n_trailing/n:.1f}\%$, applied)",
+            label=rf"$k_{{\mathrm{{trailing}}}}={result.k_trailing:.2f}$ ($T={pct_trailing:.1f}\%$, applied)",
         )
     axes[0].legend(frameon=False, fontsize=8, loc="lower right")
 

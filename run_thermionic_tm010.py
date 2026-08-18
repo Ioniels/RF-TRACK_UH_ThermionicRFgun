@@ -16,11 +16,18 @@ import time
 
 matplotlib.use("Agg")
 
+# Kept separate from rf_gun.finesse_presets.FINESSE_TIERS so `--help` doesn't have to import
+# rf_gun (and RF_Track with it) just to parse arguments; must match it by hand.
+_FINESSE_TIER_NAMES = ("extra_fine", "fine", "medium", "coarse")
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run thermionic TM010 transport with RF-Track.")
 
     parser.add_argument("--preset", choices=["none", "quick"], default="none")
+    # Solver/meshing finesse tier -- see rf_gun/finesse_presets.py. Applied after --preset, so it
+    # always wins over --preset quick's own values.
+    parser.add_argument("--finesse", choices=list(_FINESSE_TIER_NAMES), default=None)
     parser.add_argument("--output", type=Path, default=None)
 
     parser.add_argument("--threads", type=int, default=None)
@@ -112,6 +119,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--poll_interval_s", type=float, default=0.5)
     parser.add_argument("--progress-bar", action=argparse.BooleanOptionalAction, default=True)
+    # "spawn" prints from a separate OS process, useful for an unattended CLI/SLURM run writing
+    # to a log file -- see rf_gun/simulation.py::run_transport_with_progress.
+    parser.add_argument("--progress-backend", choices=["thread", "spawn"], default="thread")
     # Accepted for compatibility with existing SLURM scripts; this script never renders a
     # notebook progress widget, so the value has no effect beyond being echoed in run_metadata.
     parser.add_argument("--progress-notebook-mode", choices=["auto", "on", "off"], default="auto")
@@ -481,11 +491,15 @@ def _build_beam_summary(
 def main() -> None:
     t_sim_start = time.time()
 
-    import rf_gun as rg
-
     args = parse_args()
     threads_requested_explicit = args.threads is not None
     apply_preset(args)
+
+    import rf_gun as rg
+    from rf_gun.finesse_presets import apply_finesse_preset_to_args
+
+    apply_finesse_preset_to_args(args, args.finesse)
+
     output_dir = resolve_output_dir(args)
     args.output = output_dir
     rng = np.random.default_rng(int(args.seed) if args.seed is not None else None)
@@ -872,6 +886,7 @@ def main() -> None:
         timing_diagnostics=bool(args.timing_diagnostics),
         slow_step_warn_s=float(args.slow_step_warn_s),
         rng=rng,
+        progress_backend=str(args.progress_backend),
     )
 
     phase_fmt = rg.EXTENDED_PHASE_FMT
@@ -885,19 +900,12 @@ def main() -> None:
     # a no-op until/unless this script grows an equivalent post-hoc aperture. Computed once and
     # reused by every figure and every JSON summary built from this run.
     #
-    # CAVEAT (confirmed empirically with --preset quick, default --aperture_m 1.0, seed 123): a
-    # particle whose radius exceeds the field map's r_max_m grid extent can pick up an unphysical,
-    # runaway-large Pz from that point on, yet still read as forward (z>0, pz>0) at Bout -- so it
-    # is not excluded by backward-tagging either, and *does* corrupt compute_beam_properties's
-    # Twiss/emittance for any screen it reaches (seen: ~1/3 of a 1000-particle run, emitt_x_norm
-    # inflated to O(1e9) mm*mrad). In the notebook this population is caught for free by the
-    # aperture radius cut (a particle can't exceed r_max_m=10mm while also clearing a ~2.5mm
-    # aperture), but this script has no equivalent geometric screen, so a loose/default
-    # --aperture_m plus a beam that genuinely spreads past r_max_m can leak this into
-    # beam_summary.json's twiss_summary/emittance_summary and into the two evolution figures.
-    # Not filtered here -- flagged for a human decision (e.g. always pairing a tight --aperture_m
-    # with this script's field-map r_max_m in production, or adding a real geometric screen) rather
-    # than papering over it with an ad hoc numeric cutoff.
+    # A particle whose radius exceeds the field map's r_max_m extent can pick up an unphysical,
+    # runaway Pz, yet still reads as forward at Bout, corrupting Twiss/emittance for any screen it
+    # reaches. The notebook catches this for free via its aperture radius cut; this script has no
+    # equivalent geometric screen. Not filtered here, since a hidden energy/radius cut would risk
+    # silently dropping legitimate particles too -- pair a tight --aperture_m with r_max_m, or add
+    # a real geometric screen, instead of a numeric cutoff on the tagging itself.
     tags = rg.build_particle_tags(mf, None, None, 0.0, False)
 
     # Save the final (forward-going, aperture-clipped when --aperture_enabled) 6D beam as

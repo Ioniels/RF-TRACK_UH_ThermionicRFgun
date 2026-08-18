@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=tm010_scanT_1400_1700
+#SBATCH --job-name=tm010_scanT_1400_1700_fine
 #SBATCH --partition=shared
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -11,12 +11,12 @@
 #SBATCH --error=logs/%x_%A_%a.err
 
 # Temperature scan: T = 1400 K to 1700 K in steps of 10 K (31 runs), one per array task
-# (SLURM_ARRAY_TASK_ID 0..30 -> T = 1400 + 10*task_id). Fine SC+BL settings, N=1,000,000
-# particles, 10 z-snap screens, matching the notebook's SAVE_DATA=True run in structure:
-# each run writes outputs/runs/<timestamp>_T<T>K_SCon_BLon/ with figures/, openpmd/
-# (aperture-exit exit-beam export), screen_distributions_hdf5/, lost-particle diagnostics,
-# and run_summary.json (rg.save_run_summary -- same function + shape the notebook itself
-# calls). Deflection magnet enabled at I = 1.0 A per this scan's request.
+# (SLURM_ARRAY_TASK_ID 0..30 -> T = 1400 + 10*task_id). `--finesse fine` sets every
+# solver/meshing resolution knob at once (rf_gun/finesse_presets.py) -- same values as
+# run_thermionic_tm010_scanT_1400_1700.slurm. N=1,000,000 particles, 2 z-snap screens
+# (+2 auto-inserted aperture entrance/exit screens). Deflection magnet OFF: the magnet
+# forces single-threaded tracking (see rf_gun/deflection_field.py), which would leave
+# --cpus-per-task=32 mostly idle.
 
 set -eo pipefail
 
@@ -24,7 +24,7 @@ cd /home/nbidault/rf-track
 
 mkdir -p logs outputs/runs
 
-source /home/nbidault/rf-track/.venv/bin/activate
+source /home/nbidault/venvs/rftrack/bin/activate
 
 export PYTHONUNBUFFERED=1
 
@@ -56,14 +56,12 @@ ${PY} ${SCRIPT} \
   --output "${OUT_DIR}" \
   --progress-bar \
   --run-family thermionic_tm010_scanT_1400_1700 \
-  --scan-tags scanT_1400_1700 fine beam_loading space_charge \
+  --scan-tags scanT_1400_1700 finesse_fine beam_loading space_charge \
   --f_hz 2.856e9 \
   --xy_fieldmap field_maps/XYplanarSensorData.mat \
   --yz_fieldmap field_maps/YZplanarSensorData.mat \
   --y_cathode_mm 12.75 \
   --r_max_m 0.01 \
-  --dr_um 4.0 \
-  --dz_um 13.0 \
   --ext_zmax 0.0075 \
   --z_min 0.0 \
   --r_cathode_mm 1.57 \
@@ -76,25 +74,18 @@ ${PY} ${SCRIPT} \
   --ra_um 0 \
   --re_um 0 \
   --phasor_mode reconstruct \
+  --finesse fine \
   --phase_scan_min 0 \
   --phase_scan_max 360 \
-  --phase_scan_n 90 \
-  --phase_scan_n_part 20 \
   --emission_phase_range 180.0 \
   --emission_phase_start 0.0 \
   --phase_deg 0.0 \
   --screen_t0_mode unset \
   --screen_t0_manual_mm_c 0.0 \
   --no-screen_log \
-  --dt_mm 0.01 \
   --aperture_m 1.0 \
   --ode_algorithm rk2 \
-  --ode_epsabs 1e-6 \
-  --fm_nsteps 200 \
-  --fm_tt_nsteps 200 \
   --sc_enabled \
-  --sc_dt_mm 0.01 \
-  --emission_nsteps 200 \
   --emission_range 10.0 \
   --beam_loading \
   --bl_q0 4000 \
@@ -105,15 +96,13 @@ ${PY} ${SCRIPT} \
   --bl_ncells 1 \
   --bl_tinj_mode auto_from_emission \
   --bl_tinj_manual_mm_c 0.0 \
-  --cfx_dt_mm 0.01 \
-  --deflection_enabled \
-  --deflection_current_A 1.0 \
+  --no-deflection_enabled \
   --aperture_enabled \
   --aperture_start_m 0.028854 \
   --aperture_end_m 0.040589 \
   --aperture_diameter_mm 5.0546 \
   --n_particles 1000000 \
-  --n_z_snap 10 \
+  --n_z_snap 2 \
   --t_cathode_k "${T_CATHODE_K}" \
   --save-figures \
   --save-screen-hdf5 \

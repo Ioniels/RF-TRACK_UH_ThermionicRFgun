@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Literal
 import math
+import multiprocessing as mp
 import time
 import os
 import json
@@ -179,6 +180,25 @@ def _clear_active_progress_worker(timeout_s: float = 0.5) -> None:
     _ACTIVE_PROGRESS_THREAD = None
 
 
+_ACTIVE_PROGRESS_PROCESS: Optional["mp.process.BaseProcess"] = None
+
+
+def _stop_progress_process(proc, timeout_s: float = 2.0) -> None:
+    if proc is None:
+        return
+    try:
+        proc.terminate()
+        proc.join(timeout=float(timeout_s))
+    except Exception:
+        pass
+
+
+def _clear_active_progress_process(timeout_s: float = 0.5) -> None:
+    global _ACTIVE_PROGRESS_PROCESS
+    _stop_progress_process(_ACTIVE_PROGRESS_PROCESS, timeout_s=timeout_s)
+    _ACTIVE_PROGRESS_PROCESS = None
+
+
 def _progress_proxy_pct(elapsed_s: float, est_s: float) -> float:
     """Wall-clock proxy percentage against a historical runtime estimate.
 
@@ -244,6 +264,9 @@ def _elapsed_progress_worker(stop_event, est_for_proxy_s: float, poll_interval_s
 
 
 def _runtime_key_payload(vol_params_eff: VolumeBuildParams, tracking: TrackingParams, n_screens: int) -> Dict[str, Any]:
+    """Settings that drive tracking wall-clock cost: particle count, step counts, and which
+    solver features are on. Excludes physics values (phase, R/Q) that are re-fit each run and
+    would otherwise fragment the cache without changing the actual cost."""
     return {
         "n_particles": int(tracking.n_particles),
         "dt_mm": float(getattr(vol_params_eff, "dt_mm", np.nan)),
@@ -253,10 +276,12 @@ def _runtime_key_payload(vol_params_eff: VolumeBuildParams, tracking: TrackingPa
         "n_screens": int(n_screens),
         "sc_enabled": bool(getattr(vol_params_eff, "sc_enabled", False)),
         "beam_loading_enabled": bool(getattr(vol_params_eff, "beam_loading_enabled", False)),
-        "bl_r_over_q_ohm_per_m": float(getattr(vol_params_eff, "bl_r_over_q_ohm_per_m", np.nan)),
-        "bl_Q_loaded": float(getattr(vol_params_eff, "bl_Q_loaded", np.nan)),
         "bl_tinj_mode": str(getattr(vol_params_eff, "bl_tinj_mode", "manual")),
-        "phi_deg": float(getattr(tracking, "phi_deg", np.nan)),
+        "fm_nsteps": int(getattr(vol_params_eff, "fm_nsteps", 0)),
+        "fm_tt_nsteps": int(getattr(vol_params_eff, "fm_tt_nsteps", 0)),
+        "ode_algorithm": str(getattr(vol_params_eff, "ode_algorithm", "")),
+        "ode_epsabs": float(getattr(vol_params_eff, "ode_epsabs", np.nan)),
+        "cfx_dt_mm": float(getattr(vol_params_eff, "cfx_dt_mm", np.nan)),
     }
 
 
@@ -266,6 +291,24 @@ def _runtime_key_string(payload: Dict[str, Any]) -> str:
 
 def _runtime_key_hash(runtime_key: str) -> str:
     return hashlib.sha1(runtime_key.encode("utf-8")).hexdigest()[:12]
+
+
+def _heuristic_runtime_estimate_s(n_particles: int, default_s: float = 300.0) -> float:
+    """Progress-bar time estimate for a run with no exact cache match, scaled by particle count
+    (the dominant cost driver) via the median per-particle time across cached runs."""
+    per_particle: List[float] = []
+    for key, val in _TRANSPORT_RUNTIME_HISTORY.items():
+        if not (np.isfinite(val) and val > 0.0):
+            continue
+        try:
+            n_k = int(json.loads(key).get("n_particles", 0))
+        except Exception:
+            continue
+        if n_k > 0:
+            per_particle.append(val / n_k)
+    if not per_particle:
+        return float(default_s)
+    return max(1.0, float(np.median(per_particle)) * max(1, int(n_particles)))
 
 
 def _build_screen_params(tracking: TrackingParams) -> ScreenBuildParams:
@@ -871,8 +914,25 @@ def run_transport_with_progress(
     slow_step_warn_s: float = 20.0,
     rng: Optional[np.random.Generator] = None,
     on_screen: Optional[Callable[[int, float, Dict[str, float]], None]] = None,
+    progress_backend: Literal["thread", "spawn"] = "thread",
 ):
     """Run transport with staged text and a single tracking progress bar.
+
+    `progress_backend` picks how the elapsed-time-based progress percentage (see
+    `_progress_proxy_pct`) is printed while the single blocking RF-Track tracking call runs.
+
+    Neither backend shows live progress inside a Jupyter cell during a long tracking call, with
+    or without the deflection magnet: RF-Track holds the Python GIL for the whole call, which
+    also blocks ipykernel's own output relay. With the magnet on, `DeflectionField.get_field()`'s
+    Python callback lets a few ticks through near the start; then the bar freezes until the call
+    returns. With the magnet off there is no such callback, so it freezes from the start.
+
+    - `"thread"` (default): in-process daemon thread (`_elapsed_progress_worker`), rendered via
+      `tqdm.auto`. No extra process needed; degrades the same way `"spawn"` does in a notebook.
+    - `"spawn"`: a separate OS process (`progress_worker.spawn_progress_target`) that keeps
+      ticking regardless of the parent's GIL state. Useful for unattended CLI/SLURM runs writing
+      to a plain log file (no notebook relay involved there); inside a notebook cell it degrades
+      the same as `"thread"`.
 
     Returns:
         (SimulationResult, stats_dict)
@@ -936,8 +996,7 @@ def run_transport_with_progress(
     runtime_key = _runtime_key_string(runtime_payload)
     runtime_key_hash = _runtime_key_hash(runtime_key)
     est_s = _TRANSPORT_RUNTIME_HISTORY.get(runtime_key, None)
-    history_vals = [float(v) for v in _TRANSPORT_RUNTIME_HISTORY.values() if np.isfinite(v) and float(v) > 0.0]
-    heuristic_est_s = float(np.median(history_vals)) if history_vals else 300.0
+    heuristic_est_s = _heuristic_runtime_estimate_s(int(tracking.n_particles))
 
     settings_line = (
         f"Tracking settings | N={int(tracking.n_particles):,} | dt_mm={float(getattr(vol_params_eff, 'dt_mm', np.nan)):.4g} "
@@ -1009,14 +1068,48 @@ def run_transport_with_progress(
         V = build_volume(rft, Er_grid, Ez_grid, tracking.phi_deg, vol_params_track)
         return V.track(B0), [], V, None
 
-    global _ACTIVE_PROGRESS_STOP_EVENT, _ACTIVE_PROGRESS_THREAD
+    global _ACTIVE_PROGRESS_STOP_EVENT, _ACTIVE_PROGRESS_THREAD, _ACTIVE_PROGRESS_PROCESS
 
     progress_enabled = bool(progress_bar)
+    backend = str(progress_backend).strip().lower()
 
-    if progress_enabled:
-        # In-process daemon thread only -- no subprocess/fork. See
-        # `_elapsed_progress_worker`'s docstring for why the previous fork-based
-        # design was the root cause of intermittent crashes.
+    if progress_enabled and backend == "spawn":
+        # Separate OS process, not a thread -- see `run_transport_with_progress`'s docstring and
+        # `progress_worker.py`'s module docstring for why. `progress_worker` deliberately lives
+        # outside this package so spawning it doesn't reimport RF_Track.
+        import progress_worker
+
+        _clear_active_progress_process(timeout_s=0.25)
+        ctx = mp.get_context("spawn")
+        progress_process = ctx.Process(
+            target=progress_worker.spawn_progress_target,
+            args=(time.time(), est_for_proxy, float(poll_interval_s)),
+            name="rftrack-progress-spawn",
+            daemon=True,
+        )
+        progress_process.start()
+        _ACTIVE_PROGRESS_PROCESS = progress_process
+
+        t_solver_s = time.time()
+        try:
+            run_out = _run_tracking_once()
+        finally:
+            _stop_progress_process(progress_process, timeout_s=2.0)
+            if progress_process is _ACTIVE_PROGRESS_PROCESS:
+                _ACTIVE_PROGRESS_PROCESS = None
+        if len(run_out) == 3:
+            Bout, snaps, V = run_out
+            transport_table = None
+        else:
+            Bout, snaps, V, transport_table = run_out
+        solver_elapsed_s = time.time() - t_solver_s
+        _diag(f"RF-Track solver return: {solver_elapsed_s:.2f} s")
+        _warn_slow("RF-Track solver return", solver_elapsed_s)
+    elif progress_enabled:
+        # In-process daemon thread (the default) -- see `run_transport_with_progress`'s docstring
+        # for why this and `"spawn"` degrade the same way inside a notebook cell. See
+        # `_elapsed_progress_worker`'s docstring for why this is a thread and not a fork()ed
+        # subprocess (a fork-based design was the root cause of intermittent crashes).
         _clear_active_progress_worker(timeout_s=0.25)
         progress_stop_event = threading.Event()
         progress_thread = threading.Thread(

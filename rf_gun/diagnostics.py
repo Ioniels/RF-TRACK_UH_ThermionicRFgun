@@ -321,7 +321,11 @@ def classify_particle_outcomes(
     t0_mm_c: np.ndarray | None = None,
     lost_table: np.ndarray | None = None,
 ):
-    """Classify final particles into transmitted/backward and include lost table stats."""
+    """Classify final particles into transmitted/backward and include lost table stats.
+
+    No implicit plausibility filtering (energy/radius cutoff) -- any narrowing of "backward"
+    should stay visible and data-driven, see `rf_gun.particle_tags.backward_ids_from_bout`.
+    """
     initial = np.asarray(initial)
     final = np.asarray(final)
     n0 = int(initial.shape[0]) if initial.ndim == 2 else 0

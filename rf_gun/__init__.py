@@ -17,7 +17,7 @@ from .rf_params import (
 	veff_from_phase_scan_pz,
 	r_over_q_per_m,
 )
-from .field_io import load_fieldmap_mat, interp_cfield
+from .field_io import load_fieldmap_mat, interp_cfield, mesh_edge_length_stats
 from .phasor import (
 	select_iq_snapshots,
 	build_iq_phasor,
@@ -104,6 +104,8 @@ from .plotting import (
 	DEFAULT_PLOT_STYLE,
 	get_default_density_cmap,
 	get_aperture_loss_cmap,
+	get_recentered_diverging_cmap,
+	add_reference_lines,
 	COLOR_PRIMARY,
 	COLOR_SECONDARY,
 	COLOR_NEUTRAL,
@@ -130,6 +132,7 @@ __all__ = [
 	"r_over_q_per_m",
 	"load_fieldmap_mat",
 	"interp_cfield",
+	"mesh_edge_length_stats",
 	"select_iq_snapshots",
 	"build_iq_phasor",
 	"build_crest_phasor",
@@ -215,7 +218,20 @@ __all__ = [
 	"DEFAULT_PLOT_STYLE",
 	"get_default_density_cmap",
 	"get_aperture_loss_cmap",
+	"get_recentered_diverging_cmap",
+	"add_reference_lines",
 	"COLOR_PRIMARY",
 	"COLOR_SECONDARY",
 	"COLOR_NEUTRAL",
+]
+
+from . import finesse_presets
+from .finesse_presets import FINESSE_PRESETS, FINESSE_TIERS, finesse_preset_dict, apply_finesse_preset_to_args
+
+__all__ += [
+	"finesse_presets",
+	"FINESSE_PRESETS",
+	"FINESSE_TIERS",
+	"finesse_preset_dict",
+	"apply_finesse_preset_to_args",
 ]

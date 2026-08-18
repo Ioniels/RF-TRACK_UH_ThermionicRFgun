@@ -69,16 +69,15 @@ def backward_ids_from_bout(
     place z/pz are trusted directly for tagging; every other snapshot is tagged by id lookup
     against this set (see `tag_mask`).
 
-    `threshold_backward_mevc` (default 0.0, reproducing the original strict `pz>0` cut) widens
-    "backward" to also catch a stagnant near-cathode beamlet: particles that are nominally
-    forward (z>=0, pz>0) but crawling so slowly they never become part of the real transmitted
-    beam (confirmed empirically: with enough screens, this beamlet's pz stays below a small,
-    fixed bound throughout tracking). Pass e.g. `threshold_backward_mevc=0.025` to also tag any
-    particle with `pz < 0.025` MeV/c as backward -- this is a *different* population from the one
-    `rf_gun.back_bombardment` reconstructs (particles that actually crossed to z<0): a stagnant
-    particle may never cross backward at all, it just never becomes part of the real beam, so
-    `compute_back_bombardment` (which only looks at Bout's own z<0) is unaffected by this
-    threshold and continues to reconstruct only genuine cathode re-hits.
+    `threshold_backward_mevc` (default 0.0, the strict `pz>0` cut) can also catch a stagnant
+    near-cathode beamlet that is nominally forward but too slow to ever join the transmitted
+    beam, e.g. `threshold_backward_mevc=0.025` MeV/c. This is a different population from
+    `rf_gun.back_bombardment` (particles that actually cross to z<0): a stagnant particle may
+    never cross backward at all, so `compute_back_bombardment` is unaffected by this threshold.
+
+    No other implicit filtering is applied here (e.g. no energy/radius plausibility cutoff) --
+    any further narrowing of "backward" should stay visible and data-driven, which is what
+    `rf_gun.acceptance_scan`'s trailing-particle removal (`extra_backward_ids` below) is for.
     """
     arr = np.asarray(Bout_M, dtype=float)
     if arr.ndim != 2 or arr.shape[0] == 0:

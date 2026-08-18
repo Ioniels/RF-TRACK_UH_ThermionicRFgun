@@ -1,11 +1,17 @@
 """Field map plots and on-axis phase diagnostics."""
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from .style import DEFAULT_PLOT_STYLE, PlotStyleConfig, get_default_density_cmap
+from .style import (
+    DEFAULT_PLOT_STYLE,
+    PlotStyleConfig,
+    add_reference_lines,
+    get_default_density_cmap,
+    get_recentered_diverging_cmap,
+)
 
 
 def field_maps(
@@ -18,31 +24,41 @@ def field_maps(
     Ez_grid: np.ndarray,
     lambda_m: float,
     *,
+    Er_grid: Optional[np.ndarray] = None,
+    z_end_m: Optional[float] = None,
+    aperture_enabled: bool = False,
+    aperture_start_m: Optional[float] = None,
+    aperture_end_m: Optional[float] = None,
     style: PlotStyleConfig | None = None,
-    show_colorbar: bool = False,
+    show_colorbar: bool = True,
     density_cmap=None,
+    xy_percentile: float = 65.0,
 ):
-    """Plot raw field maps and RF-Track grid with shared density style.
+    """Plot raw field maps (top row: r-z cavity view, x-z waveguide/iris view) and the RF-Track
+    (r, z) grid (bottom, one full-width panel per field component), each with its own colorbar.
 
-    Example
-    -------
-    ``field_maps(xy, yz, t_ns, t_crest, r_grid, z_grid, Ez_grid, lambda_m)``
-
-    This uses the shared default plasma-with-white colormap from
-    ``get_default_density_cmap()`` and keeps colorbars disabled unless
-    ``show_colorbar=True``.
+    Both field components are signed, so top-row panels use a diverging colormap (`RdBu_r`). The
+    cavity view (`ax_xy`) uses a tighter normalization (`xy_percentile`, default 65th percentile
+    of |value|) than the waveguide view (98.5th percentile), since most of its structure sits at
+    lower field magnitude; values beyond that range are clipped to a darker off-scale color
+    instead of saturating (see `get_recentered_diverging_cmap`).
     """
     import matplotlib.pyplot as plt
     import matplotlib.tri as mtri
     import matplotlib.colors as colors
 
     style = DEFAULT_PLOT_STYLE if style is None else style
-    cmap_density = get_default_density_cmap() if density_cmap is None else density_cmap
+    cmap_diverging = plt.get_cmap("RdBu_r") if density_cmap is None else density_cmap
+    cmap_xy = get_recentered_diverging_cmap(base="RdBu_r")
+    cmap_ez = get_default_density_cmap()
 
     i_snap = int(np.argmin(np.abs(t_ns - t_crest)))
 
-    fig = plt.figure(figsize=(14, 9))
-    gs = fig.add_gridspec(2, 2, width_ratios=[1.0, 1.10], height_ratios=[0.92, 1.45])
+    has_er = Er_grid is not None
+    n_bottom_rows = 2 if has_er else 1
+    # constrained_layout reserves space for each panel's own colorbar without overlapping the axes.
+    fig = plt.figure(figsize=(14, 7.5 + 3.6 * n_bottom_rows), constrained_layout=True)
+    gs = fig.add_gridspec(1 + n_bottom_rows, 2, width_ratios=[1.0, 1.10], height_ratios=[0.92] + [1.15] * n_bottom_rows)
 
     verts_xy = xy["vertices"]
     tri_xy = xy["facets"]
@@ -53,8 +69,9 @@ def field_maps(
     triang_xy = mtri.Triangulation(Ux, Vy, triangles=tri_xy)
     ax_xy = fig.add_subplot(gs[0, 0])
     ax_xy.set_aspect("equal", adjustable="box")
-    ax_xy.set_xlabel(r"$r$ (mm)")
-    ax_xy.set_ylabel(r"$z$ (mm)")
+    ax_xy.set_xlabel(r"$r$ (mm)", fontsize=12)
+    ax_xy.set_ylabel(r"$z$ (mm)", fontsize=12)
+    ax_xy.tick_params(labelsize=10)
 
     verts_yz = yz["vertices"]
     tri_yz = yz["facets"]
@@ -65,20 +82,27 @@ def field_maps(
     triang_yz = mtri.Triangulation(Vz, Uy, triangles=tri_yz)
     ax_yz = fig.add_subplot(gs[0, 1])
 
-    abs_joined = np.concatenate([np.abs(Fx).ravel(), np.abs(Fy).ravel()])
-    vmax_top = float(np.percentile(abs_joined, 98.5)) if abs_joined.size else 1.0
-    vmax_top = vmax_top if vmax_top > 0 else 1.0
-    norm_top = colors.Normalize(vmin=-vmax_top, vmax=vmax_top)
+    vmax_xy = float(np.percentile(np.abs(Fx), xy_percentile)) if Fx.size else 1.0
+    vmax_xy = vmax_xy if vmax_xy > 0 else 1.0
+    norm_xy = colors.Normalize(vmin=-vmax_xy, vmax=vmax_xy)
 
-    cmap_top = cmap_density
+    vmax_yz = float(np.percentile(np.abs(Fy), 98.5)) if Fy.size else 1.0
+    vmax_yz = vmax_yz if vmax_yz > 0 else 1.0
+    norm_yz = colors.Normalize(vmin=-vmax_yz, vmax=vmax_yz)
 
-    cf_xy = ax_xy.tripcolor(triang_xy, Fx, cmap=cmap_top, norm=norm_top, shading="gouraud")
-    cf_yz = ax_yz.tripcolor(triang_yz, Fy, cmap=cmap_top, norm=norm_top, shading="gouraud")
+    cf_xy = ax_xy.tripcolor(triang_xy, Fx, cmap=cmap_xy, norm=norm_xy, shading="gouraud")
+    cf_yz = ax_yz.tripcolor(triang_yz, Fy, cmap=cmap_diverging, norm=norm_yz, shading="gouraud")
     ax_yz.set_aspect("equal", adjustable="box")
-    ax_yz.set_xlabel(r"$x$ (mm)")
-    ax_yz.set_ylabel(r"$z$ (mm)")
+    ax_yz.set_xlabel(r"$x$ (mm)", fontsize=12)
+    ax_yz.set_ylabel(r"$z$ (mm)", fontsize=12)
+    ax_yz.tick_params(labelsize=10)
     if bool(show_colorbar):
-        plt.colorbar(cf_yz, ax=ax_yz, label=r"$E_z$ (V/m)")
+        fig.colorbar(cf_xy, ax=ax_xy, location="right", pad=0.02, fraction=0.046, extend="both").set_label(
+            r"$\Re(E_z)$ (V/m)", fontsize=11
+        )
+        fig.colorbar(cf_yz, ax=ax_yz, location="right", pad=0.02, fraction=0.046).set_label(
+            r"$\Re(E_z)$ (V/m)", fontsize=11
+        )
 
     x_lo, x_hi = np.percentile(Ux, [0.5, 99.5])
     y_lo_xy, y_hi_xy = np.percentile(Vy, [0.5, 99.5])
@@ -90,63 +114,70 @@ def field_maps(
     ax_yz.set_xlim(float(x_lo_yz), float(x_hi_yz))
     ax_yz.set_ylim(float(z_lo_yz), float(z_hi_yz))
 
-    fig.text(
-        0.5,
-        0.97,
+    fig.suptitle(
         "EM FDTD Solver (Remcom - XFdtd) field maps: cavity, iris and waveguide (no electron beam)",
-        ha="center",
-        va="top",
-        fontsize=12,
+        fontsize=13,
     )
 
     r_neg = -r_grid[::-1]
     r_full = np.concatenate([r_neg, r_grid[1:]])
     Ez_full = np.concatenate([Ez_grid[:, ::-1], Ez_grid[:, 1:]], axis=1)
-
-    ax_rf = fig.add_subplot(gs[1, :])
     extent_full = [z_grid[0] * 1e3, z_grid[-1] * 1e3, r_full[0] * 1e3, r_full[-1] * 1e3]
-    im = ax_rf.imshow(
-        np.real(Ez_full.T),
-        aspect="auto",
-        origin="lower",
-        extent=extent_full,
-        cmap=cmap_density,
-    )
-    ax_rf.axvline(0, color="white", ls="--", lw=1, alpha=0.5, label="Cathode (z=0)")
-    ax_rf.axvline(lambda_m / 4 * 1e3, color="cyan", ls="--", lw=1, alpha=0.7, label=r"$\lambda/4$")
-    ax_rf.axhline(0, color="white", ls=":", lw=0.8, alpha=0.4)
-    ax_rf.set_xlabel(r"$z$ (mm)")
-    ax_rf.set_ylabel(r"$r$ (mm)")
-    ax_rf.set_title(r"Field map used by RF-Track: $\Re(E_z)$")
-    ax_rf.text(
-        0,
-        r_full[-1] * 1e3 * 0.93,
-        r"Cathode ($z=0$)",
-        color="white",
-        fontsize=16,
-        ha="left",
-        va="top",
-        bbox=dict(facecolor="black", alpha=0.15, edgecolor="none"),
-    )
-    ax_rf.text(
-        lambda_m / 4 * 1e3,
-        r_full[-1] * 1e3 * 0.93,
-        r"$\lambda/4$",
-        color="white",
-        fontsize=16,
-        ha="left",
-        va="top",
-        bbox=dict(facecolor="black", alpha=0.15, edgecolor="none"),
-    )
-    if bool(show_colorbar):
-        cbar = fig.colorbar(im, ax=ax_rf, location="right", pad=0.02, fraction=0.03)
-        cbar.set_label(r"$E_z$ (V/m)")
 
-    plt.tight_layout(rect=[0.0, 0.0, 1.0, 0.955])
-    pos = ax_rf.get_position()
-    new_w = min(0.88, pos.width)
-    new_x = 0.5 - 0.5 * new_w
-    ax_rf.set_position([new_x, pos.y0, new_w, pos.height])
+    z_end_mm = float(z_end_m) * 1e3 if z_end_m is not None else None
+    lambda_quarter_mm = lambda_m / 4 * 1e3
+    aperture_start_mm = float(aperture_start_m) * 1e3 if (aperture_enabled and aperture_start_m is not None) else None
+    aperture_end_mm = float(aperture_end_m) * 1e3 if (aperture_enabled and aperture_end_m is not None) else None
+
+    def _bottom_panel(ax, field_full, title, cmap, norm, cbar_label):
+        im = ax.imshow(
+            np.real(field_full.T),
+            aspect="auto",
+            origin="lower",
+            extent=extent_full,
+            cmap=cmap,
+            norm=norm,
+        )
+        add_reference_lines(
+            ax,
+            cathode_z_mm=0.0,
+            z_end_mm=z_end_mm,
+            lambda_quarter_mm=lambda_quarter_mm,
+            aperture_start_mm=aperture_start_mm,
+            aperture_end_mm=aperture_end_mm,
+            halo=True,
+        )
+        ax.axhline(0, color="black", ls=":", lw=0.8, alpha=0.4)
+        ax.set_xlabel(r"$z$ (mm)", fontsize=12)
+        ax.set_ylabel(r"$r$ (mm)", fontsize=12)
+        ax.set_title(title, fontsize=13)
+        ax.tick_params(labelsize=10)
+        if bool(show_colorbar):
+            fig.colorbar(im, ax=ax, location="right", pad=0.015, fraction=0.025).set_label(cbar_label, fontsize=11)
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(handles, labels, loc="lower right", frameon=True, facecolor="white", framealpha=0.75, fontsize=9)
+        return im
+
+    ax_rf_ez = fig.add_subplot(gs[1, :])
+    _bottom_panel(
+        ax_rf_ez, Ez_full, r"Field map used by RF-Track: $\Re(E_z)$", cmap_ez, None, r"$\Re(E_z)$ (V/m)"
+    )
+
+    if has_er:
+        Er_full = np.concatenate([Er_grid[:, ::-1], Er_grid[:, 1:]], axis=1)
+        vmax_er = float(np.percentile(np.abs(np.real(Er_full)), 98.5)) if Er_full.size else 1.0
+        vmax_er = vmax_er if vmax_er > 0 else 1.0
+        ax_rf_er = fig.add_subplot(gs[2, :])
+        _bottom_panel(
+            ax_rf_er,
+            Er_full,
+            r"RF-Track grid: $\Re(E_r)$",
+            cmap_diverging,
+            colors.Normalize(vmin=-vmax_er, vmax=vmax_er),
+            r"$\Re(E_r)$ (V/m)",
+        )
+
     plt.show()
 
 
@@ -157,9 +188,22 @@ def axis_phase(
     emission_phase_start: float,
     emission_phase_range: float,
     lambda_m: float,
+    *,
+    z_end_m: Optional[float] = None,
+    aperture_enabled: bool = False,
+    aperture_start_m: Optional[float] = None,
+    aperture_end_m: Optional[float] = None,
 ) -> Tuple[float, float]:
-    """Auto phase from on-axis phasor and plot Ez(z)."""
+    """Auto phase from on-axis phasor and plot Ez(z) at a dense, evenly-spaced sweep of phases.
+
+    Each curve is colored by `cos(phase offset from crest)` on a red-blue diverging colormap
+    (`RdBu`): blue (+1) at the crest -- the phase of maximum acceleration -- through white (0) at
+    the +/-90 deg transition, to red (-1) at 180 deg from crest -- maximum deceleration. A colorbar
+    replaces the old one-legend-entry-per-curve approach, which does not scale to a dense sweep.
+    """
     import matplotlib.pyplot as plt
+    from matplotlib import cm
+    from matplotlib.colors import Normalize
 
     phi_opt = -np.angle(Ez_axis[np.argmax(np.abs(Ez_axis))])
     phi_zero_deg = (90.0 - np.rad2deg(np.angle(Ez0_phasor_axis))) % 360.0
@@ -174,31 +218,43 @@ def axis_phase(
     )
     print(f"Emission window: {float(emission_phase_range):.1f} deg")
 
-    offsets_deg = [0, 30, 60, 90, 120, 150, 180]
+    offsets_deg = np.arange(-180.0, 180.0 + 1e-9, 15.0)
     phases_deg_plot = [np.rad2deg(phi_opt) + d for d in offsets_deg]
-    for extra_phase in (phi_zero_deg, transport_phase_deg):
-        if not any(np.isclose(extra_phase, p, atol=1e-3) for p in phases_deg_plot):
-            phases_deg_plot.append(extra_phase)
 
-    fig, ax = plt.subplots(figsize=(9, 3.5))
-    for deg in phases_deg_plot:
+    cmap_phase = plt.get_cmap("RdBu")
+    norm_phase = Normalize(vmin=-1.0, vmax=1.0)
+
+    fig, ax = plt.subplots(figsize=(9.5, 4.2))
+    for deg, offset in zip(phases_deg_plot, offsets_deg):
         phi = np.deg2rad(deg)
         Ez_phase = np.real(Ez_axis * np.exp(1j * phi))
-        ax.plot(z_grid * 1e3, Ez_phase, lw=1.5, label=f"phi = {deg:.1f} deg")
+        color = cmap_phase(norm_phase(np.cos(np.deg2rad(offset))))
+        ax.plot(z_grid * 1e3, Ez_phase, lw=1.3, color=color, alpha=0.9)
 
-    ax.axvline(0, color="red", ls="--", lw=1, alpha=0.6, label="Cathode")
-    ax.axvline(
-        lambda_m / 4 * 1e3,
-        color="blue",
-        ls="--",
-        lw=1,
-        alpha=0.6,
-        label=f"lambda/4 = {lambda_m/4*1e3:.2f} mm",
+    z_end_mm = float(z_end_m) * 1e3 if z_end_m is not None else None
+    aperture_start_mm = float(aperture_start_m) * 1e3 if (aperture_enabled and aperture_start_m is not None) else None
+    aperture_end_mm = float(aperture_end_m) * 1e3 if (aperture_enabled and aperture_end_m is not None) else None
+
+    add_reference_lines(
+        ax,
+        cathode_z_mm=0.0,
+        z_end_mm=z_end_mm,
+        lambda_quarter_mm=lambda_m / 4 * 1e3,
+        aperture_start_mm=aperture_start_mm,
+        aperture_end_mm=aperture_end_mm,
+        halo=False,
     )
-    ax.set_xlabel("z [mm]")
-    ax.set_ylabel("Re{Ez(r=0, z, phi)} [V/m]")
-    ax.set_title("On-axis field at selected phases")
-    ax.legend(frameon=False, ncol=2)
+
+    sm = cm.ScalarMappable(cmap=cmap_phase, norm=norm_phase)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, pad=0.02)
+    cbar.set_label("Accelerating $\\leftrightarrow$ Decelerating  ($\\cos\\Delta\\phi$ from crest)", fontsize=11)
+
+    ax.set_xlabel(r"$z$ (mm)", fontsize=12)
+    ax.set_ylabel(r"$\mathrm{Re}(E_z)\ (r=0)$ (V/m)", fontsize=12)
+    ax.set_title(r"On-axis $E_z$ field at selected phases", fontsize=13)
+    ax.legend(frameon=False, fontsize=9, loc="best")
+    ax.tick_params(labelsize=10)
     ax.grid(alpha=0.3)
     plt.tight_layout()
     plt.show()

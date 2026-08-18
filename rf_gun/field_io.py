@@ -5,6 +5,30 @@ import scipy.io
 from .phasor import interp_cfield
 
 
+def mesh_edge_length_stats(vertices: np.ndarray, facets: np.ndarray) -> dict:
+    """Native mesh resolution of a raw sensor mesh (`load_fieldmap_mat`'s `vertices`/`facets`),
+    from its triangle edge lengths -- i.e. how finely XFdtd actually resolved the field, before
+    RF-Track interpolates it onto its own `(r, z)` grid (`dr_um`/`dz_um`). XFdtd meshes are
+    adaptively refined, so this is a spread (min/median/mean/max), not one number.
+    """
+    nan_stats = {"min_mm": float("nan"), "median_mm": float("nan"), "mean_mm": float("nan"), "max_mm": float("nan")}
+    v = np.asarray(vertices, dtype=float)
+    f = np.asarray(facets, dtype=int)
+    if f.ndim != 2 or f.shape[1] != 3 or f.shape[0] == 0:
+        return nan_stats
+    edges = [np.linalg.norm(v[f[:, a]] - v[f[:, b]], axis=1) for a, b in ((0, 1), (1, 2), (2, 0))]
+    lengths = np.concatenate(edges)
+    lengths = lengths[np.isfinite(lengths) & (lengths > 0)]
+    if lengths.size == 0:
+        return nan_stats
+    return {
+        "min_mm": float(lengths.min()),
+        "median_mm": float(np.median(lengths)),
+        "mean_mm": float(lengths.mean()),
+        "max_mm": float(lengths.max()),
+    }
+
+
 def _normalize_key(k: str) -> str:
     """Remove MATLAB export artifacts (null chars, spaces)."""
     return k.replace("\x00", "").strip()

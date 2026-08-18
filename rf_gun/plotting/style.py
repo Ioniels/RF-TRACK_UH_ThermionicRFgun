@@ -19,7 +19,9 @@ convention -- units in labels use parentheses, not brackets (`x\\,(\\mathrm{mm})
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
+import matplotlib.patheffects as patheffects
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LinearSegmentedColormap
@@ -61,6 +63,52 @@ def get_aperture_loss_cmap() -> LinearSegmentedColormap:
     new_colors = np.array(base(np.linspace(0.0, 1.0, 256)), copy=True)
     new_colors[0] = [1.0, 1.0, 1.0, 0.0]
     return LinearSegmentedColormap.from_list("greens_with_white", new_colors)
+
+
+def get_recentered_diverging_cmap(
+    base: str = "RdBu_r",
+    over_color: str = "#3f0000",
+    under_color: str = "#001433",
+) -> LinearSegmentedColormap:
+    """Diverging colormap for use with a `Normalize(vmin=-v, vmax=v)` tighter than the data's own
+    range, so lower-magnitude field structure gets more color resolution; values beyond `+-v` are
+    clipped to `over_color`/`under_color` instead of saturating to the colormap's own endpoint.
+    """
+    cmap = plt.get_cmap(base).copy()
+    cmap.set_over(over_color)
+    cmap.set_under(under_color)
+    return cmap
+
+
+def add_reference_lines(
+    ax,
+    *,
+    cathode_z_mm: Optional[float] = 0.0,
+    z_end_mm: Optional[float] = None,
+    lambda_quarter_mm: Optional[float] = None,
+    aperture_start_mm: Optional[float] = None,
+    aperture_end_mm: Optional[float] = None,
+    halo: bool = False,
+    lw: float = 1.2,
+    alpha: float = 0.9,
+    zorder: float = 5,
+) -> None:
+    """Shared reference lines for `fields.field_maps`/`fields.axis_phase`: cathode (z=0) and
+    z_end solid, lambda/4 dotted, aperture start/end dashed. `halo=True` adds a white stroke so
+    black stays legible over a dark colormap panel. Any position left `None` skips that line.
+    """
+    effects = [patheffects.withStroke(linewidth=lw + 1.8, foreground="white", alpha=0.9)] if halo else None
+
+    def _line(x: Optional[float], ls: str, label: str) -> None:
+        if x is None:
+            return
+        ax.axvline(float(x), color="black", ls=ls, lw=lw, alpha=alpha, label=label, path_effects=effects, zorder=zorder)
+
+    _line(cathode_z_mm, "-", "Cathode (z=0)")
+    _line(z_end_mm, "-", r"$z_{\mathrm{end}}$")
+    _line(lambda_quarter_mm, ":", r"$\lambda/4$")
+    _line(aperture_start_mm, "--", "Aperture start")
+    _line(aperture_end_mm, "--", "Aperture end")
 
 
 @dataclass(frozen=True)
