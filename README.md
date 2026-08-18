@@ -162,6 +162,9 @@ Every phase-space figure exposes two independent switches instead of an ad hoc p
 
 Both default to `True` in the saved diagnostics, so the default saved view is the transmitted-like
 beam, with the backward/aperture-lost populations available wherever a figure chooses to show them.
+`exclude_aperture_losses` only has an effect where aperture entrance/exit tagging exists (the
+notebook); the script has no equivalent post-hoc aperture screens, so it always tags zero
+particles as aperture-lost and does not expose this as a CLI flag.
 
 ## RF-Track reference
 

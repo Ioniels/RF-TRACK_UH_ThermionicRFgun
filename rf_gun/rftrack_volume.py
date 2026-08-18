@@ -341,30 +341,6 @@ def track_volume_with_screens(
     return Bout, snaps
 
 
-def track_volume_transport_table(
-    rft,
-    Er_grid: np.ndarray,
-    Ez_grid: np.ndarray,
-    phi_deg: float,
-    p: VolumeBuildParams,
-    B0,
-    tt_dt_mm: float,
-    table_fmt: str,
-    return_volume: bool = False,
-):
-    """Track once and retrieve RF-Track's transport table in a Volume."""
-    V = build_volume(rft, Er_grid, Ez_grid, phi_deg, p, add_screens_z_m=None)
-
-    opts = rft.TrackingOptions()
-    opts.tt_dt_mm = float(tt_dt_mm)
-
-    Bout = V.track(B0, opts)
-    T = V.get_transport_table(table_fmt) if hasattr(V, "get_transport_table") else None
-    if return_volume:
-        return Bout, T, V
-    return Bout, T
-
-
 def find_Ez_axis_phasor_at_z0(Ez_grid: np.ndarray, z_grid_m: np.ndarray, z0_m: float = 0.0) -> complex:
     """Return on-axis Ez phasor at z~z0 (r=0 index)."""
     iz0 = int(np.argmin(np.abs(z_grid_m - z0_m)))

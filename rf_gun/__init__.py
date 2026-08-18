@@ -3,13 +3,10 @@
 from .config import rft, show_versions, resolve_threads, set_thread_environment
 from .constants import c, q_e, ME_MEV
 from .helpers import (
-	kinetic_energy,
 	sample_disk,
 	min_step,
 	med_step,
 	fmt_bytes,
-	theoretical_energy_gain,
-	cavity_wavelength,
 )
 from .rf_params import (
 	delivered_power_on_resonance,
@@ -29,7 +26,6 @@ from .rftrack_volume import (
 	ScreenBuildParams,
 	build_volume,
 	track_volume_with_screens,
-	track_volume_transport_table,
 	find_Ez_axis_phasor_at_z0,
 )
 from .simulation import (
@@ -53,9 +49,7 @@ from .diagnostics import (
 	info_get_first,
 	snapshot_stats,
 	summarize_array,
-	summarize_phase_space,
 	build_screen_summary_from_phase_space,
-	build_screen_summaries,
 	classify_particle_outcomes,
 )
 from .io import (
@@ -66,7 +60,7 @@ from .io import (
 	save_run_summary,
 	to_json_safe,
 )
-from .aperture import ApertureParams, aperture_survival_mask, aperture_summary, forward_only_mask
+from .aperture import ApertureParams, aperture_survival_mask, aperture_summary
 from .particle_tags import ParticleTags, build_particle_tags, backward_ids_from_bout, tag_mask, surviving_mask
 from .beam_properties import compute_beam_properties, transmission_curves
 from .back_bombardment import BackBombardmentData, compute_back_bombardment, kinetic_energy_joules, screen_trajectory
@@ -119,13 +113,10 @@ __all__ = [
 	"c",
 	"q_e",
 	"ME_MEV",
-	"kinetic_energy",
 	"sample_disk",
 	"min_step",
 	"med_step",
 	"fmt_bytes",
-	"theoretical_energy_gain",
-	"cavity_wavelength",
 	"delivered_power_on_resonance",
 	"effective_length_from_abs_ez",
 	"veff_from_phase_scan_pz",
@@ -141,7 +132,6 @@ __all__ = [
 	"ScreenBuildParams",
 	"build_volume",
 	"track_volume_with_screens",
-	"track_volume_transport_table",
 	"find_Ez_axis_phasor_at_z0",
 	"RoughnessParams",
 	"EmissionParams",
@@ -161,9 +151,7 @@ __all__ = [
 	"info_get_first",
 	"snapshot_stats",
 	"summarize_array",
-	"summarize_phase_space",
 	"build_screen_summary_from_phase_space",
-	"build_screen_summaries",
 	"classify_particle_outcomes",
 	"save_screen_distributions_json",
 	"save_screen_distributions_hdf5",
@@ -174,7 +162,6 @@ __all__ = [
 	"ApertureParams",
 	"aperture_survival_mask",
 	"aperture_summary",
-	"forward_only_mask",
 	"ParticleTags",
 	"build_particle_tags",
 	"backward_ids_from_bout",

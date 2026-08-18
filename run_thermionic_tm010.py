@@ -119,12 +119,6 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--poll_interval_s", type=float, default=0.5)
     parser.add_argument("--progress-bar", action=argparse.BooleanOptionalAction, default=True)
-    # "spawn" prints from a separate OS process, useful for an unattended CLI/SLURM run writing
-    # to a log file -- see rf_gun/simulation.py::run_transport_with_progress.
-    parser.add_argument("--progress-backend", choices=["thread", "spawn"], default="thread")
-    # Accepted for compatibility with existing SLURM scripts; this script never renders a
-    # notebook progress widget, so the value has no effect beyond being echoed in run_metadata.
-    parser.add_argument("--progress-notebook-mode", choices=["auto", "on", "off"], default="auto")
     parser.add_argument("--timing-diagnostics", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--slow-step-warn-s", type=float, default=20.0)
     parser.add_argument("--save-figures", action=argparse.BooleanOptionalAction, default=True)
@@ -147,7 +141,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--screen-frame-timing-log", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--save-class-phase-space", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--exclude-backward-losses", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--exclude-aperture-losses", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--calibrate-bl-r-over-q", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--t_max_mm", type=float, default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -159,15 +152,10 @@ def apply_preset(args: argparse.Namespace) -> None:
     if args.preset != "quick":
         return
     args.n_particles = 1_000
-    # Keep quick preset aligned with notebook defaults for diagnostics.
     args.sc_enabled = True
-    args.sc_dt_mm = 0.2
     args.beam_loading = True
-    args.dt_mm = 0.1
-    args.cfx_dt_mm = 0.1
-    args.phase_scan_n = 90
-    args.phase_scan_n_part = 2
-    args.phase_scan_dt_mm = 2.0
+    if args.finesse is None:
+        args.finesse = "coarse"
 
 
 def _requested_screen_count(args: argparse.Namespace) -> int:
@@ -864,11 +852,6 @@ def main() -> None:
         max_screen_particles=args.max_screen_particles,
         subsample_screens_random=bool(args.subsample_screens_random),
         save_lost_particles=bool(args.save_lost_particles),
-        use_transport_table_summary=True,
-        transport_table_dt_mm=float(args.dt_mm),
-        save_screen_json=bool(args.save_screen_json),
-        screen_json_mode=str(args.screen_json_mode),
-        save_npz=True,
     )
 
     result, progress_stats = rg.run_transport_with_progress(
@@ -886,7 +869,6 @@ def main() -> None:
         timing_diagnostics=bool(args.timing_diagnostics),
         slow_step_warn_s=float(args.slow_step_warn_s),
         rng=rng,
-        progress_backend=str(args.progress_backend),
     )
 
     phase_fmt = rg.EXTENDED_PHASE_FMT
@@ -896,9 +878,8 @@ def main() -> None:
 
     # Backward-tagging only: this pipeline has no post-hoc aperture entrance/exit screens (the
     # notebook's aperture cell is the only place that pairing exists -- see rf_gun/aperture.py's
-    # module docstring), so aperture-loss tagging is empty here and `--exclude-aperture-losses` is
-    # a no-op until/unless this script grows an equivalent post-hoc aperture. Computed once and
-    # reused by every figure and every JSON summary built from this run.
+    # module docstring), so aperture-loss tagging is always empty here. Computed once and reused
+    # by every figure and every JSON summary built from this run.
     #
     # A particle whose radius exceeds the field map's r_max_m extent can pick up an unphysical,
     # runaway Pz, yet still reads as forward at Bout, corrupting Twiss/emittance for any screen it
@@ -1003,8 +984,6 @@ def main() -> None:
 
     npz_path = output_dir / "beam_data.npz"
     npz_payload: Dict[str, Any] = {"M0": m0, "Mf": mf, "z_snaps": z_snaps_arr}
-    if result.transport_table is not None:
-        npz_payload["transport_table"] = np.asarray(result.transport_table)
     if result.M_snaps:
         for i, M in enumerate(result.M_snaps):
             npz_payload[f"screen_phase_space_{i:04d}"] = np.asarray(M)
@@ -1070,7 +1049,6 @@ def main() -> None:
             tags=tags,
             phase_fmt=phase_fmt,
             exclude_backward_losses=bool(args.exclude_backward_losses),
-            exclude_aperture_losses=bool(args.exclude_aperture_losses),
             n_macroparticles=int(args.n_particles),
             lost_table=result.lost_table,
         )
@@ -1086,7 +1064,6 @@ def main() -> None:
             tags=tags,
             phase_fmt=phase_fmt,
             exclude_backward_losses=bool(args.exclude_backward_losses),
-            exclude_aperture_losses=bool(args.exclude_aperture_losses),
             n_macroparticles=int(args.n_particles),
             style=plot_style,
             show_colorbar=False,
@@ -1195,7 +1172,6 @@ def main() -> None:
         "args": sanitize_for_json(vars(args)),
         "plotting_defaults": {
             "exclude_backward_losses": bool(args.exclude_backward_losses),
-            "exclude_aperture_losses": bool(args.exclude_aperture_losses),
         },
         "rftrack": {
             "max_number_of_threads": sanitize_for_json(getattr(rft, "max_number_of_threads", None)),
@@ -1246,7 +1222,7 @@ def main() -> None:
             "screen_indices": diagnostics.screen_indices,
             "max_screen_particles": diagnostics.max_screen_particles,
             "subsample_screens_random": diagnostics.subsample_screens_random,
-            "screen_json_mode": diagnostics.screen_json_mode,
+            "screen_json_mode": str(args.screen_json_mode),
         }),
         "timing": {
             "total_simulation_s": float(time.time() - t_sim_start),

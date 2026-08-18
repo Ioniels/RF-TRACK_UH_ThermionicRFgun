@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Literal
 import math
-import multiprocessing as mp
 import time
 import os
 import json
@@ -28,7 +27,6 @@ from .emission_sampling import apply_roughness, sample_thermionic_momenta
 from .rftrack_volume import (
     build_volume,
     track_volume_with_screens,
-    track_volume_transport_table,
     VolumeBuildParams,
     ScreenBuildParams,
 )
@@ -95,13 +93,6 @@ class DiagnosticsParams:
     max_screen_particles: Optional[int] = None
     subsample_screens_random: bool = True
     save_lost_particles: bool = True
-    use_transport_table_summary: bool = True
-    transport_table_dt_mm: Optional[float] = None
-    transport_table_fmt: str = "%s %mean_P %sigma_P %sigma_X %sigma_Y"
-    time_slice_t_max_mm: Optional[Sequence[float]] = None
-    save_screen_json: bool = False
-    screen_json_mode: Literal["summary", "full"] = "summary"
-    save_npz: bool = True
 
 
 @dataclass
@@ -113,7 +104,6 @@ class SimulationResult:
     z_snaps: List[float]
     I_snaps: List[Any]
     screen_summaries: List[Dict[str, float]]
-    transport_table: Any = None
     lost_table: Optional[np.ndarray] = None
     particle_classes: Optional[Dict[str, Any]] = None
 
@@ -178,25 +168,6 @@ def _clear_active_progress_worker(timeout_s: float = 0.5) -> None:
     _stop_progress_worker(_ACTIVE_PROGRESS_STOP_EVENT, _ACTIVE_PROGRESS_THREAD, timeout_s=timeout_s)
     _ACTIVE_PROGRESS_STOP_EVENT = None
     _ACTIVE_PROGRESS_THREAD = None
-
-
-_ACTIVE_PROGRESS_PROCESS: Optional["mp.process.BaseProcess"] = None
-
-
-def _stop_progress_process(proc, timeout_s: float = 2.0) -> None:
-    if proc is None:
-        return
-    try:
-        proc.terminate()
-        proc.join(timeout=float(timeout_s))
-    except Exception:
-        pass
-
-
-def _clear_active_progress_process(timeout_s: float = 0.5) -> None:
-    global _ACTIVE_PROGRESS_PROCESS
-    _stop_progress_process(_ACTIVE_PROGRESS_PROCESS, timeout_s=timeout_s)
-    _ACTIVE_PROGRESS_PROCESS = None
 
 
 def _progress_proxy_pct(elapsed_s: float, est_s: float) -> float:
@@ -914,25 +885,15 @@ def run_transport_with_progress(
     slow_step_warn_s: float = 20.0,
     rng: Optional[np.random.Generator] = None,
     on_screen: Optional[Callable[[int, float, Dict[str, float]], None]] = None,
-    progress_backend: Literal["thread", "spawn"] = "thread",
 ):
     """Run transport with staged text and a single tracking progress bar.
 
-    `progress_backend` picks how the elapsed-time-based progress percentage (see
-    `_progress_proxy_pct`) is printed while the single blocking RF-Track tracking call runs.
-
-    Neither backend shows live progress inside a Jupyter cell during a long tracking call, with
-    or without the deflection magnet: RF-Track holds the Python GIL for the whole call, which
-    also blocks ipykernel's own output relay. With the magnet on, `DeflectionField.get_field()`'s
-    Python callback lets a few ticks through near the start; then the bar freezes until the call
-    returns. With the magnet off there is no such callback, so it freezes from the start.
-
-    - `"thread"` (default): in-process daemon thread (`_elapsed_progress_worker`), rendered via
-      `tqdm.auto`. No extra process needed; degrades the same way `"spawn"` does in a notebook.
-    - `"spawn"`: a separate OS process (`progress_worker.spawn_progress_target`) that keeps
-      ticking regardless of the parent's GIL state. Useful for unattended CLI/SLURM runs writing
-      to a plain log file (no notebook relay involved there); inside a notebook cell it degrades
-      the same as `"thread"`.
+    The progress bar (an in-process daemon thread, `_elapsed_progress_worker`, rendered via
+    `tqdm.auto`) shows an elapsed-time-based percentage (see `_progress_proxy_pct`) while the
+    single blocking RF-Track tracking call runs. It cannot stay live for the whole call: RF-Track
+    holds the Python GIL throughout, so the bar only updates during brief windows where the GIL
+    is free (e.g. `DeflectionField.get_field()`'s Python callback when the magnet is on), and
+    otherwise sits frozen until the call returns.
 
     Returns:
         (SimulationResult, stats_dict)
@@ -1051,65 +1012,17 @@ def run_transport_with_progress(
                 screen_params=screen_params,
                 return_volume=True,
             )
-        if diagnostics.use_transport_table_summary:
-            tt_dt = float(diagnostics.transport_table_dt_mm) if diagnostics.transport_table_dt_mm is not None else float(vol_params_track.dt_mm)
-            Bout, T, V = track_volume_transport_table(
-                rft,
-                Er_grid,
-                Ez_grid,
-                tracking.phi_deg,
-                vol_params_track,
-                B0,
-                tt_dt_mm=tt_dt,
-                table_fmt=str(diagnostics.transport_table_fmt),
-                return_volume=True,
-            )
-            return Bout, [], V, T
         V = build_volume(rft, Er_grid, Ez_grid, tracking.phi_deg, vol_params_track)
-        return V.track(B0), [], V, None
+        return V.track(B0), [], V
 
-    global _ACTIVE_PROGRESS_STOP_EVENT, _ACTIVE_PROGRESS_THREAD, _ACTIVE_PROGRESS_PROCESS
+    global _ACTIVE_PROGRESS_STOP_EVENT, _ACTIVE_PROGRESS_THREAD
 
     progress_enabled = bool(progress_bar)
-    backend = str(progress_backend).strip().lower()
 
-    if progress_enabled and backend == "spawn":
-        # Separate OS process, not a thread -- see `run_transport_with_progress`'s docstring and
-        # `progress_worker.py`'s module docstring for why. `progress_worker` deliberately lives
-        # outside this package so spawning it doesn't reimport RF_Track.
-        import progress_worker
-
-        _clear_active_progress_process(timeout_s=0.25)
-        ctx = mp.get_context("spawn")
-        progress_process = ctx.Process(
-            target=progress_worker.spawn_progress_target,
-            args=(time.time(), est_for_proxy, float(poll_interval_s)),
-            name="rftrack-progress-spawn",
-            daemon=True,
-        )
-        progress_process.start()
-        _ACTIVE_PROGRESS_PROCESS = progress_process
-
-        t_solver_s = time.time()
-        try:
-            run_out = _run_tracking_once()
-        finally:
-            _stop_progress_process(progress_process, timeout_s=2.0)
-            if progress_process is _ACTIVE_PROGRESS_PROCESS:
-                _ACTIVE_PROGRESS_PROCESS = None
-        if len(run_out) == 3:
-            Bout, snaps, V = run_out
-            transport_table = None
-        else:
-            Bout, snaps, V, transport_table = run_out
-        solver_elapsed_s = time.time() - t_solver_s
-        _diag(f"RF-Track solver return: {solver_elapsed_s:.2f} s")
-        _warn_slow("RF-Track solver return", solver_elapsed_s)
-    elif progress_enabled:
-        # In-process daemon thread (the default) -- see `run_transport_with_progress`'s docstring
-        # for why this and `"spawn"` degrade the same way inside a notebook cell. See
-        # `_elapsed_progress_worker`'s docstring for why this is a thread and not a fork()ed
-        # subprocess (a fork-based design was the root cause of intermittent crashes).
+    if progress_enabled:
+        # In-process daemon thread -- see `_elapsed_progress_worker`'s docstring for why this is
+        # a thread and not a fork()ed subprocess (a fork-based design was the root cause of
+        # intermittent crashes).
         _clear_active_progress_worker(timeout_s=0.25)
         progress_stop_event = threading.Event()
         progress_thread = threading.Thread(
@@ -1124,28 +1037,18 @@ def run_transport_with_progress(
 
         t_solver_s = time.time()
         try:
-            run_out = _run_tracking_once()
+            Bout, snaps, V = _run_tracking_once()
         finally:
             _stop_progress_worker(progress_stop_event, progress_thread, timeout_s=2.0)
             if progress_thread is _ACTIVE_PROGRESS_THREAD:
                 _ACTIVE_PROGRESS_STOP_EVENT = None
                 _ACTIVE_PROGRESS_THREAD = None
-        if len(run_out) == 3:
-            Bout, snaps, V = run_out
-            transport_table = None
-        else:
-            Bout, snaps, V, transport_table = run_out
         solver_elapsed_s = time.time() - t_solver_s
         _diag(f"RF-Track solver return: {solver_elapsed_s:.2f} s")
         _warn_slow("RF-Track solver return", solver_elapsed_s)
     else:
         t_solver_s = time.time()
-        run_out = _run_tracking_once()
-        if len(run_out) == 3:
-            Bout, snaps, V = run_out
-            transport_table = None
-        else:
-            Bout, snaps, V, transport_table = run_out
+        Bout, snaps, V = _run_tracking_once()
         solver_elapsed_s = time.time() - t_solver_s
         _diag(f"RF-Track solver return: {solver_elapsed_s:.2f} s")
         _warn_slow("RF-Track solver return", solver_elapsed_s)
@@ -1266,7 +1169,6 @@ def run_transport_with_progress(
         z_snaps=z_snaps_kept,
         I_snaps=I_snaps,
         screen_summaries=screen_summaries,
-        transport_table=transport_table,
         lost_table=lost_table,
         particle_classes=classes,
     )
