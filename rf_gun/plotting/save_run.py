@@ -9,9 +9,16 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from ..back_bombardment import BackBombardmentData
 from ..constants import c, ME_MEV
 from ..particle_tags import ParticleTags, build_particle_tags
 from ..beam_properties import compute_beam_properties, transmission_curves
+from .back_bombardment import (
+    plot_back_bombardment_energy_density,
+    plot_back_bombardment_phase_space,
+    plot_back_bombardment_power_density_vs_time,
+    plot_back_bombardment_screen_reach,
+)
 from .emission import plot_emission_history, plot_j_vs_n
 from .evolution import plot_beam_moments_evolution, plot_beam_twiss_evolution
 from .phase_space import (
@@ -45,11 +52,21 @@ def _save_figure(fig, output_dir: Path, stem: str, *, formats: Sequence[str] = (
 
 
 def _capture_current_figure(save_name: str, output_dir: Path, *, formats: Sequence[str] = ("png", "eps")) -> list[str]:
+    """Save whatever figure the preceding plot call left open -- or nothing, cleanly, if it left
+    none. Several plotting functions in this project (`plot_j_vs_n` when the emission law isn't
+    "unified"; every `plot_back_bombardment_*` when there's no particle with a physically
+    plausible reconstruction) intentionally print a note and return without creating a figure.
+    `plt.gcf()` does not report that "no figure" state -- called with none open, it silently
+    creates and returns a brand new blank one, which this function would then happily save,
+    producing a confusing all-white PNG (confirmed: this is exactly how `emission_j_vs_n.png`
+    ended up blank in every RD_schottky-emission-law run). Checking `plt.get_fignums()` first
+    tells the two cases apart.
+    """
     import matplotlib.pyplot as plt
 
-    fig = plt.gcf()
-    if fig is None:
+    if not plt.get_fignums():
         return []
+    fig = plt.gcf()
     saved = _save_figure(fig, output_dir, save_name, formats=formats)
     plt.close(fig)
     return saved
@@ -439,7 +456,9 @@ def save_run_figures(
     n_macroparticles: int | None = None,
     mass_MeV: float = ME_MEV,
     lost_table: np.ndarray | None = None,
-) -> list[str]:
+    back_bombardment_data: BackBombardmentData | None = None,
+    back_bombardment_cathode_radius_mm: float | None = None,
+) -> dict[str, Any]:
     """Generate and save a standard figure bundle for one run.
 
     `tags` (`rf_gun.particle_tags.ParticleTags`) drives every figure in this bundle -- pass one
@@ -450,6 +469,17 @@ def save_run_figures(
     tagging. The beam-properties table and transmission curves are always computed on the
     forward-going + aperture-surviving population, matching
     `rf_gun.beam_properties.compute_beam_properties`.
+
+    `back_bombardment_data` (from `rf_gun.compute_back_bombardment`), when given, adds the 4
+    back-bombardment figures (phase space, screen reach, cathode energy-density map, power
+    density vs time -- matching the notebook's back-bombardment cell) to the bundle;
+    `back_bombardment_cathode_radius_mm` is required alongside it (only the power-density figure
+    needs it, to normalize deposited energy by the cathode's nominal area).
+
+    Returns `{"saved_figures": [...], "back_bombardment_energy_map": {...} | None}` -- the energy
+    map is the exact dict `plot_back_bombardment_energy_density` returned (`xedges`, `yedges`,
+    `density_J_per_mm2`, `total_J`), for the caller to persist independently (see
+    `rf_gun.save_back_bombardment_energy_map`) since it's per-bin array data, not a figure.
     """
     import matplotlib.pyplot as plt
 
@@ -527,4 +557,24 @@ def save_run_figures(
         saved += _save_figure(fig_cls, output_dir, "initial_class_conditioned_histograms")
         plt.close(fig_cls)
 
-    return saved
+    back_bombardment_energy_map: dict[str, Any] | None = None
+    if back_bombardment_data is not None:
+        plot_back_bombardment_phase_space(back_bombardment_data)
+        saved += _capture_current_figure("back_bombardment_phase_space", output_dir)
+
+        plot_back_bombardment_screen_reach(back_bombardment_data, M_snaps, z_snaps)
+        saved += _capture_current_figure("back_bombardment_screen_reach", output_dir)
+
+        back_bombardment_energy_map = plot_back_bombardment_energy_density(back_bombardment_data)
+        saved += _capture_current_figure("back_bombardment_energy_density", output_dir)
+
+        plot_back_bombardment_power_density_vs_time(
+            back_bombardment_data,
+            cathode_radius_mm=float(back_bombardment_cathode_radius_mm),
+        )
+        saved += _capture_current_figure("back_bombardment_power_density_vs_time", output_dir)
+
+    return {
+        "saved_figures": saved,
+        "back_bombardment_energy_map": back_bombardment_energy_map,
+    }

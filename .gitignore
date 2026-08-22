@@ -12,7 +12,7 @@ venv/
 # Project-specific
 archive/
 outputs/
-outputs_Koa/
+Koa outputs/
 analysis_Koa/
 manual_references/
 logs/

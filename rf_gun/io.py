@@ -426,27 +426,30 @@ def save_beam_openpmd(
     return out_path
 
 
-def save_run_summary(
+def save_run_config(
     run_dir: Path,
     *,
     run_name: str,
     source: str,
     hardcoded_parameters: dict[str, Any],
     derived_parameters: dict[str, Any],
-    results: dict[str, Any],
-    output_files: dict[str, Any],
-    filename: str = "run_summary.json",
+    filename: str = "run_config.json",
 ) -> Path:
-    """Write one run's hardcoded + derived parameters and key results to a single JSON file.
+    """Write everything that describes *what this run was set up to do* -- every input parameter
+    (cavity/field-map, solver/finesse, cathode/emission, beam-loading, aperture, deflection,
+    screen/particle-count settings) plus the small set of values derived from them before
+    tracking even starts (grid sizes, phase-scan crest/Veff/R-over-Q, effective length) -- to one
+    small JSON file, with no per-particle or per-time-sample data anywhere in it.
 
     Shared by the notebook (`UH_gun_tracking_demo.ipynb`) and any batch/CLI script (e.g.
-    `run_thermionic_tm010.py`), so a run started either way produces the same `run_summary.json`
-    shape -- one place to look (or `json.load(...)` from later analysis code, or across a SLURM
-    parameter scan) for what a run used and what it found, regardless of how it was launched.
-
-    Callers build the four grouped dicts from whatever locals they have (notebook globals, an
-    argparse `Namespace`, a `SimulationResult`, ...) -- this function only adds the run identity/
-    timestamp, sanitizes everything for strict JSON (via `to_json_safe`), and writes the file.
+    `run_thermionic_tm010.py`), so a run started either way produces the same `run_config.json`
+    shape. Pairs with `save_run_results` (the *outcome* of the run) and, when the deflection
+    magnet's back-bombardment analysis is enabled, `save_back_bombardment_energy_map` (the one
+    piece of per-bin, not per-particle, array data this project produces) -- three files instead
+    of the previous sprawl of `run_metadata.json`/`run_summary.json`/`beam_summary.json`/
+    `particle_classes_summary.json`/`progress_stats.json`/`B0_timing.json`, which duplicated the
+    same handful of derived quantities across four overlapping files and (via an incomplete
+    per-particle-array exclusion list) sometimes ballooned to tens of MB each.
 
     Parameters
     ----------
@@ -457,7 +460,7 @@ def save_run_summary(
     source:
         Where this run was launched from, e.g. `"notebook:UH_gun_tracking_demo.ipynb"` or
         `"script:run_thermionic_tm010.py"` -- so a later reader can tell the two apart.
-    hardcoded_parameters, derived_parameters, results, output_files:
+    hardcoded_parameters, derived_parameters:
         Caller-assembled nested dicts (see either call site for the expected grouping); passed
         through as-is other than JSON sanitization.
     """
@@ -470,10 +473,82 @@ def save_run_summary(
         "source": str(source),
         "hardcoded_parameters": hardcoded_parameters,
         "derived_parameters": derived_parameters,
+    }
+    out_path = run_dir / filename
+    with out_path.open("w", encoding="utf-8") as f:
+        json.dump(to_json_safe(payload), f, indent=2, sort_keys=True)
+    return out_path
+
+
+def save_run_results(
+    run_dir: Path,
+    *,
+    run_name: str,
+    source: str,
+    results: dict[str, Any],
+    output_files: dict[str, Any],
+    filename: str = "run_results.json",
+) -> Path:
+    """Write everything this run *found* -- R/Q and Veff actually used, peak current/current
+    density, the beam-property curves vs z (transmission, Twiss, beam size -- one row per screen,
+    not per particle), particle classification counts, aperture and back-bombardment summaries,
+    the openPMD exit-beam summary, and the paths to every other output file this run wrote -- to
+    one JSON file. See `save_run_config` for the companion "what this run was set up to do" file
+    and the reasoning for this split.
+
+    Parameters
+    ----------
+    run_dir, run_name, source:
+        Same meaning as in `save_run_config`.
+    results, output_files:
+        Caller-assembled nested dicts (see either call site for the expected grouping); passed
+        through as-is other than JSON sanitization. Screen/curve entries in `results` must already
+        be per-screen (or per-time-sample) summaries, never a raw per-particle phase-space array --
+        see `rf_gun.simulation.thermo_info_summary` for the corresponding thermo_info filter.
+    """
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "run_name": run_name,
+        "run_dir": str(run_dir.resolve()),
+        "timestamp_local": datetime.now().isoformat(),
+        "source": str(source),
         "results": results,
         "output_files": output_files,
     }
     out_path = run_dir / filename
     with out_path.open("w", encoding="utf-8") as f:
         json.dump(to_json_safe(payload), f, indent=2, sort_keys=True)
+    return out_path
+
+
+def save_back_bombardment_energy_map(
+    run_dir: Path,
+    energy_map: dict[str, Any] | None,
+    *,
+    filename: str = "back_bombardment_energy_map.npz",
+) -> Path | None:
+    """Write the 2D kinetic-energy-density map deposited by back-bombarding electrons at the
+    cathode plane (z=0) -- the dict returned by
+    `rf_gun.plotting.back_bombardment.plot_back_bombardment_energy_density` (`xedges`, `yedges`,
+    `density_J_per_mm2`, `total_J`) -- to its own small binary file, independent of
+    `run_config.json`/`run_results.json` (this is per-bin array data, not a per-run scalar, so it
+    doesn't belong in either) and of `figures/` (this is data, not a rendering of it -- read it
+    back directly with `np.load(...)`, no re-plotting needed).
+
+    Returns `None` (writes nothing) when `energy_map` is `None`, e.g. no particle in the run had a
+    physically plausible back-bombardment reconstruction (`BackBombardmentData.n_valid == 0`).
+    """
+    if energy_map is None:
+        return None
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    out_path = run_dir / filename
+    np.savez_compressed(
+        out_path,
+        xedges=np.asarray(energy_map["xedges"], dtype=float),
+        yedges=np.asarray(energy_map["yedges"], dtype=float),
+        density_J_per_mm2=np.asarray(energy_map["density_J_per_mm2"], dtype=float),
+        total_J=np.asarray(float(energy_map["total_J"])),
+    )
     return out_path

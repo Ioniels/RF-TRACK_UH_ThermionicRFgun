@@ -10,10 +10,8 @@ def _second_moment_twiss(u: np.ndarray, pu: np.ndarray):
     """Shared second-moment computation: returns (alpha, beta, gamma, eps_geom).
 
     `eps_geom = sqrt(det(cov{u,pu}))` is the geometric emittance in whatever units
-    `u`/`pu` are given in (e.g. mm and rad -> mm*rad). Kept private since
-    `twiss_from_moments` (below) is the long-standing public 3-tuple return used
-    throughout this codebase; `manual_twiss_and_emittance` (below) is the only other
-    caller, added to expose `eps_geom` for the native-vs-manual comparison.
+    `u`/`pu` are given in (e.g. mm and rad -> mm*rad). `manual_twiss_and_emittance` (below) is
+    this function's only caller, added to expose `eps_geom` for the native-vs-manual comparison.
     """
     if u.size < 2 or pu.size < 2:
         return np.nan, np.nan, np.nan, np.nan
@@ -30,12 +28,6 @@ def _second_moment_twiss(u: np.ndarray, pu: np.ndarray):
     beta = s11 / eps
     gamma = s22 / eps
     return float(alpha), float(beta), float(gamma), float(eps)
-
-
-def twiss_from_moments(u: np.ndarray, pu: np.ndarray):
-    """Twiss parameters (alpha, beta, gamma) from second moments."""
-    alpha, beta, gamma, _eps_geom = _second_moment_twiss(u, pu)
-    return alpha, beta, gamma
 
 
 def dispersion_from_moments(u: np.ndarray, delta: np.ndarray) -> float:
@@ -149,20 +141,13 @@ def info_get_first(info: Any, keys: Sequence[str]):
     return np.nan
 
 
-def snapshot_stats(M: np.ndarray) -> Dict[str, float]:
-    if M.size == 0:
-        return {"N": 0.0, "mean_pz": np.nan, "sigma_pz": np.nan, "transmission": np.nan}
-    out = {
-        "N": float(M.shape[0]),
-        "mean_pz": float(np.mean(M[:, 5])) if M.ndim == 2 and M.shape[1] > 5 else np.nan,
-        "sigma_pz": float(np.std(M[:, 5])) if M.ndim == 2 and M.shape[1] > 5 else np.nan,
-        "transmission": np.nan,
-    }
-    return out
+def summarize_array(values: np.ndarray, *, with_span: bool = False) -> Dict[str, Any]:
+    """Return robust numeric summary, preserving count and finite_count.
 
-
-def summarize_array(values: np.ndarray) -> Dict[str, Any]:
-    """Return robust numeric summary, preserving count and finite_count."""
+    `with_span` adds a `"span"` field (`max - min` over the finite values) -- useful for e.g. an
+    emission-time window, where the width itself (not just min/max separately) is the quantity of
+    interest.
+    """
     arr = np.asarray(values, dtype=float).reshape(-1)
     finite = arr[np.isfinite(arr)]
     out: Dict[str, Any] = {
@@ -173,12 +158,16 @@ def summarize_array(values: np.ndarray) -> Dict[str, Any]:
         "mean": None,
         "std": None,
     }
+    if with_span:
+        out["span"] = None
     if finite.size == 0:
         return out
     out["min"] = float(np.min(finite))
     out["max"] = float(np.max(finite))
     out["mean"] = float(np.mean(finite))
     out["std"] = float(np.std(finite))
+    if with_span:
+        out["span"] = float(np.max(finite) - np.min(finite))
     return out
 
 
@@ -198,12 +187,10 @@ def build_screen_summary_from_phase_space(
     n_prev = int(n_previous) if n_previous is not None else int(n_initial)
 
     pz = arr[:, 5] if arr.shape[1] > 5 else np.asarray([], dtype=float)
-    z = arr[:, 4] if arr.shape[1] > 4 else np.asarray([], dtype=float)
     x = arr[:, 0] if arr.shape[1] > 0 else np.asarray([], dtype=float)
     y = arr[:, 2] if arr.shape[1] > 2 else np.asarray([], dtype=float)
 
     pz_f = pz[np.isfinite(pz)]
-    z_f = z[np.isfinite(z)]
     x_f = x[np.isfinite(x)]
     y_f = y[np.isfinite(y)]
 
@@ -232,8 +219,12 @@ def build_screen_summary_from_phase_space(
         "sigma_x_mm": _std_or_none(x_f),
         "mean_y_mm": _mean_or_none(y_f),
         "sigma_y_mm": _std_or_none(y_f),
-        "mean_z_mm": _mean_or_none(z_f, scale=1e3),
-        "sigma_z_mm": _std_or_none(z_f, scale=1e3),
+        # No mean_z_mm/sigma_z_mm here: a Screen's own %Z is not a lab-frame position for this
+        # project's wide-energy-spread thermionic beam -- it's each crossing particle's velocity
+        # times its time offset from the bunch's reference particle (see rf_gun.aperture's module
+        # docstring for the full derivation). Presenting its mean/std as "position" is actively
+        # misleading (confirmed: values of >1 m for a screen physically at ~1 cm) -- there is no
+        # substitute z-like quantity to put here; z_m above is this screen's own known, correct z.
         # Backward-compatible aliases used by existing callers.
         "transmission": tr_init,
         "mean_pz": _mean_or_none(pz_f),

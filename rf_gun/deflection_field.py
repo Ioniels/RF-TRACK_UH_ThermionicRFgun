@@ -43,7 +43,21 @@ def b0_deflection_T(
 
 
 class DeflectionField(rft.UserField):
-    """Horizontal dipole-like field Bx(z), uniform in x,y, for beam deflection."""
+    """Horizontal dipole-like field Bx(z), uniform in x,y, for beam deflection.
+
+    `get_field` is invoked once per integration sub-step per particle for as long as this
+    field is attached -- i.e. very often, since the deflection magnet forces single-threaded
+    tracking (see the module docstring), so a full run makes millions of calls into this
+    method. RF-Track's UserField binding never releases the Python objects `get_field`
+    returns (empirically confirmed: process RSS grows essentially linearly with elapsed
+    tracking time whenever the magnet is on, unboundedly), so returning a freshly allocated
+    numpy array on every call leaks memory without bound over the course of a run -- on a
+    real N~1000, fine-tier run this exhausts RAM+swap and the process is SIGKILLed right
+    around the point the progress bar reaches ~98%, which is exactly the "kernel crashes at
+    the last step" symptom this project saw with the magnet on. Returning the SAME
+    pre-allocated E/B arrays every call (mutated in place, values copied out C++-side before
+    the next call) turns that unbounded per-call leak into a fixed one-time cost.
+    """
 
     def __init__(
         self,
@@ -58,9 +72,10 @@ class DeflectionField(rft.UserField):
         self.B_pk_per_A_T = float(B_pk_per_A_T)
         self.z_p_mm = float(z_p_mm)
         self.w_mm = float(w_mm)
+        self._E = np.zeros(3)
+        self._B = np.zeros(3)
 
     def get_field(self, x, y, z, t):
-        Bx = b0_deflection_T(z, self.current_A, self.B_pk_per_A_T, self.z_p_mm, self.w_mm)
-        E = np.zeros(3)
-        B = np.array([Bx, 0.0, 0.0])
-        return E, B
+        B_pk = self.B_pk_per_A_T * self.current_A
+        self._B[0] = B_pk / (1.0 + ((float(z) - self.z_p_mm) / self.w_mm) ** 2)
+        return self._E, self._B

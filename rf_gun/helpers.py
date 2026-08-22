@@ -45,3 +45,22 @@ def fmt_bytes(n: float) -> str:
             return f"{n:.2f} {unit}"
         n /= 1024.0
     return f"{n:.2f} PB"
+
+
+def format_duration(seconds: float) -> str:
+    """Human-readable duration: `"840 ms"`, `"2.05 s"`, or `"3 min 20.4 s"`."""
+    s = float(seconds)
+    if not np.isfinite(s):
+        return "n/a"
+    if s < 1.0:
+        return f"{1e3 * s:.0f} ms"
+    if s < 120.0:
+        return f"{s:.2f} s"
+    m = int(s // 60)
+    return f"{m} min {s - 60 * m:.1f} s"
+
+
+def sc_bl_tag(sc_enabled: bool, beam_loading: bool) -> str:
+    """`"SC<on|off>_BL<on|off>"` -- the physics-config suffix used throughout this project's run
+    names and output filenames (e.g. `<stamp>_T<T>K_SC<on|off>_BL<on|off>`)."""
+    return f"SC{'on' if sc_enabled else 'off'}_BL{'on' if beam_loading else 'off'}"

@@ -54,7 +54,7 @@ deflection magnet off.
 ├── README.md
 ├── UH_gun_tracking_demo.ipynb
 ├── run_thermionic_tm010.py
-├── run_thermionic_tm010_scanT_1400_1700.slurm
+├── run_thermionic_tm010_scanT_1400_1700_medium.slurm
 ├── run_thermionic_tm010_scanT_1400_1700_fine.slurm
 ├── run_thermionic_tm010_scanT_1400_1700_extrafine.slurm
 ├── field_maps/
@@ -72,7 +72,7 @@ deflection magnet off.
     ├── deflection_field.py     # steering-magnet field model
     ├── finesse_presets.py      # bundled speed/precision presets
     ├── rftrack_volume.py       # builds the RF-Track tracking volume and screens
-    ├── simulation.py           # runs the tracking, reports progress
+    ├── simulation.py           # runs the tracking, reports stage-by-stage progress
     ├── diagnostics.py          # beam size, emittance, per-screen summaries
     ├── particle_tags.py        # forward/backward and aperture tagging
     ├── aperture.py             # exit-aperture geometric cut
@@ -84,7 +84,7 @@ deflection magnet off.
 ```
 
 `.venv/` (the Python environment, including the compiled RF-Track binding) and local-only/generated
-folders (`outputs/`, `outputs_Koa/`, `analysis_Koa/`, `manual_references/`, `archive/`, `logs/`)
+folders (`outputs/`, `Koa outputs/`, `analysis_Koa/`, `manual_references/`, `archive/`, `logs/`)
 are intentionally outside this layout — see `.gitignore`.
 
 ## Core workflow
@@ -96,8 +96,8 @@ are intentionally outside this layout — see `.gitignore`.
    magnet are each independently switchable).
 5. Tag particles forward/backward and (if enabled) aperture-survived, and compute per-screen and
    whole-beam summaries.
-6. Save figures, per-screen and exit-beam distributions, and a consolidated `run_summary.json` —
-   the same shape from either entry point.
+6. Save figures, per-screen and exit-beam distributions, and two consolidated JSON files
+   (`run_config.json`, `run_results.json`) — the same shape from either entry point.
 
 ## Saved outputs
 
@@ -111,13 +111,23 @@ script: pass `--output`, or let it auto-name the same way). Inside:
   aperture is enabled.
 - `screen_distributions_hdf5/` — one HDF5 file per tracking screen (full, unfiltered phase space).
 - `lost_particle_diagnostics.json` — particles RF-Track reports as lost during tracking.
-- `run_summary.json` — every input parameter plus every derived quantity (phase-scan crest,
-  `Veff`, `R/Q`, transmission/aperture/back-bombardment statistics, per-screen summaries, output
-  file paths) — written the same way from either entry point.
+- `run_config.json` — every input parameter (cavity/field-map, solver/finesse, cathode/emission,
+  beam-loading, aperture, deflection, screen/particle-count settings) plus the handful of values
+  derived from them before tracking starts (grid sizes, phase-scan crest, `Veff`, `R/Q`, effective
+  length) — no per-particle or per-time-sample data anywhere in it.
+- `run_results.json` — everything the run *found*: `R/Q`/`Veff` actually used, peak current and
+  current density, the beam-property curves vs `z` (transmission, Twiss, beam size — one row per
+  screen), particle classification, aperture and back-bombardment summaries, the openPMD exit-beam
+  summary, and the paths to every other output file.
+- `back_bombardment_energy_map.npz` — the 2D kinetic-energy-density map deposited by
+  back-bombarding electrons at the cathode plane, when the run's `Bout` has at least one particle
+  behind the cathode with a physically plausible reconstruction (see `rf_gun.back_bombardment`).
 
-The notebook additionally saves `beam_properties.csv` (beam size vs. z). The script additionally
-saves `beam_data.npz`, `run_metadata.json`, `progress_stats.json`, `B0.json`/`Bout.json`,
-`beam_summary.json`, and `particle_classes_summary.json`.
+`run_config.json`/`run_results.json` are written the same way from either entry point (via
+`rf_gun.save_run_config`/`rf_gun.save_run_results`). The notebook additionally saves
+`beam_properties.csv` (beam size vs. z). The script additionally saves `beam_data.npz` (the full
+`B0`/`Bout`/per-screen phase-space arrays, compressed binary — the efficient, non-duplicated home
+for that data; there is no JSON equivalent).
 
 ## Batch execution / SLURM
 
@@ -133,12 +143,12 @@ Full option list:
 python run_thermionic_tm010.py --help
 ```
 
-`run_thermionic_tm010_scanT_1400_1700.slurm` is the current parameter-scan template: a SLURM job
-array (`--array=0-30`) sweeping the cathode temperature from 1400 K to 1700 K in 10 K steps, one
-array task per temperature, at `N = 1,000,000` particles with space charge, beam loading, and the
-exit aperture + openPMD export on, and the deflection magnet off (see the performance note above
-— this keeps tracking multi-threaded). Use it as a template for other scans (deflection current,
-temperature range, roughness) by varying the swept argument per array task.
+`run_thermionic_tm010_scanT_1400_1700_fine.slurm` is the current parameter-scan template: a SLURM
+job array (`--array=0-30`) sweeping the cathode temperature from 1400 K to 1700 K in 10 K steps,
+one array task per temperature, at `N = 100,000` particles with space charge, beam loading, and
+the exit aperture + openPMD export on, and the deflection magnet off (see the performance note
+above — this keeps tracking multi-threaded). Use it as a template for other scans (deflection
+current, temperature range, roughness) by varying the swept argument per array task.
 
 ### Solver finesse presets
 
@@ -146,9 +156,10 @@ temperature range, roughness) by varying the swept argument per array task.
 map grid step, integration step counts, ODE tolerance, and the space-charge/beam-loading solver
 step) — a trade between run time and numerical precision, independent of the physical settings
 above (particle/screen counts, cathode temperature, cavity R/Q, deflection current, and which
-physics is switched on). `fine` matches `run_thermionic_tm010_scanT_1400_1700.slurm`; `coarse`
-matches the notebook's defaults. `run_thermionic_tm010_scanT_1400_1700_fine.slurm` and
-`..._extrafine.slurm` are the same scan template at the `fine`/`extra_fine` tiers.
+physics is switched on). `coarse` matches the notebook's defaults.
+`run_thermionic_tm010_scanT_1400_1700_fine.slurm`, `..._medium.slurm`, and `..._extrafine.slurm`
+are the same scan template at the `fine`/`medium`/`extra_fine` tiers respectively — identical
+except for `--finesse` and `--scan-tags`.
 
 The notebook has the equivalent `NOTEBOOK_FINESSE_TIER` variable near the top of its configuration
 cell.

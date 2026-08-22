@@ -614,17 +614,48 @@ def plot_spectra(
     if t_emit_ns_good.size > 0 or t_emit_ns_bad.size > 0:
         t_all = np.concatenate([arr for arr in (t_emit_ns_good, t_emit_ns_bad) if arr.size > 0])
         bins_t = np.histogram_bin_edges(t_all, bins=60)
+        bin_width_s = float(bins_t[1] - bins_t[0]) * 1e-9 if bins_t.size > 1 else np.nan
+
+        # Convert the per-macroparticle emission-time histogram into a current density: each
+        # macroparticle represents Q_total_C/N_total of real charge, so summing that charge over
+        # a bin's width gives the current in that bin, and dividing by the cathode area gives J
+        # -- same convention as `plot_emission_history`'s J(t) panel (left: J in A/cm^2, right: I
+        # in A via a linear secondary axis).
+        _area_cm2 = None
+        _J_weight = None
+        if thermo_info is not None and np.isfinite(bin_width_s) and bin_width_s > 0.0:
+            _Q_tot = float(thermo_info.get("Q_total_C", np.nan))
+            _area_m2 = thermo_info.get("area_m2", None)
+            _N_tot = int(Mf_f_all.shape[0])
+            if np.isfinite(_Q_tot) and _area_m2 is not None and _N_tot > 0:
+                _q_macro = abs(_Q_tot) / _N_tot
+                _area_cm2 = float(_area_m2) * 1e4
+                if _area_cm2 > 0.0:
+                    _J_weight = _q_macro / bin_width_s / _area_cm2
+
         _stk_data = [arr for arr in (t_emit_ns_bad, t_emit_ns_good) if arr.size > 0]
         _stk_colors = ([COLOR_SECONDARY] if t_emit_ns_bad.size > 0 else []) + ([COLOR_PRIMARY] if t_emit_ns_good.size > 0 else [])
         _stk_labels = (["backward/lost"] if t_emit_ns_bad.size > 0 else []) + (["surviving"] if t_emit_ns_good.size > 0 else [])
+        _stk_weights = [np.full(arr.shape, _J_weight) for arr in _stk_data] if _J_weight is not None else None
         if _stk_data:
             axes[0].hist(
                 _stk_data, bins=bins_t, stacked=True, color=_stk_colors, label=_stk_labels,
-                alpha=0.8, edgecolor="black", lw=0.4,
+                weights=_stk_weights, alpha=0.8, edgecolor="black", lw=0.4,
             )
         axes[0].set_xlabel(r"$t_{\mathrm{emit}}\,(\mathrm{ns})$")
-        axes[0].set_ylabel(r"$N_e$")
-        axes[0].ticklabel_format(axis="y", style="sci", scilimits=(0, 0), useMathText=True)
+        if _J_weight is not None:
+            axes[0].set_ylabel(r"$J\,(\mathrm{A\,cm^{-2}})$")
+            ax0_right = axes[0].secondary_yaxis(
+                "right",
+                functions=(
+                    lambda y: y * _area_cm2,
+                    lambda y: y / _area_cm2,
+                ),
+            )
+            ax0_right.set_ylabel(r"$I\,(\mathrm{A})$")
+        else:
+            axes[0].set_ylabel(r"$N_e$")
+            axes[0].ticklabel_format(axis="y", style="sci", scilimits=(0, 0), useMathText=True)
         axes[0].grid(alpha=0.3)
         axes[0].set_title("Emission-time distribution")
         axes[0].legend(frameon=False)

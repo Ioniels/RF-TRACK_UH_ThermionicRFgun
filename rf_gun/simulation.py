@@ -3,12 +3,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Literal
-import math
 import time
 import os
 import json
 import hashlib
-import threading
 from pathlib import Path
 
 import numpy as np
@@ -31,7 +29,6 @@ from .rftrack_volume import (
     ScreenBuildParams,
 )
 from .diagnostics import (
-    snapshot_stats,
     build_screen_summary_from_phase_space,
     info_get_first,
     classify_particle_outcomes,
@@ -68,6 +65,32 @@ class EmissionParams:
 #: (kinetic energy, MeV) -- all confirmed valid RF-Track format codes. Every consumer that needs
 #: exactly the core 6 columns already slices `[:, :6]` explicitly, so this extension is additive.
 EXTENDED_PHASE_FMT = "%X %Px %Y %Py %Z %Pz %id %t %E %K"
+
+#: `thermo_info` entries that are per-emission-time-sample arrays (one value per `t_s` sample,
+#: typically hundreds), not per-run scalars -- must be excluded from any run summary/config JSON.
+THERMO_INFO_TIME_ARRAY_KEYS = frozenset({
+    "t_s", "Ez_t", "F_t", "dphi_eV_t", "phi_eff_eV_t", "J_Apm2_t", "J_th_Apm2_t",
+    "J_fe_Apm2_t", "R_t", "n_t", "I_A_t", "Q_cum_C", "t_emit_s",
+})
+#: `thermo_info` entries that are per-particle arrays (one value per macroparticle, set at the end
+#: of `build_bunch_thermionic`) -- also excluded from any run summary/config JSON. Forgetting
+#: these here inflated run_summary.json/run_metadata.json to tens of MB (the full initial
+#: phase-space matrix, dumped as JSON text) for every scan run before this was centralized.
+THERMO_INFO_PER_PARTICLE_KEYS = frozenset({
+    "initial_phase_space", "initial_pz_MeV_c", "initial_t0_mm_c",
+})
+
+
+def thermo_info_summary(thermo_info: Dict[str, Any]) -> Dict[str, Any]:
+    """`thermo_info` with every per-time-sample and per-particle array stripped out.
+
+    The one place both `run_thermionic_tm010.py` and the notebook should build their JSON-safe
+    thermo_info payload from, so the exclusion list can't drift out of sync between the two (it
+    did before this helper existed: the script's own hand-rolled exclusion set omitted the
+    per-particle keys entirely, and the notebook's omitted two of the three).
+    """
+    exclude = THERMO_INFO_TIME_ARRAY_KEYS | THERMO_INFO_PER_PARTICLE_KEYS
+    return {k: v for k, v in dict(thermo_info).items() if k not in exclude}
 
 
 @dataclass(frozen=True)
@@ -146,92 +169,6 @@ def _save_transport_runtime_history(history: Dict[str, float]) -> None:
 
 
 _TRANSPORT_RUNTIME_HISTORY: Dict[str, float] = _load_transport_runtime_history()
-_ACTIVE_PROGRESS_STOP_EVENT: Optional[threading.Event] = None
-_ACTIVE_PROGRESS_THREAD: Optional[threading.Thread] = None
-
-
-def _stop_progress_worker(stop_event, thread, timeout_s: float = 2.0) -> None:
-    if stop_event is not None:
-        try:
-            stop_event.set()
-        except Exception:
-            pass
-    if thread is not None:
-        try:
-            thread.join(timeout=float(timeout_s))
-        except Exception:
-            pass
-
-
-def _clear_active_progress_worker(timeout_s: float = 0.5) -> None:
-    global _ACTIVE_PROGRESS_STOP_EVENT, _ACTIVE_PROGRESS_THREAD
-    _stop_progress_worker(_ACTIVE_PROGRESS_STOP_EVENT, _ACTIVE_PROGRESS_THREAD, timeout_s=timeout_s)
-    _ACTIVE_PROGRESS_STOP_EVENT = None
-    _ACTIVE_PROGRESS_THREAD = None
-
-
-def _progress_proxy_pct(elapsed_s: float, est_s: float) -> float:
-    """Wall-clock proxy percentage against a historical runtime estimate.
-
-    Not real RF-Track tracking progress -- RF-Track's Python bindings expose no
-    per-step callback (see `screen_progress_callback`'s docstring), so this is the
-    best available estimate: how far `elapsed_s` is through a runtime estimate drawn
-    from `_TRANSPORT_RUNTIME_HISTORY` (or a heuristic fallback), asymptoting toward
-    99% if the run overruns that estimate.
-    """
-    est = max(1e-9, float(est_s))
-    if elapsed_s <= est:
-        return min(98.0, 100.0 * elapsed_s / est)
-    over = (elapsed_s - est) / est
-    return min(99.0, 98.0 + (1.0 - math.exp(-over)))
-
-
-def _elapsed_progress_worker(stop_event, est_for_proxy_s: float, poll_interval_s: float) -> None:
-    """Background daemon thread only -- never touches RF-Track, numpy, or the tracked bunch.
-
-    A previous implementation ran this in a forked OS subprocess
-    (`multiprocessing.get_context("fork")`), concurrently with the blocking call into
-    RF-Track's tracking engine. Forking an already multi-threaded process (a Jupyter
-    kernel has its own ZMQ/heartbeat threads; RF-Track itself internally distributes
-    tracking across threads, per the RF-Track manual) is a well-documented crash/hang
-    hazard -- a lock held by any thread other than the calling one at the instant of
-    `fork()` is inherited already-locked, forever, in the child, with consequences that
-    land at an essentially random point in the run. That was the root cause of the
-    intermittent kernel crashes at random progress percentages this project saw. This
-    thread-only version never forks anything, and deliberately avoids numpy calls in
-    the loop body (plain `math.exp`, not `np.exp`) as further insurance against any
-    incidental interaction with a BLAS/OpenMP thread pool from a background thread.
-    """
-    start_s = time.time()
-    try:
-        from tqdm.auto import tqdm
-    except Exception:
-        tqdm = None
-
-    if tqdm is None:
-        last_print = -1
-        while not stop_event.is_set():
-            elapsed_s = time.time() - start_s
-            pct = int(_progress_proxy_pct(elapsed_s, est_for_proxy_s))
-            if pct != last_print:
-                print(f"tracking {pct}% | elapsed={elapsed_s:,.1f}s est={float(est_for_proxy_s):,.1f}s", flush=True)
-                last_print = pct
-            time.sleep(max(0.1, float(poll_interval_s)))
-        print("tracking 100%", flush=True)
-        return
-
-    # tqdm.auto already renders an ipywidgets bar in a live Jupyter kernel and a plain
-    # text bar otherwise -- this is the "smart progress bar by default in auto mode"
-    # with no separate notebook-vs-terminal branching needed on our side.
-    with tqdm(total=100, desc="tracking", unit="%", leave=True) as tbar:
-        while not stop_event.is_set():
-            elapsed_s = time.time() - start_s
-            tbar.n = int(_progress_proxy_pct(elapsed_s, est_for_proxy_s))
-            tbar.set_postfix_str(f"elapsed={elapsed_s:,.1f}s est={float(est_for_proxy_s):,.1f}s")
-            tbar.refresh()
-            time.sleep(max(0.1, float(poll_interval_s)))
-        tbar.n = 100
-        tbar.refresh()
 
 
 def _runtime_key_payload(vol_params_eff: VolumeBuildParams, tracking: TrackingParams, n_screens: int) -> Dict[str, Any]:
@@ -253,6 +190,11 @@ def _runtime_key_payload(vol_params_eff: VolumeBuildParams, tracking: TrackingPa
         "ode_algorithm": str(getattr(vol_params_eff, "ode_algorithm", "")),
         "ode_epsabs": float(getattr(vol_params_eff, "ode_epsabs", np.nan)),
         "cfx_dt_mm": float(getattr(vol_params_eff, "cfx_dt_mm", np.nan)),
+        # The deflection magnet forces single-threaded tracking (see rftrack_volume.build_volume),
+        # which changes wall-clock cost by roughly the machine's core count -- omitting this let a
+        # deflection-on run silently reuse a time estimate cached from a deflection-off (multi-
+        # threaded) run, understating the real runtime by 10x or more.
+        "deflection_enabled": bool(getattr(vol_params_eff, "deflection_enabled", False)),
     }
 
 
@@ -262,24 +204,6 @@ def _runtime_key_string(payload: Dict[str, Any]) -> str:
 
 def _runtime_key_hash(runtime_key: str) -> str:
     return hashlib.sha1(runtime_key.encode("utf-8")).hexdigest()[:12]
-
-
-def _heuristic_runtime_estimate_s(n_particles: int, default_s: float = 300.0) -> float:
-    """Progress-bar time estimate for a run with no exact cache match, scaled by particle count
-    (the dominant cost driver) via the median per-particle time across cached runs."""
-    per_particle: List[float] = []
-    for key, val in _TRANSPORT_RUNTIME_HISTORY.items():
-        if not (np.isfinite(val) and val > 0.0):
-            continue
-        try:
-            n_k = int(json.loads(key).get("n_particles", 0))
-        except Exception:
-            continue
-        if n_k > 0:
-            per_particle.append(val / n_k)
-    if not per_particle:
-        return float(default_s)
-    return max(1.0, float(np.median(per_particle)) * max(1, int(n_particles)))
 
 
 def _build_screen_params(tracking: TrackingParams) -> ScreenBuildParams:
@@ -878,22 +802,22 @@ def run_transport_with_progress(
     emission: EmissionParams,
     tracking: TrackingParams,
     diagnostics: DiagnosticsParams | None = None,
-    progress_bar: bool = True,
-    use_coarse_progress_proxy: bool = True,
-    poll_interval_s: float = 0.5,
     timing_diagnostics: bool = False,
     slow_step_warn_s: float = 20.0,
     rng: Optional[np.random.Generator] = None,
     on_screen: Optional[Callable[[int, float, Dict[str, float]], None]] = None,
 ):
-    """Run transport with staged text and a single tracking progress bar.
+    """Run transport with staged progress text.
 
-    The progress bar (an in-process daemon thread, `_elapsed_progress_worker`, rendered via
-    `tqdm.auto`) shows an elapsed-time-based percentage (see `_progress_proxy_pct`) while the
-    single blocking RF-Track tracking call runs. It cannot stay live for the whole call: RF-Track
-    holds the Python GIL throughout, so the bar only updates during brief windows where the GIL
-    is free (e.g. `DeflectionField.get_field()`'s Python callback when the magnet is on), and
-    otherwise sits frozen until the call returns.
+    There is no live progress bar during tracking: RF-Track's Python bindings expose no
+    per-step callback, so any in-run percentage is a wall-clock guess, not real progress. A
+    background thread previously rendered such a guess (via tqdm) but, at least with the
+    deflection magnet on (which forces single-threaded tracking, and periodically calls back
+    into Python from the tracking thread via `DeflectionField.get_field`), that thread printing
+    or refreshing a widget concurrently with the main thread was found to hang the kernel
+    intermittently -- so it was removed. The `_set_stage` prints below (`1/5` .. `5/5`) are the
+    only progress feedback during a run; see `track_elapsed_s`/`track_estimate_s` in the
+    returned stats for timing after the fact.
 
     Returns:
         (SimulationResult, stats_dict)
@@ -957,7 +881,6 @@ def run_transport_with_progress(
     runtime_key = _runtime_key_string(runtime_payload)
     runtime_key_hash = _runtime_key_hash(runtime_key)
     est_s = _TRANSPORT_RUNTIME_HISTORY.get(runtime_key, None)
-    heuristic_est_s = _heuristic_runtime_estimate_s(int(tracking.n_particles))
 
     settings_line = (
         f"Tracking settings | N={int(tracking.n_particles):,} | dt_mm={float(getattr(vol_params_eff, 'dt_mm', np.nan)):.4g} "
@@ -965,7 +888,7 @@ def run_transport_with_progress(
         f"| emission_sc_steps={int(getattr(vol_params_eff, 'emission_nsteps', 0))} "
         f"| screens={len(z_snaps)} | sc={'on' if bool(getattr(vol_params_eff, 'sc_enabled', False)) else 'off'} "
         f"| bl={'on' if bool(getattr(vol_params_eff, 'beam_loading_enabled', False)) else 'off'} "
-        f"| mode=elapsed | key={runtime_key_hash}"
+        f"| key={runtime_key_hash}"
     )
     print(settings_line, flush=True)
     print("(emission_sc_steps = number of SC kicks/substeps applied during emission)", flush=True)
@@ -988,14 +911,6 @@ def run_transport_with_progress(
     _set_stage(3)
     track_start_s = time.time()
 
-    est_for_proxy = None
-    if est_s is not None and np.isfinite(est_s) and est_s > 0:
-        est_for_proxy = float(est_s)
-    elif use_coarse_progress_proxy:
-        est_for_proxy = float(heuristic_est_s)
-    else:
-        est_for_proxy = max(1.0, float(heuristic_est_s))
-
     vol_params_track = vol_params_eff.replace(beam_loading_verbose=False)
 
     def _run_tracking_once():
@@ -1015,43 +930,11 @@ def run_transport_with_progress(
         V = build_volume(rft, Er_grid, Ez_grid, tracking.phi_deg, vol_params_track)
         return V.track(B0), [], V
 
-    global _ACTIVE_PROGRESS_STOP_EVENT, _ACTIVE_PROGRESS_THREAD
-
-    progress_enabled = bool(progress_bar)
-
-    if progress_enabled:
-        # In-process daemon thread -- see `_elapsed_progress_worker`'s docstring for why this is
-        # a thread and not a fork()ed subprocess (a fork-based design was the root cause of
-        # intermittent crashes).
-        _clear_active_progress_worker(timeout_s=0.25)
-        progress_stop_event = threading.Event()
-        progress_thread = threading.Thread(
-            target=_elapsed_progress_worker,
-            args=(progress_stop_event, est_for_proxy, float(poll_interval_s)),
-            name="rftrack-progress",
-            daemon=True,
-        )
-        progress_thread.start()
-        _ACTIVE_PROGRESS_STOP_EVENT = progress_stop_event
-        _ACTIVE_PROGRESS_THREAD = progress_thread
-
-        t_solver_s = time.time()
-        try:
-            Bout, snaps, V = _run_tracking_once()
-        finally:
-            _stop_progress_worker(progress_stop_event, progress_thread, timeout_s=2.0)
-            if progress_thread is _ACTIVE_PROGRESS_THREAD:
-                _ACTIVE_PROGRESS_STOP_EVENT = None
-                _ACTIVE_PROGRESS_THREAD = None
-        solver_elapsed_s = time.time() - t_solver_s
-        _diag(f"RF-Track solver return: {solver_elapsed_s:.2f} s")
-        _warn_slow("RF-Track solver return", solver_elapsed_s)
-    else:
-        t_solver_s = time.time()
-        Bout, snaps, V = _run_tracking_once()
-        solver_elapsed_s = time.time() - t_solver_s
-        _diag(f"RF-Track solver return: {solver_elapsed_s:.2f} s")
-        _warn_slow("RF-Track solver return", solver_elapsed_s)
+    t_solver_s = time.time()
+    Bout, snaps, V = _run_tracking_once()
+    solver_elapsed_s = time.time() - t_solver_s
+    _diag(f"RF-Track solver return: {solver_elapsed_s:.2f} s")
+    _warn_slow("RF-Track solver return", solver_elapsed_s)
 
     t_extract_phase_s = time.time()
     keep_idx = _select_screen_indices(len(snaps), diagnostics)
@@ -1176,8 +1059,6 @@ def run_transport_with_progress(
         "track_elapsed_s": float(track_elapsed_s),
         "track_estimate_s": float(_TRANSPORT_RUNTIME_HISTORY[runtime_key]),
         "runtime_key_hash": runtime_key_hash,
-        "progress_mode": "elapsed",
-        "progress_enabled": bool(progress_enabled),
         "runtime_cache_file": str(_RUNTIME_HISTORY_CACHE),
         "timing_diagnostics": bool(diag_enabled),
         "timings": {

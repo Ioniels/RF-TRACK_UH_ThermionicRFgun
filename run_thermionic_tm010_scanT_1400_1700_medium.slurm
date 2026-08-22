@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=tm010_scanT_1400_1700_fine
+#SBATCH --job-name=tm010_scanT_1400_1700_medium
 #SBATCH --partition=shared
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -11,11 +11,12 @@
 #SBATCH --error=logs/%x_%A_%a.err
 
 # Temperature scan: T = 1400 K to 1700 K in steps of 10 K (31 runs), one per array task
-# (SLURM_ARRAY_TASK_ID 0..30 -> T = 1400 + 10*task_id). `--finesse fine` sets every
-# solver/meshing resolution knob at once (rf_gun/finesse_presets.py). N=100,000 particles,
-# 2 z-snap screens (+2 auto-inserted aperture entrance/exit screens). Deflection magnet OFF:
-# the magnet forces single-threaded tracking (see rf_gun/deflection_field.py), which would
-# leave --cpus-per-task=32 mostly idle.
+# (SLURM_ARRAY_TASK_ID 0..30 -> T = 1400 + 10*task_id). `--finesse medium` sets every
+# solver/meshing resolution knob at once (rf_gun/finesse_presets.py): coarser than the `fine`
+# tier in run_thermionic_tm010_scanT_1400_1700_fine.slurm, for a faster scan. N=100,000
+# particles, 2 z-snap screens (+2 auto-inserted aperture entrance/exit screens). Deflection
+# magnet OFF: the magnet forces single-threaded tracking (see rf_gun/deflection_field.py),
+# which would leave --cpus-per-task=32 mostly idle.
 
 set -eo pipefail
 
@@ -54,7 +55,7 @@ echo "OUT_DIR=${OUT_DIR}"
 ${PY} ${SCRIPT} \
   --output "${OUT_DIR}" \
   --run-family thermionic_tm010_scanT_1400_1700 \
-  --scan-tags scanT_1400_1700 finesse_fine beam_loading space_charge \
+  --scan-tags scanT_1400_1700 finesse_medium beam_loading space_charge \
   --f_hz 2.856e9 \
   --xy_fieldmap field_maps/XYplanarSensorData.mat \
   --yz_fieldmap field_maps/YZplanarSensorData.mat \
@@ -72,7 +73,7 @@ ${PY} ${SCRIPT} \
   --ra_um 0 \
   --re_um 0 \
   --phasor_mode reconstruct \
-  --finesse fine \
+  --finesse medium \
   --phase_scan_min 0 \
   --phase_scan_max 360 \
   --emission_phase_range 180.0 \

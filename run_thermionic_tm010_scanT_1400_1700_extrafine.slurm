@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 #SBATCH --time=8:00:00
 #SBATCH --array=0-30
 #SBATCH --output=logs/%x_%A_%a.out
@@ -14,7 +14,7 @@
 # (SLURM_ARRAY_TASK_ID 0..30 -> T = 1400 + 10*task_id). `--finesse extra_fine` sets every
 # solver/meshing resolution knob to the tightest tier (rf_gun/finesse_presets.py): roughly 2x
 # finer than the `fine` tier in run_thermionic_tm010_scanT_1400_1700_fine.slurm, at a
-# proportionally longer runtime. N=1,000,000 particles, 2 z-snap screens (+2 auto-inserted
+# proportionally longer runtime. N=100,000 particles, 2 z-snap screens (+2 auto-inserted
 # aperture entrance/exit screens). Deflection magnet OFF: the magnet forces single-threaded
 # tracking (see rf_gun/deflection_field.py), which would leave --cpus-per-task=32 mostly idle.
 
@@ -54,7 +54,6 @@ echo "OUT_DIR=${OUT_DIR}"
 
 ${PY} ${SCRIPT} \
   --output "${OUT_DIR}" \
-  --progress-bar \
   --run-family thermionic_tm010_scanT_1400_1700 \
   --scan-tags scanT_1400_1700 finesse_extra_fine beam_loading space_charge \
   --f_hz 2.856e9 \
@@ -101,15 +100,13 @@ ${PY} ${SCRIPT} \
   --aperture_start_m 0.028854 \
   --aperture_end_m 0.040589 \
   --aperture_diameter_mm 5.0546 \
-  --n_particles 1000000 \
+  --n_particles 100000 \
   --n_z_snap 2 \
   --t_cathode_k "${T_CATHODE_K}" \
   --save-figures \
   --save-screen-hdf5 \
   --no-save-screen-json \
   --save-openpmd-beam \
-  --save-beam-json \
-  --save-beam-summary \
   --save-lost-particles
 
 echo "Run T=${T_CATHODE_K}K completed successfully."
