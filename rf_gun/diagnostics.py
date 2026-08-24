@@ -1,9 +1,11 @@
 """Diagnostics and summary helpers shared across simulation and plotting."""
 from __future__ import annotations
 
-from typing import Any, Dict, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
+
+from .particle_tags import K_COL, MAX_PHYSICAL_KINETIC_ENERGY_MEV
 
 
 def _second_moment_twiss(u: np.ndarray, pu: np.ndarray):
@@ -248,18 +250,20 @@ def classify_particle_outcomes(
     lost_table: np.ndarray | None = None,
     id_col: int = 6,
     lost_id_col: int = -1,
+    k_col: int = K_COL,
+    max_kinetic_energy_mev: Optional[float] = MAX_PHYSICAL_KINETIC_ENERGY_MEV,
 ):
-    """Classify particles into transmitted/backward (from `final`=`Bout`'s own z/pz) and lost
-    (id-based, from RF-Track's own `lost_table` -- populated by the dynamic aperture removing a
-    particle during tracking, see `rf_gun.aperture`/`rf_gun.particle_tags`).
+    """Classify particles into transmitted/backward (from `final`=`Bout`'s own z/pz) and lost.
 
-    `final` only ever contains particles the dynamic aperture did *not* remove, so
-    transmitted/backward here already exclude "lost" by construction; "lost" is filled in
-    separately from `lost_table`'s own recorded per-particle state at the moment of removal
-    (position/momentum/time), matched back to `initial` by `%id` for its own initial_pz/t0 stats.
-
-    No implicit plausibility filtering (energy/radius cutoff) -- any narrowing of "backward"
-    should stay visible and data-driven, see `rf_gun.particle_tags.backward_ids_from_bout`.
+    "Lost" combines two disjoint sources: RF-Track's own `lost_table` (particles the dynamic
+    aperture removed during tracking, id-based, see `rf_gun.aperture`/`rf_gun.particle_tags`) and
+    any `final` (`Bout`) row whose kinetic energy (`%K`, column `k_col`) is non-finite or exceeds
+    `max_kinetic_energy_mev` -- see `rf_gun.particle_tags.MAX_PHYSICAL_KINETIC_ENERGY_MEV`'s
+    docstring for why this backstop exists (a particle can stay within the dynamic aperture's
+    transverse bound yet still blow up numerically in momentum, and would otherwise be silently
+    counted as "transmitted"). Pass `max_kinetic_energy_mev=None` to disable this second source and
+    recover the old lost_table-only behavior. transmitted/backward exclude both lost sources by
+    construction.
     """
     initial = np.asarray(initial)
     final = np.asarray(final)
@@ -268,11 +272,21 @@ def classify_particle_outcomes(
     if final.ndim != 2 or final.shape[0] == 0 or final.shape[1] < 6:
         transmitted_mask = np.zeros((0,), dtype=bool)
         backward_mask = np.zeros((0,), dtype=bool)
+        unphysical_mask = np.zeros((0,), dtype=bool)
     else:
-        zf = np.asarray(final[:, 4], dtype=float)
-        pzf = np.asarray(final[:, 5], dtype=float)
-        transmitted_mask = np.isfinite(zf) & np.isfinite(pzf) & (zf > 0.0) & (pzf > 0.0)
-        backward_mask = np.isfinite(zf) & np.isfinite(pzf) & ((zf <= 0.0) | (pzf < 0.0))
+        zf_full = np.asarray(final[:, 4], dtype=float)
+        pzf_full = np.asarray(final[:, 5], dtype=float)
+        if max_kinetic_energy_mev is not None and final.shape[1] > k_col:
+            kf_full = np.asarray(final[:, k_col], dtype=float)
+            unphysical_mask = ~np.isfinite(kf_full) | (np.abs(kf_full) > float(max_kinetic_energy_mev))
+        else:
+            unphysical_mask = np.zeros(final.shape[0], dtype=bool)
+        transmitted_mask = (
+            np.isfinite(zf_full) & np.isfinite(pzf_full) & (zf_full > 0.0) & (pzf_full > 0.0) & ~unphysical_mask
+        )
+        backward_mask = (
+            np.isfinite(zf_full) & np.isfinite(pzf_full) & ((zf_full <= 0.0) | (pzf_full < 0.0)) & ~unphysical_mask
+        )
 
     n_match = min(int(initial.shape[0]) if initial.ndim == 2 else 0, int(final.shape[0]) if final.ndim == 2 else 0)
     pz0 = np.asarray(initial[:n_match, 5], dtype=float) if initial.ndim == 2 and initial.shape[1] > 5 and n_match > 0 else None
@@ -281,13 +295,15 @@ def classify_particle_outcomes(
     t0 = np.asarray(t0_mm_c, dtype=float).reshape(-1)[:n_match] if t0_mm_c is not None and n_match > 0 else None
     transmitted_mask_match = transmitted_mask[:n_match] if transmitted_mask.size >= n_match else transmitted_mask
     backward_mask_match = backward_mask[:n_match] if backward_mask.size >= n_match else backward_mask
+    unphysical_mask_match = unphysical_mask[:n_match] if unphysical_mask.size >= n_match else unphysical_mask
 
     n_trans = int(np.sum(transmitted_mask))
     n_back = int(np.sum(backward_mask))
+    n_unphysical = int(np.sum(unphysical_mask))
 
     lost_arr = np.asarray(lost_table, dtype=float) if lost_table is not None else np.zeros((0, 0))
     has_lost = lost_arr.ndim == 2 and lost_arr.shape[0] > 0
-    n_lost = int(lost_arr.shape[0]) if has_lost else 0
+    n_lost_table = int(lost_arr.shape[0]) if has_lost else 0
 
     lost_pzf_mean = np.nan
     lost_zf_mean_mm = np.nan
@@ -312,6 +328,27 @@ def classify_particle_outcomes(
     def frac(n: int) -> float:
         return float(n / n0) if n0 > 0 else np.nan
 
+    def combine_mean(mean_a: float, n_a: int, mean_b: float, n_b: int) -> float:
+        """Weighted mean across two disjoint groups (lost_table rows vs. unphysical-K `final`
+        rows) -- these describe the same "lost" bucket but come from different arrays, so their
+        per-group means must be recombined by count rather than concatenated directly."""
+        a_ok = n_a > 0 and np.isfinite(mean_a)
+        b_ok = n_b > 0 and np.isfinite(mean_b)
+        if a_ok and b_ok:
+            return float((mean_a * n_a + mean_b * n_b) / (n_a + n_b))
+        if a_ok:
+            return float(mean_a)
+        if b_ok:
+            return float(mean_b)
+        return np.nan
+
+    unphys_initial_pz_mean = _masked_mean(pz0, unphysical_mask_match) if pz0 is not None else np.nan
+    unphys_final_pz_mean = _masked_mean(pzf, unphysical_mask_match) if pzf is not None else np.nan
+    unphys_initial_t0_mean = _masked_mean(t0, unphysical_mask_match) if t0 is not None else np.nan
+    unphys_final_z_mean_mm = 1e3 * _masked_mean(zf, unphysical_mask_match) if zf is not None else np.nan
+
+    n_lost = n_lost_table + n_unphysical
+
     return {
         "n_initial": n0,
         "n_final": int(final.shape[0]) if final.ndim == 2 else 0,
@@ -334,10 +371,12 @@ def classify_particle_outcomes(
         "lost": {
             "count": n_lost,
             "fraction": frac(n_lost),
-            "initial_pz_mean": lost_pz0_mean,
-            "final_pz_mean": lost_pzf_mean,
-            "initial_t0_mean_mm_c": lost_t0_mean,
-            "final_z_mean_mm": lost_zf_mean_mm,
+            "count_aperture": n_lost_table,
+            "count_unphysical_energy": n_unphysical,
+            "initial_pz_mean": combine_mean(lost_pz0_mean, n_lost_table, unphys_initial_pz_mean, n_unphysical),
+            "final_pz_mean": combine_mean(lost_pzf_mean, n_lost_table, unphys_final_pz_mean, n_unphysical),
+            "initial_t0_mean_mm_c": combine_mean(lost_t0_mean, n_lost_table, unphys_initial_t0_mean, n_unphysical),
+            "final_z_mean_mm": combine_mean(lost_zf_mean_mm, n_lost_table, unphys_final_z_mean_mm, n_unphysical),
         },
     }
 

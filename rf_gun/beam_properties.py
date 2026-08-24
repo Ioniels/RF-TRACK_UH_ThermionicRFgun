@@ -138,30 +138,32 @@ def transmission_curves(
     tags: ParticleTags,
     n_initial: int,
 ) -> Dict[str, np.ndarray]:
-    """Three transmission fractions vs z, all relative to `n_initial`:
+    """Two transmission fractions vs z, both relative to `n_initial`:
 
-    - `raw`: every particle recorded at that screen, no filtering at all.
-    - `forward_only`: backward-tagged particles removed (see `rf_gun.particle_tags`).
-    - `forward_and_surviving`: also removes particles the dynamic aperture has by then removed
-      (identical to `forward_only` if nothing has been lost yet at that screen's z).
+    - `not_lost`: particles that survive the dynamic aperture (id not in `tags.lost_ids`),
+      whether forward- or backward-going -- "did the aperture ever remove this particle," the
+      same eventual-fate convention already used for backward tagging (computed once from the
+      complete run, applied identically at every screen -- a screen upstream of where a particle
+      is eventually removed still correctly shows it counted out here, since its fate is already
+      sealed by the time this curve is read).
+    - `forward_and_surviving`: also excludes backward-going particles -- forward-going AND
+      surviving the aperture.
     """
-    raw, fwd, surv = [], [], []
+    not_lost, fwd_surv = [], []
     for z_m, M in zip(z_snaps, M_snaps):
         arr = np.asarray(M, dtype=float)
         n = int(arr.shape[0])
-        raw.append(n)
         if n == 0:
-            fwd.append(0)
-            surv.append(0)
+            not_lost.append(0)
+            fwd_surv.append(0)
             continue
         is_backward, is_lost = tag_mask(arr, tags)
-        fwd.append(int(np.sum(~is_backward)))
-        surv.append(int(np.sum(~is_backward & ~is_lost)))
+        not_lost.append(int(np.sum(~is_lost)))
+        fwd_surv.append(int(np.sum(~is_backward & ~is_lost)))
 
     n0 = max(int(n_initial), 1)
     return {
         "z_mm": 1e3 * np.asarray(z_snaps, dtype=float),
-        "raw": np.asarray(raw, dtype=float) / n0,
-        "forward_only": np.asarray(fwd, dtype=float) / n0,
-        "forward_and_surviving": np.asarray(surv, dtype=float) / n0,
+        "not_lost": np.asarray(not_lost, dtype=float) / n0,
+        "forward_and_surviving": np.asarray(fwd_surv, dtype=float) / n0,
     }

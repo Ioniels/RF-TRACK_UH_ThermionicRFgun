@@ -278,6 +278,11 @@ def _particle_classes_summary(classes: dict[str, Any], n_initial: int) -> dict[s
             "mean_final_z_mm": rec.get("final_z_mean_mm", None),
             "mean_final_pz_MeV_c": rec.get("final_pz_mean", None),
         }
+        if key == "lost":
+            # "lost" combines two disjoint sources -- see
+            # rf_gun.diagnostics.classify_particle_outcomes's docstring.
+            out["classes"][key]["count_aperture"] = int(rec.get("count_aperture", 0) or 0)
+            out["classes"][key]["count_unphysical_energy"] = int(rec.get("count_unphysical_energy", 0) or 0)
     return out
 
 

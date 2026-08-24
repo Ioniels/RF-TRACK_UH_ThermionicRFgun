@@ -535,7 +535,6 @@ def save_run_figures(
         B0=B0,
         thermo_info=thermo_info,
         tags=tags,
-        exclude_backward_losses=exclude_backward_losses,
         phase_fmt=phase_fmt,
     )
     saved += _capture_current_figure("screen_spectra", output_dir)

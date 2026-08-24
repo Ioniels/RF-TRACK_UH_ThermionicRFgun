@@ -13,6 +13,29 @@ from .phase_space import _phase_space_panel
 from .style import DEFAULT_PLOT_STYLE, COLOR_SECONDARY
 
 
+def _robust_range(*arrays: np.ndarray, lo_pct: float = 1.0, hi_pct: float = 99.0, pad_frac: float = 0.08):
+    """`(lo, hi)` axis range from the `lo_pct`-`hi_pct` percentile of the concatenated, finite
+    values in `arrays`, padded by `pad_frac` of the span -- robust to the handful of extreme
+    ballistic-reconstruction outliers (near-zero-Pz stragglers, see `rf_gun.back_bombardment`'s
+    module docstring) that would otherwise single-handedly dictate a plain min/max axis limit and
+    squash every other point into an unreadable sliver. Returns `None` if there's no finite data
+    (caller should skip setting limits in that case, falling back to matplotlib's own autoscale).
+    """
+    vals = np.concatenate([np.asarray(a, dtype=float).reshape(-1) for a in arrays]) if arrays else np.asarray([])
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return None
+    lo, hi = np.percentile(vals, [lo_pct, hi_pct])
+    if hi <= lo:
+        lo, hi = float(np.min(vals)), float(np.max(vals))
+        if hi <= lo:
+            pad = max(abs(lo), 1.0) * pad_frac
+            return lo - pad, hi + pad
+    span = hi - lo
+    pad = span * pad_frac
+    return float(lo - pad), float(hi + pad)
+
+
 def _sci(value: float, precision: int = 2) -> str:
     """`1.08e-04` -> `1.08\\times10^{-4}` -- proper mathtext scientific notation for titles.
 
@@ -115,6 +138,15 @@ def plot_back_bombardment_screen_reach(
         if np.any(reached):
             sc = ax.scatter(xi[reached], yi[reached], s=10, c=last_z[reached], cmap=cmap, zorder=2)
             fig.colorbar(sc, ax=ax, label=r"furthest screen reached $(\mathrm{mm})$")
+        # Robust (percentile-based) axis limits -- a handful of extreme ballistic-reconstruction
+        # outliers would otherwise single-handedly set the visible range via matplotlib's default
+        # exact-min/max autoscale, squashing the rest of the population into an unreadable sliver.
+        xlim = _robust_range(xi)
+        ylim = _robust_range(yi)
+        if xlim is not None:
+            ax.set_xlim(*xlim)
+        if ylim is not None:
+            ax.set_ylim(*ylim)
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
         ax.set_title(title)
@@ -165,6 +197,14 @@ def plot_back_bombardment_screen_reach(
     ax3.axhline(0.0, color="gray", ls=":", lw=1)
     ax3.axvline(0.0, color="gray", ls="-", lw=1)
     ax3.set_xlim(x_bout_nominal * 1.2, max_screen_z * 1.1 if max_screen_z > 0 else 1.0)
+    # Robust y-limit: a screen's own Pz can occasionally carry an extreme value (same
+    # ballistic-reconstruction/near-zero-Pz pathology noted elsewhere), which would otherwise
+    # single-handedly stretch this axis and flatten every real trajectory into a line at y=0.
+    _traj_pz_vals = [pz_traj for _row, _pid, _z, pz_traj in trajectories]
+    _bout_pz_vals = [pz[row] for row, _pid, _z, _pz in trajectories]
+    _ylim = _robust_range(*_traj_pz_vals, np.asarray(_bout_pz_vals))
+    if _ylim is not None:
+        ax3.set_ylim(*_ylim)
     screen_ticks = np.linspace(0.0, max_screen_z if max_screen_z > 0 else 1.0, 5)
     all_ticks = [x_bout_nominal] + screen_ticks.tolist()
     ax3.set_xticks(all_ticks)
@@ -192,6 +232,10 @@ def plot_back_bombardment_energy_density(
     divides by each bin's area so the map is independent of the `bins` choice -- both needed to
     make this usable directly for a cathode temperature-rise estimate. Kinetic, not total, energy:
     only kinetic energy converts to heat on absorption.
+
+    `data.valid` already excludes non-finite/implausible-energy particles (see
+    `rf_gun.back_bombardment.compute_back_bombardment`'s `max_kinetic_energy_mev`), so `k_joules`
+    below is guaranteed finite.
     """
     import matplotlib.pyplot as plt
 
@@ -204,23 +248,25 @@ def plot_back_bombardment_energy_density(
     y = data.y_hit_mm[v]
     k_joules = kinetic_energy_joules(data)[v]
 
-    # `valid` (rf_gun.back_bombardment.compute_back_bombardment) only checks the ballistic
-    # (x, y) reconstruction's finiteness, not %E/%K -- a non-finite kinetic energy here (observed
-    # for a small number of particles that pick up an extreme kick right at a dynamic-aperture
-    # loss point) would otherwise silently turn a histogram bin, and the total, into NaN.
-    finite_k = np.isfinite(k_joules)
-    n_excluded = int((~finite_k).sum())
-    if n_excluded > 0:
-        print(
-            f"Warning: excluding {n_excluded} of {finite_k.size} back-bombardment particle(s) "
-            "with non-finite kinetic energy from the energy-density map and total."
-        )
-    x, y, k_joules = x[finite_k], y[finite_k], k_joules[finite_k]
-    if x.size == 0:
-        print("No back-bombardment particles with a finite kinetic energy.")
-        return None
-
-    counts, xedges, yedges = np.histogram2d(x, y, bins=bins, weights=k_joules)
+    # Robust (percentile-based) bin range -- `valid` (rf_gun.back_bombardment) only bounds
+    # |x_hit|/|y_hit| by the field map's full r_max_mm extent, generous compared to the cathode's
+    # actual footprint, so a handful of wide-radius reconstructions would otherwise zoom the whole
+    # map out far past where the real deposited-energy density lives.
+    xrange = _robust_range(x)
+    yrange = _robust_range(y)
+    have_range = xrange is not None and yrange is not None
+    if have_range:
+        n_outside = int(np.sum((x < xrange[0]) | (x > xrange[1]) | (y < yrange[0]) | (y > yrange[1])))
+        if n_outside > 0:
+            print(
+                f"Note: {n_outside} of {x.size} back-bombardment particle(s) fall outside the "
+                "plotted map's range (kept in the reported total, dropped from the density map "
+                "so a few wide-radius outliers don't dictate the whole map's scale)."
+            )
+    counts, xedges, yedges = np.histogram2d(
+        x, y, bins=bins, weights=k_joules,
+        range=[xrange, yrange] if have_range else None,
+    )
     bin_area_mm2 = float(xedges[1] - xedges[0]) * float(yedges[1] - yedges[0])
     density = counts / bin_area_mm2 if bin_area_mm2 > 0.0 else counts
     total_j = float(np.sum(k_joules))
@@ -252,6 +298,10 @@ def plot_back_bombardment_power_density_vs_time(
     heat flux, W/mm^2) -- a first-order estimate that assumes the deposited heat spreads evenly
     over the nominal cathode area, not the (generally larger) actual bombarded footprint shown by
     `plot_back_bombardment_energy_density`.
+
+    `data.valid` already excludes non-finite/implausible-energy particles (see
+    `rf_gun.back_bombardment.compute_back_bombardment`'s `max_kinetic_energy_mev`), so `k_joules`
+    below is guaranteed finite.
     """
     import matplotlib.pyplot as plt
 
@@ -263,7 +313,20 @@ def plot_back_bombardment_power_density_vs_time(
     t_s = data.t_hit_s[v]
     k_joules = kinetic_energy_joules(data)[v]
 
-    counts, edges = np.histogram(t_s, bins=bins, weights=k_joules)
+    # Robust (percentile-based) bin range -- `valid` doesn't bound `t_hit_s` at all (only
+    # x_hit/y_hit/Pz), so a near-zero-Pz straggler's reconstructed re-hit time can be extreme even
+    # though its position looks fine; unrestricted, that single point would stretch the whole time
+    # axis and flatten every real re-hit into one bin.
+    t_range = _robust_range(t_s)
+    if t_range is not None:
+        n_outside = int(np.sum((t_s < t_range[0]) | (t_s > t_range[1])))
+        if n_outside > 0:
+            print(
+                f"Note: {n_outside} of {t_s.size} back-bombardment particle(s) fall outside the "
+                "plotted time range (kept in the reported total, dropped from the histogram so a "
+                "few extreme re-hit-time outliers don't dictate the whole axis scale)."
+            )
+    counts, edges = np.histogram(t_s, bins=bins, weights=k_joules, range=t_range)
     bin_width_s = float(edges[1] - edges[0])
     cathode_area_mm2 = float(np.pi * float(cathode_radius_mm) ** 2)
     power_density = counts / bin_width_s / cathode_area_mm2 if bin_width_s > 0.0 and cathode_area_mm2 > 0.0 else counts

@@ -14,6 +14,7 @@ from .back_bombardment import (
     plot_back_bombardment_energy_density,
     plot_back_bombardment_power_density_vs_time,
 )
+from .aperture import plot_dynamic_aperture_losses
 from .acceptance_scan import plot_acceptance_scan
 from .save_run import (
     save_run_figures,
@@ -52,6 +53,7 @@ __all__ = [
     "plot_back_bombardment_screen_reach",
     "plot_back_bombardment_energy_density",
     "plot_back_bombardment_power_density_vs_time",
+    "plot_dynamic_aperture_losses",
     "plot_acceptance_scan",
     "save_run_figures",
     "plot_class_conditioned_histograms",

@@ -599,18 +599,31 @@ def plot_spectra(
     thermo_info: dict | None = None,
     *,
     tags: ParticleTags | None = None,
-    exclude_backward_losses: bool = False,
     phase_fmt: str = EXTENDED_PHASE_FMT_DEFAULT,
 ):
     """2x3 spectra figure, no figure-level title: Initial longitudinal kinetic energy, Initial-time,
-    and Initial radial distributions (top row, split into forward vs. backward-and-lost by `%id`,
-    with a shared legend above the row); Output longitudinal kinetic energy, Output time-of-flight,
-    and Output radial distributions (bottom row, the forward population -- already
-    backward-excluded when `exclude_backward_losses=True`, the default -- split further into
-    forward-transmitted vs. forward-but-removed-by-the-dynamic-aperture, by `%id` against
-    `tags.lost_ids`, with its own shared legend positioned in the gap above that row). If nothing
-    was removed, `tags` reports no lost particles, so the "not transmitted" series is simply
-    empty and the bottom row degrades gracefully to a single series.
+    and Initial radial distributions (top row, split by `%id` into three eventual-fate categories --
+    forward-transmitted, backward-transmitted, and removed by the dynamic aperture -- with a shared
+    legend above the row); Output longitudinal kinetic energy, Output time-of-flight, and Output
+    radial distributions (bottom row, `Bout`'s own population split into forward vs. backward, with
+    its own shared legend positioned in the gap above that row). There is no "lost" category shown
+    in the bottom row, but a `Bout` row tagged lost (see below) is dropped entirely rather than
+    folded into forward or backward -- it belongs to neither.
+
+    A particle removed by the dynamic aperture during tracking is gone from the live bunch from
+    that point on, so it can never be a `Bout` row -- but `tags.lost_ids` (see
+    `rf_gun.particle_tags.build_particle_tags`) also includes any `Bout` row whose kinetic energy is
+    non-finite or exceeds `rf_gun.particle_tags.MAX_PHYSICAL_KINETIC_ENERGY_MEV`, a numerical
+    artifact (e.g. a particle that grazed a field singularity) that *does* still reach `Bout`. Such
+    a row is excluded from both bottom-row categories here -- left in, it would otherwise silently
+    land in "forward" (its z/pz still nominally look forward-going) and dominate the Output K_z
+    histogram with an absurd value.
+
+    Color convention *specific to this figure* (deliberately different from the rest of this
+    project's backward=red/lost=green convention, at the user's request): blue (`COLOR_PRIMARY`)
+    is always forward; green (`COLOR_LOST`) is always backward (in either row); red
+    (`COLOR_SECONDARY`) is lost, top row only -- the bottom row never shows it as a third category,
+    dropping any lost-tagged row instead (see above).
 
     Every time-axis panel (emission-time, output ToF) reports the same two physical quantities as
     `plot_emission_history`'s J(t) panel: current density J (A/cm^2, left) and current I (A,
@@ -636,14 +649,6 @@ def plot_spectra(
     p_x/p_y are the beam's transverse degrees of freedom (already shown in the phase-space scatter
     panels elsewhere) and mixing them into this energy axis would conflate a longitudinal spectrum
     with transverse spread.
-
-    `exclude_backward_losses` controls only whether backward-tagged particles are removed before
-    histogramming the *output* population (via `%id` lookup against `tags`, not `Bout`'s own z/pz
-    directly). `Bout` only ever contains particles the dynamic aperture did not remove, and a
-    particle's fate is fully settled by the time it reaches `Bout`, so `tag_mask` is read
-    unconditionally here. The *emission*-side panels (top row) always show both the forward and
-    backward-and-lost populations, colored, regardless of `exclude_backward_losses` -- that split
-    is the point of those two panels.
     """
     import matplotlib.pyplot as plt
     from matplotlib.patches import Patch
@@ -659,15 +664,14 @@ def plot_spectra(
     if tags is not None and Mf_f_all.shape[0]:
         is_backward, is_lost = tag_mask(Mf_f_all, tags)
 
-    Mf_f_mask = (finite_z & ~is_backward) if exclude_backward_losses else finite_z
-    Mf_f = Mf_f_all[Mf_f_mask]
+    # Exclude a lost-tagged `Bout` row (see this function's docstring) from both bottom-row
+    # categories -- it is neither a real forward nor a real backward output particle.
+    keep = finite_z & ~is_lost
+    Mf_f = Mf_f_all[keep]
     if Mf_f.shape[0] == 0:
         print("No particles in output bunch.")
         return
-    # Aligned to `Mf_f`'s rows: True where that forward particle was removed by the dynamic
-    # aperture. Empty (never True) if nothing was removed -- the "not transmitted" series below
-    # is simply absent then, and the bottom row degrades gracefully to a single-series appearance.
-    lost_f = is_lost[Mf_f_mask]
+    is_backward_f = is_backward[keep]
 
     pz_f = Mf_f[:, 5]
     tof_ns_all = Mf_f[:, 4] * _MM_C_TO_NS
@@ -677,15 +681,15 @@ def plot_spectra(
     finite_tof = np.isfinite(tof_ns_all)
     finite_kz_out = np.isfinite(kz_out_keV_all)
     finite_r_out = np.isfinite(r_out_mm_all)
-    tof_ns_trans = tof_ns_all[finite_tof & ~lost_f]
-    tof_ns_untrans = tof_ns_all[finite_tof & lost_f]
-    kz_out_keV_trans = kz_out_keV_all[finite_kz_out & ~lost_f]
-    kz_out_keV_untrans = kz_out_keV_all[finite_kz_out & lost_f]
-    r_out_mm_trans = r_out_mm_all[finite_r_out & ~lost_f]
-    r_out_mm_untrans = r_out_mm_all[finite_r_out & lost_f]
+    tof_ns_fwd = tof_ns_all[finite_tof & ~is_backward_f]
+    tof_ns_bwd = tof_ns_all[finite_tof & is_backward_f]
+    kz_out_keV_fwd = kz_out_keV_all[finite_kz_out & ~is_backward_f]
+    kz_out_keV_bwd = kz_out_keV_all[finite_kz_out & is_backward_f]
+    r_out_mm_fwd = r_out_mm_all[finite_r_out & ~is_backward_f]
+    r_out_mm_bwd = r_out_mm_all[finite_r_out & is_backward_f]
 
-    mask_good = finite_z & ~is_backward
-    mask_bad = finite_z & is_backward
+    mask_good = finite_z & ~is_backward & ~is_lost
+    mask_bad = finite_z & is_backward & ~is_lost
 
     ids_exit = _try_get_ids(Mf_f_all)
     ids_launch = None
@@ -697,50 +701,52 @@ def plot_spectra(
         except Exception:
             M0, ids_launch = None, None
 
+    lost_ids = tags.lost_ids if tags is not None else frozenset()
+
     def _split_by_id(values_at_launch: np.ndarray):
-        """(good, bad) split of a per-launch-particle quantity, matched to the exit population's
-        forward/backward split by `%id`; particles present at launch but absent at exit (lost)
-        join `bad`. Returns empty arrays if id-matching isn't possible."""
+        """(forward, backward, lost) split of a per-launch-particle quantity, by each particle's
+        eventual fate: forward-transmitted and backward-transmitted come from the exit (`Bout`)
+        population's own forward/backward split by `%id`; lost is matched directly against
+        `tags.lost_ids` (a removed particle can never reach `Bout`, so this is exhaustive with the
+        other two). Returns three empty arrays if id-matching isn't possible."""
         if ids_launch is None or ids_exit is None:
-            return np.array([]), np.array([])
+            return np.array([]), np.array([]), np.array([])
         vals = np.asarray(values_at_launch, dtype=float)
         by_id = {int(pid): v for pid, v in zip(ids_launch, vals)}
         v_exit = np.array([by_id.get(int(pid), np.nan) for pid in ids_exit], dtype=float)
-        good = v_exit[mask_good]
-        bad = v_exit[mask_bad]
-        ids_exit_set = set(int(x) for x in ids_exit.tolist())
-        lost_mask = np.array([int(pid) not in ids_exit_set for pid in ids_launch.tolist()])
+        fwd = v_exit[mask_good]
+        bwd = v_exit[mask_bad]
+        lost_mask = np.array([int(pid) in lost_ids for pid in ids_launch.tolist()])
         lost_vals = vals[lost_mask]
-        good = good[np.isfinite(good)]
-        bad = np.concatenate([bad[np.isfinite(bad)], lost_vals[np.isfinite(lost_vals)]])
-        return good, bad
+        fwd = fwd[np.isfinite(fwd)]
+        bwd = bwd[np.isfinite(bwd)]
+        lost_vals = lost_vals[np.isfinite(lost_vals)]
+        return fwd, bwd, lost_vals
 
-    t_emit_ns_good = np.array([])
-    t_emit_ns_bad = np.array([])
+    t_emit_ns_fwd = t_emit_ns_bwd = t_emit_ns_lost = np.array([])
     if thermo_info is not None:
         t_emit_s = thermo_info.get("t_emit_s", None)
         if t_emit_s is not None:
             t_emit_s = np.asarray(t_emit_s, dtype=float).reshape(-1)
             if ids_launch is not None and ids_launch.size == t_emit_s.size:
-                g, b = _split_by_id(t_emit_s)
-                t_emit_ns_good, t_emit_ns_bad = g * 1e9, b * 1e9
+                f, b, l = _split_by_id(t_emit_s)
+                t_emit_ns_fwd, t_emit_ns_bwd, t_emit_ns_lost = f * 1e9, b * 1e9, l * 1e9
             elif t_emit_s.size == Mf_f_all.shape[0]:
-                t_emit_ns_good = t_emit_s[mask_good] * 1e9
-                t_emit_ns_bad = t_emit_s[mask_bad] * 1e9
+                t_emit_ns_fwd = t_emit_s[mask_good] * 1e9
+                t_emit_ns_bwd = t_emit_s[mask_bad] * 1e9
 
-    kz0_keV_good = np.array([])
-    kz0_keV_bad = np.array([])
+    kz0_keV_fwd = kz0_keV_bwd = kz0_keV_lost = np.array([])
     if M0 is not None and M0.ndim == 2 and M0.shape[1] > 5 and ids_launch is not None:
         pz0 = np.asarray(M0[:, 5], dtype=float)
-        g, b = _split_by_id(pz0)
-        kz0_keV_good = (np.sqrt(g**2 + ME_MEV**2) - ME_MEV) * 1e3 if g.size else g
-        kz0_keV_bad = (np.sqrt(b**2 + ME_MEV**2) - ME_MEV) * 1e3 if b.size else b
+        f, b, l = _split_by_id(pz0)
+        kz0_keV_fwd = (np.sqrt(f**2 + ME_MEV**2) - ME_MEV) * 1e3 if f.size else f
+        kz0_keV_bwd = (np.sqrt(b**2 + ME_MEV**2) - ME_MEV) * 1e3 if b.size else b
+        kz0_keV_lost = (np.sqrt(l**2 + ME_MEV**2) - ME_MEV) * 1e3 if l.size else l
 
-    r0_mm_good = np.array([])
-    r0_mm_bad = np.array([])
+    r0_mm_fwd = r0_mm_bwd = r0_mm_lost = np.array([])
     if M0 is not None and M0.ndim == 2 and M0.shape[1] > 5 and ids_launch is not None:
         r0_mm_all = np.sqrt(np.asarray(M0[:, 0], dtype=float) ** 2 + np.asarray(M0[:, 2], dtype=float) ** 2)
-        r0_mm_good, r0_mm_bad = _split_by_id(r0_mm_all)
+        r0_mm_fwd, r0_mm_bwd, r0_mm_lost = _split_by_id(r0_mm_all)
 
     # Real-electron weighting, shared by every panel below: every histogram here is built from a
     # subset of the same N_total macroparticles launched from B0, and each macroparticle
@@ -829,15 +835,15 @@ def plot_spectra(
 
     fig, axes = plt.subplots(2, 3, figsize=(19.5, 9), gridspec_kw={"hspace": 0.5, "wspace": 0.45})
 
-    # -- Initial longitudinal kinetic energy, K_z (top row, col 1) --
-    kz0_bins = np.concatenate([arr for arr in (kz0_keV_good, kz0_keV_bad) if arr.size > 0])
+    # -- Initial longitudinal kinetic energy, K_z (top row, col 1) -- 3-way: forward/backward/lost.
+    kz0_bins = np.concatenate([arr for arr in (kz0_keV_fwd, kz0_keV_bwd, kz0_keV_lost) if arr.size > 0])
     kz0_bin_width_keV = float(np.diff(np.histogram_bin_edges(kz0_bins, bins=60))[0]) if kz0_bins.size > 1 else np.nan
     kz_weight = None
     if q_macro is not None and tau_s is not None and area_cm2 is not None and np.isfinite(kz0_bin_width_keV) and kz0_bin_width_keV > 0.0:
         kz_weight = (q_macro / tau_s * 1e3) / kz0_bin_width_keV / area_cm2
     _dual_axis_hist(
         axes[0, 0],
-        [(kz0_keV_bad, COLOR_SECONDARY), (kz0_keV_good, COLOR_PRIMARY)],
+        [(kz0_keV_lost, COLOR_SECONDARY), (kz0_keV_bwd, COLOR_LOST), (kz0_keV_fwd, COLOR_PRIMARY)],
         weight=kz_weight,
         xlabel=r"$K_{z,\mathrm{emit}}\,(\mathrm{keV})$",
         y_density=r"$dJ/dK_z\,(\mathrm{mA\,cm^{-2}\,keV^{-1}})$",
@@ -845,15 +851,15 @@ def plot_spectra(
         title="Initial Longitudinal Kinetic Energy distribution",
     )
 
-    # -- Initial-time (top row, col 2) --
-    t_emit_bins = np.concatenate([arr for arr in (t_emit_ns_good, t_emit_ns_bad) if arr.size > 0])
+    # -- Initial-time (top row, col 2) -- 3-way: forward/backward/lost.
+    t_emit_bins = np.concatenate([arr for arr in (t_emit_ns_fwd, t_emit_ns_bwd, t_emit_ns_lost) if arr.size > 0])
     t_emit_bin_width_s = float(np.diff(np.histogram_bin_edges(t_emit_bins, bins=60))[0]) * 1e-9 if t_emit_bins.size > 1 else np.nan
     t_weight = None
     if q_macro is not None and area_cm2 is not None and np.isfinite(t_emit_bin_width_s) and t_emit_bin_width_s > 0.0:
         t_weight = q_macro / t_emit_bin_width_s / area_cm2
     _dual_axis_hist(
         axes[0, 1],
-        [(t_emit_ns_bad, COLOR_SECONDARY), (t_emit_ns_good, COLOR_PRIMARY)],
+        [(t_emit_ns_lost, COLOR_SECONDARY), (t_emit_ns_bwd, COLOR_LOST), (t_emit_ns_fwd, COLOR_PRIMARY)],
         weight=t_weight,
         xlabel=r"$t_{\mathrm{emit}}\,(\mathrm{ns})$",
         y_density=r"$J\,(\mathrm{A\,cm^{-2}})$",
@@ -861,23 +867,24 @@ def plot_spectra(
         title="Initial-time distribution",
     )
 
-    # -- Initial radial distribution (top row, col 3) --
+    # -- Initial radial distribution (top row, col 3) -- 3-way: forward/backward/lost.
     _radial_density_hist(
         axes[0, 2],
-        [(r0_mm_bad, COLOR_SECONDARY), (r0_mm_good, COLOR_PRIMARY)],
+        [(r0_mm_lost, COLOR_SECONDARY), (r0_mm_bwd, COLOR_LOST), (r0_mm_fwd, COLOR_PRIMARY)],
         title="Initial radial distribution",
     )
 
-    # -- Output longitudinal kinetic energy, K_z (bottom row, col 1) -- split forward-transmitted
-    # vs. forward-not-transmitted (lost) instead of one undifferentiated forward series.
-    kz_out_bins = np.concatenate([arr for arr in (kz_out_keV_trans, kz_out_keV_untrans) if arr.size > 0])
+    # -- Output longitudinal kinetic energy, K_z (bottom row, col 1) -- forward vs. backward; no
+    # "lost" category here (any lost-tagged row was already dropped from `Mf_f`/`is_backward_f`
+    # above, see this function's docstring).
+    kz_out_bins = np.concatenate([arr for arr in (kz_out_keV_fwd, kz_out_keV_bwd) if arr.size > 0])
     kz_out_bin_width_keV = float(np.diff(np.histogram_bin_edges(kz_out_bins, bins=60))[0]) if kz_out_bins.size > 1 else np.nan
     kz_out_weight = None
     if q_macro is not None and tau_s is not None and area_cm2 is not None and np.isfinite(kz_out_bin_width_keV) and kz_out_bin_width_keV > 0.0:
         kz_out_weight = (q_macro / tau_s * 1e3) / kz_out_bin_width_keV / area_cm2
     _dual_axis_hist(
         axes[1, 0],
-        [(kz_out_keV_untrans, COLOR_LOST), (kz_out_keV_trans, COLOR_PRIMARY)],
+        [(kz_out_keV_bwd, COLOR_LOST), (kz_out_keV_fwd, COLOR_PRIMARY)],
         weight=kz_out_weight,
         xlabel=r"$K_z\,(\mathrm{keV})$",
         y_density=r"$dJ/dK_z\,(\mathrm{mA\,cm^{-2}\,keV^{-1}})$",
@@ -885,15 +892,15 @@ def plot_spectra(
         title="Output Longitudinal Kinetic Energy distribution",
     )
 
-    # -- Output time-of-flight (bottom row, col 2) -- same forward-transmitted/not split --
-    tof_bins = np.concatenate([arr for arr in (tof_ns_trans, tof_ns_untrans) if arr.size > 0])
+    # -- Output time-of-flight (bottom row, col 2) -- same forward/backward split --
+    tof_bins = np.concatenate([arr for arr in (tof_ns_fwd, tof_ns_bwd) if arr.size > 0])
     tof_bin_width_s = float(np.diff(np.histogram_bin_edges(tof_bins, bins=60))[0]) * 1e-9 if tof_bins.size > 1 else np.nan
     tof_weight = None
     if q_macro is not None and area_cm2 is not None and np.isfinite(tof_bin_width_s) and tof_bin_width_s > 0.0:
         tof_weight = q_macro / tof_bin_width_s / area_cm2
     _dual_axis_hist(
         axes[1, 1],
-        [(tof_ns_untrans, COLOR_LOST), (tof_ns_trans, COLOR_PRIMARY)],
+        [(tof_ns_bwd, COLOR_LOST), (tof_ns_fwd, COLOR_PRIMARY)],
         weight=tof_weight,
         xlabel=r"$\mathrm{ToF}\,(\mathrm{ns})$",
         y_density=r"$J\,(\mathrm{A\,cm^{-2}})$",
@@ -901,22 +908,23 @@ def plot_spectra(
         title="Output Time-of-flight distribution",
     )
 
-    # -- Output radial distribution (bottom row, col 3) -- same forward-transmitted/not split --
+    # -- Output radial distribution (bottom row, col 3) -- same forward/backward split --
     _radial_density_hist(
         axes[1, 2],
-        [(r_out_mm_untrans, COLOR_LOST), (r_out_mm_trans, COLOR_PRIMARY)],
+        [(r_out_mm_bwd, COLOR_LOST), (r_out_mm_fwd, COLOR_PRIMARY)],
         title="Output radial distribution",
     )
 
-    # Two shared legends, one per row, since each row splits its population into a different
-    # pair of categories/colors -- a single legend can't describe both. No figure suptitle: the
-    # per-panel titles plus these two legends already say everything a title would.
+    # Two shared legends, one per row: the top row has three categories (forward/backward/lost),
+    # the bottom only two (forward/backward -- `Bout` can't contain a lost particle). No figure
+    # suptitle: the per-panel titles plus these two legends already say everything a title would.
     top_legend_handles = [
-        Patch(facecolor=COLOR_PRIMARY, edgecolor="black", label="forward"),
-        Patch(facecolor=COLOR_SECONDARY, edgecolor="black", label="backward and lost"),
+        Patch(facecolor=COLOR_PRIMARY, edgecolor="black", label="forward, passed aperture"),
+        Patch(facecolor=COLOR_LOST, edgecolor="black", label="backward, passed aperture"),
+        Patch(facecolor=COLOR_SECONDARY, edgecolor="black", label="lost (removed by aperture)"),
     ]
     fig.legend(
-        handles=top_legend_handles, loc="upper center", ncol=2, frameon=False,
+        handles=top_legend_handles, loc="upper center", ncol=3, frameon=False,
         bbox_to_anchor=(0.5, 1.02), fontsize=_LEGEND_FONTSIZE,
     )
 
@@ -928,7 +936,7 @@ def plot_spectra(
     bottom_legend_y = row1_top + 0.35 * (row0_bottom - row1_top)
     bottom_legend_handles = [
         Patch(facecolor=COLOR_PRIMARY, edgecolor="black", label="forward, transmitted"),
-        Patch(facecolor=COLOR_LOST, edgecolor="black", label="forward, not transmitted (lost)"),
+        Patch(facecolor=COLOR_LOST, edgecolor="black", label="backward, transmitted"),
     ]
     fig.legend(
         handles=bottom_legend_handles, loc="center", ncol=2, frameon=False,

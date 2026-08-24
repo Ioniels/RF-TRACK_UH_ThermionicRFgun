@@ -11,8 +11,9 @@ three-curve transmission panel here is row-count-based instead, via
 
 Color convention (see `rf_gun.plotting.style`'s module docstring): `_pair` panels (x-plane vs
 y-plane) are always blue (solid circle) vs red (dashed square); `_single` panels are blue for
-mean-type quantities, red for sigma/spread-type quantities; the 3-curve transmission panel is
-gray (raw, unfiltered baseline) / blue (forward-only) / red (forward + aperture, most filtered).
+mean-type quantities, red for sigma/spread-type quantities; the 2-curve transmission panel is
+blue (backward + forward, i.e. survived the dynamic aperture) / red (forward only, the more
+restrictive subset of that same population).
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ from typing import Any, Dict, Sequence
 
 import numpy as np
 
-from .style import COLOR_PRIMARY, COLOR_SECONDARY, COLOR_NEUTRAL
+from .style import COLOR_PRIMARY, COLOR_SECONDARY
 
 
 def _col(table: Sequence[Dict[str, Any]], key: str) -> np.ndarray:
@@ -102,8 +103,8 @@ def plot_beam_twiss_evolution(
     Row 4: energy spread (sigma_E) | time-of-flight spread (sigma_t) | mean kinetic energy.
 
     `transmission`, if given, is `rf_gun.beam_properties.transmission_curves`'s return dict
-    (`z_mm`, `raw`, `forward_only`, `forward_and_surviving`); the row-3-col-3 panel is left blank
-    (with a note) if not supplied.
+    (`z_mm`, `not_lost`, `forward_and_surviving`); the row-3-col-3 panel is left blank (with a
+    note) if not supplied.
     """
     import matplotlib.pyplot as plt
 
@@ -134,9 +135,8 @@ def plot_beam_twiss_evolution(
           r"$\varepsilon_{x,y}\,(\mathrm{mm}\cdot\mathrm{mrad})$", "Normalized emittance vs $z$")
     if transmission is not None and len(transmission.get("z_mm", [])):
         t_mm = np.asarray(transmission["z_mm"], dtype=float)
-        axes[2, 2].plot(t_mm, 100.0 * np.asarray(transmission["raw"]), "o-", ms=3, color=COLOR_NEUTRAL, label="raw")
-        axes[2, 2].plot(t_mm, 100.0 * np.asarray(transmission["forward_only"]), "s--", ms=3, color=COLOR_PRIMARY, label="forward-only")
-        axes[2, 2].plot(t_mm, 100.0 * np.asarray(transmission["forward_and_surviving"]), "^:", ms=3, color=COLOR_SECONDARY, label="forward + surviving")
+        axes[2, 2].plot(t_mm, 100.0 * np.asarray(transmission["not_lost"]), "o-", ms=3, color=COLOR_PRIMARY, label="backward + forward")
+        axes[2, 2].plot(t_mm, 100.0 * np.asarray(transmission["forward_and_surviving"]), "s--", ms=3, color=COLOR_SECONDARY, label="forward only")
         axes[2, 2].set_ylabel(r"$T\,(\%)$")
         axes[2, 2].legend(frameon=False, fontsize=8)
     else:

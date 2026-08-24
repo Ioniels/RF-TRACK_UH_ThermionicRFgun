@@ -26,12 +26,12 @@ space charge is enabled, its self-field is a small residual effect not corrected
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Optional, Sequence
 
 import numpy as np
 
 from .constants import c, q_e
-from .particle_tags import ID_COL
+from .particle_tags import ID_COL, MAX_PHYSICAL_KINETIC_ENERGY_MEV
 
 #: Column indices within `EXTENDED_PHASE_FMT` ("%X %Px %Y %Py %Z %Pz %id %t %E %K"), matching
 #: `rf_gun.particle_tags`'s convention.
@@ -83,6 +83,7 @@ def compute_back_bombardment(
     n_macroparticles: int,
     r_max_mm: float,
     id_col: int = ID_COL,
+    max_kinetic_energy_mev: Optional[float] = MAX_PHYSICAL_KINETIC_ENERGY_MEV,
 ) -> BackBombardmentData:
     """Reconstruct (x, y, t) at the z=0 crossing for every particle behind the cathode at Bout.
 
@@ -96,6 +97,17 @@ def compute_back_bombardment(
     values (near-zero Pz implies an enormous drift time to reach even a small |z|, so any nonzero
     Px/Py also implies an enormous transverse drift) -- `valid` excludes any reconstructed (x, y)
     beyond this bound, since the simulated fields don't exist out there in the first place.
+
+    `max_kinetic_energy_mev` additionally excludes any particle whose `%K` is non-finite or exceeds
+    this bound (see `rf_gun.particle_tags.MAX_PHYSICAL_KINETIC_ENERGY_MEV`) -- a particle that
+    grazed a field singularity and blew up numerically in momentum can still reconstruct a
+    perfectly plausible (finite, in-bounds) x/y/t here (its Px/Pz, Py/Pz ratios can stay ordinary
+    even while Pz itself is astronomical), so the position bound above does not catch it on its
+    own. Without this, such a particle's astronomical (but not always literally infinite) `%K`
+    would dominate the energy-density/heat-flux figures' totals, and excluding it only inside those
+    figures (rather than here, in `valid`) previously left the *position* scatter (which doesn't
+    filter on `%K`) showing a wider population than the energy figures -- confusingly, since both
+    claimed to plot "the back-bombardment population." Pass `None` to disable this bound.
 
     `M_snaps`/`z_snaps` (the same screen snapshots and their known z, used everywhere else in the
     project) are used to trace how far forward each back-bombardment particle got before it turned
@@ -150,6 +162,8 @@ def compute_back_bombardment(
         & np.isfinite(x_hit) & np.isfinite(y_hit)
         & (np.abs(x_hit) <= r_max_mm) & (np.abs(y_hit) <= r_max_mm)
     )
+    if max_kinetic_energy_mev is not None:
+        valid = valid & np.isfinite(K) & (np.abs(K) <= float(max_kinetic_energy_mev))
 
     n_screens_reached, last_screen_z_mm = _screen_reach(ids, M_snaps, z_snaps, id_col=id_col)
 

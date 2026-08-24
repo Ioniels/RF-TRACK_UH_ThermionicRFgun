@@ -39,6 +39,19 @@ K_COL = 9
 #: expected t-column position, id last).
 LOST_TABLE_ID_COL = -1
 
+#: Generous upper bound (MeV) on any physically plausible kinetic energy a particle can carry in
+#: this cavity: the delivered RF power gives an effective voltage well under 1 MV, so a real,
+#: well-behaved transmitted or back-bombarding particle sits at most a few MeV. Set far above that,
+#: and far below the values (K ~ 1e290+ MeV) empirically observed for a particle that grazed a
+#: field singularity near the cathode chamfer and blew up numerically during ODE integration -- a
+#: sanity backstop against that specific artifact, not a physics cut. The dynamic aperture only
+#: bounds transverse position, so a particle like this can stay within it (and even reconstruct a
+#: perfectly plausible x/y/t at Bout) without ever appearing in `lost_table`; it also isn't caught
+#: by `backward_ids_from_bout` since it's still nominally forward (z>=0, pz>0). Shared with
+#: `rf_gun.back_bombardment` so both "forward transmission" and "back-bombardment" tagging apply
+#: the same physical sanity bound.
+MAX_PHYSICAL_KINETIC_ENERGY_MEV = 10.0
+
 
 @dataclass(frozen=True)
 class ParticleTags:
@@ -94,6 +107,24 @@ def backward_ids_from_bout(
     return frozenset(ids[~good].tolist())
 
 
+def unphysical_ids_from_bout(
+    Bout_M: np.ndarray,
+    id_col: int = ID_COL,
+    k_col: int = K_COL,
+    max_kinetic_energy_mev: float = MAX_PHYSICAL_KINETIC_ENERGY_MEV,
+) -> frozenset:
+    """IDs of particles whose `Bout` kinetic energy (`%K`, RF-Track's own column) is non-finite or
+    exceeds `max_kinetic_energy_mev` -- see `MAX_PHYSICAL_KINETIC_ENERGY_MEV`'s docstring for why
+    this exists and why nothing else in this module catches it."""
+    arr = np.asarray(Bout_M, dtype=float)
+    if arr.ndim != 2 or arr.shape[0] == 0 or arr.shape[1] <= k_col:
+        return frozenset()
+    k = arr[:, k_col]
+    bad = ~np.isfinite(k) | (np.abs(k) > float(max_kinetic_energy_mev))
+    ids = _ids_of(arr, id_col)
+    return frozenset(ids[bad].tolist())
+
+
 def lost_ids_from_lost_table(lost_table: Optional[np.ndarray], id_col: int = LOST_TABLE_ID_COL) -> frozenset:
     """IDs of particles removed by the dynamic aperture during tracking, from RF-Track's own
     `V.get_lost_particles()` table (already normalized to an (n, 11) array by
@@ -112,12 +143,15 @@ def build_particle_tags(
     id_col: int = ID_COL,
     threshold_backward_mevc: float = 0.0,
     extra_backward_ids: Optional[frozenset] = None,
+    max_kinetic_energy_mev: Optional[float] = MAX_PHYSICAL_KINETIC_ENERGY_MEV,
 ) -> ParticleTags:
     """Build the project-wide forward/backward/lost tagging, once per run.
 
     `lost_ids` comes straight from RF-Track's own lost-particle table (see
-    `lost_ids_from_lost_table`) -- there is no longer a radius cut or entrance/exit screen pair to
-    reconcile here, since the dynamic aperture already removed those particles during tracking.
+    `lost_ids_from_lost_table`), unioned with `unphysical_ids_from_bout` (any `Bout` particle whose
+    kinetic energy is non-finite or exceeds `max_kinetic_energy_mev` -- pass `None` to disable this
+    backstop) -- there is no longer a radius cut or entrance/exit screen pair to reconcile here,
+    since the dynamic aperture already removed those particles during tracking.
 
     `threshold_backward_mevc` is passed straight to `backward_ids_from_bout` -- see its docstring
     for the stagnant-near-cathode-beamlet rationale.
@@ -131,6 +165,10 @@ def build_particle_tags(
     if extra_backward_ids:
         backward_ids = frozenset(backward_ids | extra_backward_ids)
     lost_ids = lost_ids_from_lost_table(lost_table)
+    if max_kinetic_energy_mev is not None:
+        lost_ids = frozenset(
+            lost_ids | unphysical_ids_from_bout(Bout_M, id_col, max_kinetic_energy_mev=max_kinetic_energy_mev)
+        )
     return ParticleTags(backward_ids=backward_ids, lost_ids=lost_ids)
 
 
