@@ -65,8 +65,28 @@ from .io import (
 	save_back_bombardment_energy_map,
 	to_json_safe,
 )
-from .aperture import ApertureParams, aperture_survival_mask, aperture_summary
-from .particle_tags import ParticleTags, build_particle_tags, backward_ids_from_bout, tag_mask, surviving_mask
+from .aperture import (
+    R1_MM,
+    R2_MM,
+    R_CAV_MM,
+    CHAMFER_LEN_MM,
+    CHAMFER_ANGLE_DEG,
+    A_CHI_MM,
+    RHO_MM,
+    L_MM,
+    DEFAULT_DELTA_CATHODE_CHAMFER_MM,
+    aperture_radius_profile_mm,
+    important_locations_mm,
+    build_dynamic_aperture,
+)
+from .particle_tags import (
+    ParticleTags,
+    build_particle_tags,
+    backward_ids_from_bout,
+    lost_ids_from_lost_table,
+    tag_mask,
+    surviving_mask,
+)
 from .beam_properties import compute_beam_properties, transmission_curves
 from .back_bombardment import BackBombardmentData, compute_back_bombardment, kinetic_energy_joules, screen_trajectory
 from .acceptance_scan import AcceptanceScanResult, scan_acceptance
@@ -102,12 +122,14 @@ from .plotting import (
 	PlotStyleConfig,
 	DEFAULT_PLOT_STYLE,
 	get_default_density_cmap,
-	get_aperture_loss_cmap,
+	get_lost_cmap,
 	get_recentered_diverging_cmap,
 	add_reference_lines,
+	add_aperture_curve,
 	COLOR_PRIMARY,
 	COLOR_SECONDARY,
 	COLOR_NEUTRAL,
+	COLOR_LOST,
 )
 
 __all__ = [
@@ -169,12 +191,22 @@ __all__ = [
 	"save_back_bombardment_energy_map",
 	"save_beam_openpmd",
 	"to_json_safe",
-	"ApertureParams",
-	"aperture_survival_mask",
-	"aperture_summary",
+	"R1_MM",
+	"R2_MM",
+	"R_CAV_MM",
+	"CHAMFER_LEN_MM",
+	"CHAMFER_ANGLE_DEG",
+	"A_CHI_MM",
+	"RHO_MM",
+	"L_MM",
+	"DEFAULT_DELTA_CATHODE_CHAMFER_MM",
+	"aperture_radius_profile_mm",
+	"important_locations_mm",
+	"build_dynamic_aperture",
 	"ParticleTags",
 	"build_particle_tags",
 	"backward_ids_from_bout",
+	"lost_ids_from_lost_table",
 	"tag_mask",
 	"surviving_mask",
 	"compute_beam_properties",
@@ -214,12 +246,14 @@ __all__ = [
 	"PlotStyleConfig",
 	"DEFAULT_PLOT_STYLE",
 	"get_default_density_cmap",
-	"get_aperture_loss_cmap",
+	"get_lost_cmap",
 	"get_recentered_diverging_cmap",
 	"add_reference_lines",
+	"add_aperture_curve",
 	"COLOR_PRIMARY",
 	"COLOR_SECONDARY",
 	"COLOR_NEUTRAL",
+	"COLOR_LOST",
 ]
 
 from . import finesse_presets

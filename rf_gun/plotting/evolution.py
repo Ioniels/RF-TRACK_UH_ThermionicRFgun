@@ -102,7 +102,7 @@ def plot_beam_twiss_evolution(
     Row 4: energy spread (sigma_E) | time-of-flight spread (sigma_t) | mean kinetic energy.
 
     `transmission`, if given, is `rf_gun.beam_properties.transmission_curves`'s return dict
-    (`z_mm`, `raw`, `forward_only`, `forward_and_aperture`); the row-3-col-3 panel is left blank
+    (`z_mm`, `raw`, `forward_only`, `forward_and_surviving`); the row-3-col-3 panel is left blank
     (with a note) if not supplied.
     """
     import matplotlib.pyplot as plt
@@ -136,7 +136,7 @@ def plot_beam_twiss_evolution(
         t_mm = np.asarray(transmission["z_mm"], dtype=float)
         axes[2, 2].plot(t_mm, 100.0 * np.asarray(transmission["raw"]), "o-", ms=3, color=COLOR_NEUTRAL, label="raw")
         axes[2, 2].plot(t_mm, 100.0 * np.asarray(transmission["forward_only"]), "s--", ms=3, color=COLOR_PRIMARY, label="forward-only")
-        axes[2, 2].plot(t_mm, 100.0 * np.asarray(transmission["forward_and_aperture"]), "^:", ms=3, color=COLOR_SECONDARY, label="forward + aperture")
+        axes[2, 2].plot(t_mm, 100.0 * np.asarray(transmission["forward_and_surviving"]), "^:", ms=3, color=COLOR_SECONDARY, label="forward + surviving")
         axes[2, 2].set_ylabel(r"$T\,(\%)$")
         axes[2, 2].legend(frameon=False, fontsize=8)
     else:

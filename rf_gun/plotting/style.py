@@ -12,9 +12,13 @@ regular text. Applied once, at import time, project-wide.
 figures with one or two curves (a nice blue/red/gray), replacing what used to be an ad hoc
 "tab:purple"/"tab:brown"/etc. per call site. Convention: x-plane vs y-plane pairs -> blue/red;
 mean-type vs sigma/spread-type single curves -> blue/red; a de-emphasized third "baseline" curve
-(e.g. an unfiltered reference) -> gray. Density/colormap-based panels (KDE scatter, colorbars,
-per-particle categorical colors) are a different visual channel and are not part of this
-convention -- units in labels use parentheses, not brackets (`x\\,(\\mathrm{mm})`, not `x [mm]`).
+(e.g. an unfiltered reference) -> gray. `COLOR_LOST` is the one fixed exception to that
+two-color convention: green specifically and only means "removed by the dynamic aperture,"
+everywhere that category appears (`_initial_pz_hist_panel`'s launch pz histogram,
+`plot_spectra`'s output panels), so a reader learns the color once and can rely on it in every
+figure. Density/colormap-based panels (KDE scatter, colorbars, per-particle categorical colors)
+are a different visual channel and are not part of this convention -- units in labels use
+parentheses, not brackets (`x\\,(\\mathrm{mm})`, not `x [mm]`).
 """
 from __future__ import annotations
 
@@ -35,6 +39,7 @@ plt.rcParams["axes.formatter.use_mathtext"] = True
 COLOR_PRIMARY = "#0072B2"
 COLOR_SECONDARY = "#C0392B"
 COLOR_NEUTRAL = "#7F7F7F"
+COLOR_LOST = "tab:green"
 
 
 def get_default_density_cmap() -> LinearSegmentedColormap:
@@ -52,12 +57,13 @@ def get_default_density_cmap() -> LinearSegmentedColormap:
     return LinearSegmentedColormap.from_list("plasma_with_white", new_colors)
 
 
-def get_aperture_loss_cmap() -> LinearSegmentedColormap:
-    """Green-gradient colormap for aperture-clipped particles, transparent at lowest density.
+def get_lost_cmap() -> LinearSegmentedColormap:
+    """Green-gradient colormap for particles removed by the dynamic aperture, transparent at
+    lowest density.
 
     Same construction pattern as `get_default_density_cmap` (used for the "normal" population)
-    and `PlotStyleConfig.lost_cmap`/`"binary"` (used for backward-loss highlighting) -- this is
-    the third, independent color channel for `FIG_EXCLUDE_APERTURE_LOSSES=False` highlighting.
+    and `PlotStyleConfig.backward_cmap`/`"binary"` (used for backward-loss highlighting) -- this
+    is the third, independent color channel for `exclude_lost=False` highlighting.
     """
     base = plt.cm.get_cmap("Greens", 256)
     new_colors = np.array(base(np.linspace(0.0, 1.0, 256)), copy=True)
@@ -86,16 +92,15 @@ def add_reference_lines(
     cathode_z_mm: Optional[float] = 0.0,
     z_end_mm: Optional[float] = None,
     lambda_quarter_mm: Optional[float] = None,
-    aperture_start_mm: Optional[float] = None,
-    aperture_end_mm: Optional[float] = None,
     halo: bool = False,
     lw: float = 1.2,
     alpha: float = 0.9,
     zorder: float = 5,
 ) -> None:
     """Shared reference lines for `fields.field_maps`/`fields.axis_phase`: cathode (z=0) and
-    z_end solid, lambda/4 dotted, aperture start/end dashed. `halo=True` adds a white stroke so
-    black stays legible over a dark colormap panel. Any position left `None` skips that line.
+    z_end solid, lambda/4 dotted. `halo=True` adds a white stroke so black stays legible over a
+    dark colormap panel. Any position left `None` skips that line. See `add_aperture_curve` for
+    the dynamic aperture's R(z) profile, which replaced the old fixed start/end markers here.
     """
     effects = [patheffects.withStroke(linewidth=lw + 1.8, foreground="white", alpha=0.9)] if halo else None
 
@@ -107,8 +112,28 @@ def add_reference_lines(
     _line(cathode_z_mm, "-", "Cathode (z=0)")
     _line(z_end_mm, "-", r"$z_{\mathrm{end}}$")
     _line(lambda_quarter_mm, ":", r"$\lambda/4$")
-    _line(aperture_start_mm, "--", "Aperture start")
-    _line(aperture_end_mm, "--", "Aperture end")
+
+
+def add_aperture_curve(
+    ax,
+    z_mm: np.ndarray,
+    r_mm: np.ndarray,
+    *,
+    color: str = "black",
+    lw: float = 1.4,
+    alpha: float = 0.9,
+    halo: bool = True,
+    zorder: float = 6,
+    label: str = "Dynamic aperture R(z)",
+) -> None:
+    """Draw the dynamic aperture's R(z) profile as +/-r_mm curves on top of an (r, z) panel
+    (`fields.field_maps`'s two bottom heatmaps). Mirrors `add_reference_lines`'s styling (white
+    halo so it stays legible over a dark colormap)."""
+    effects = [patheffects.withStroke(linewidth=lw + 1.8, foreground="white", alpha=0.9)] if halo else None
+    z_mm = np.asarray(z_mm, dtype=float)
+    r_mm = np.asarray(r_mm, dtype=float)
+    ax.plot(z_mm, r_mm, color=color, lw=lw, alpha=alpha, ls="--", path_effects=effects, zorder=zorder, label=label)
+    ax.plot(z_mm, -r_mm, color=color, lw=lw, alpha=alpha, ls="--", path_effects=effects, zorder=zorder)
 
 
 @dataclass(frozen=True)
@@ -121,7 +146,7 @@ class PlotStyleConfig:
     hist_alpha: float = 0.7
     hist_color: str = "black"
     hist_linewidth: float = 1.2
-    lost_cmap: str = "binary"
+    backward_cmap: str = "binary"
     show_histograms: bool = True
     dezoom_frac: float = 0.05
     scatter: bool = True

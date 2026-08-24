@@ -14,7 +14,13 @@ from .style import DEFAULT_PLOT_STYLE, COLOR_SECONDARY
 
 
 def _sci(value: float, precision: int = 2) -> str:
-    """`1.08e-04` -> `1.08\\times10^{-4}` -- proper mathtext scientific notation for titles."""
+    """`1.08e-04` -> `1.08\\times10^{-4}` -- proper mathtext scientific notation for titles.
+
+    `value` non-finite (NaN/Inf) renders as a plain "n/a" -- `f"{nan:.2e}"` formats to the bare
+    string `"nan"` (no `"e"` to split on), which would otherwise raise here.
+    """
+    if not np.isfinite(value):
+        return r"\mathrm{n/a}"
     mantissa, exp = f"{value:.{precision}e}".split("e")
     return rf"{mantissa}\times10^{{{int(exp)}}}"
 
@@ -197,6 +203,22 @@ def plot_back_bombardment_energy_density(
     x = data.x_hit_mm[v]
     y = data.y_hit_mm[v]
     k_joules = kinetic_energy_joules(data)[v]
+
+    # `valid` (rf_gun.back_bombardment.compute_back_bombardment) only checks the ballistic
+    # (x, y) reconstruction's finiteness, not %E/%K -- a non-finite kinetic energy here (observed
+    # for a small number of particles that pick up an extreme kick right at a dynamic-aperture
+    # loss point) would otherwise silently turn a histogram bin, and the total, into NaN.
+    finite_k = np.isfinite(k_joules)
+    n_excluded = int((~finite_k).sum())
+    if n_excluded > 0:
+        print(
+            f"Warning: excluding {n_excluded} of {finite_k.size} back-bombardment particle(s) "
+            "with non-finite kinetic energy from the energy-density map and total."
+        )
+    x, y, k_joules = x[finite_k], y[finite_k], k_joules[finite_k]
+    if x.size == 0:
+        print("No back-bombardment particles with a finite kinetic energy.")
+        return None
 
     counts, xedges, yedges = np.histogram2d(x, y, bins=bins, weights=k_joules)
     bin_area_mm2 = float(xedges[1] - xedges[0]) * float(yedges[1] - yedges[0])

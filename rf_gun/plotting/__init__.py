@@ -27,12 +27,14 @@ from .style import (
     PlotStyleConfig,
     DEFAULT_PLOT_STYLE,
     get_default_density_cmap,
-    get_aperture_loss_cmap,
+    get_lost_cmap,
     get_recentered_diverging_cmap,
     add_reference_lines,
+    add_aperture_curve,
     COLOR_PRIMARY,
     COLOR_SECONDARY,
     COLOR_NEUTRAL,
+    COLOR_LOST,
 )
 
 __all__ = [
@@ -60,10 +62,12 @@ __all__ = [
     "PlotStyleConfig",
     "DEFAULT_PLOT_STYLE",
     "get_default_density_cmap",
-    "get_aperture_loss_cmap",
+    "get_lost_cmap",
     "get_recentered_diverging_cmap",
     "add_reference_lines",
+    "add_aperture_curve",
     "COLOR_PRIMARY",
     "COLOR_SECONDARY",
     "COLOR_NEUTRAL",
+    "COLOR_LOST",
 ]

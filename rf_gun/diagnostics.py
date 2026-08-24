@@ -246,8 +246,17 @@ def classify_particle_outcomes(
     final: np.ndarray,
     t0_mm_c: np.ndarray | None = None,
     lost_table: np.ndarray | None = None,
+    id_col: int = 6,
+    lost_id_col: int = -1,
 ):
-    """Classify final particles into transmitted/backward and include lost table stats.
+    """Classify particles into transmitted/backward (from `final`=`Bout`'s own z/pz) and lost
+    (id-based, from RF-Track's own `lost_table` -- populated by the dynamic aperture removing a
+    particle during tracking, see `rf_gun.aperture`/`rf_gun.particle_tags`).
+
+    `final` only ever contains particles the dynamic aperture did *not* remove, so
+    transmitted/backward here already exclude "lost" by construction; "lost" is filled in
+    separately from `lost_table`'s own recorded per-particle state at the moment of removal
+    (position/momentum/time), matched back to `initial` by `%id` for its own initial_pz/t0 stats.
 
     No implicit plausibility filtering (energy/radius cutoff) -- any narrowing of "backward"
     should stay visible and data-driven, see `rf_gun.particle_tags.backward_ids_from_bout`.
@@ -275,7 +284,30 @@ def classify_particle_outcomes(
 
     n_trans = int(np.sum(transmitted_mask))
     n_back = int(np.sum(backward_mask))
-    n_lost = int(np.asarray(lost_table).shape[0]) if lost_table is not None else max(0, n0 - int(final.shape[0]))
+
+    lost_arr = np.asarray(lost_table, dtype=float) if lost_table is not None else np.zeros((0, 0))
+    has_lost = lost_arr.ndim == 2 and lost_arr.shape[0] > 0
+    n_lost = int(lost_arr.shape[0]) if has_lost else 0
+
+    lost_pzf_mean = np.nan
+    lost_zf_mean_mm = np.nan
+    lost_pz0_mean = np.nan
+    lost_t0_mean = np.nan
+    if has_lost and lost_arr.shape[1] > max(5, abs(lost_id_col)):
+        # LOST_COLUMNS order: x, px, y, py, z, pz, t, mass, q, N, id.
+        lost_pzf_mean = float(np.mean(lost_arr[:, 5]))
+        lost_zf_mean_mm = 1e3 * float(np.mean(lost_arr[:, 4]))
+        if initial.ndim == 2 and initial.shape[1] > id_col:
+            lost_ids = lost_arr[:, lost_id_col].astype(np.int64)
+            init_ids = initial[:, id_col].astype(np.int64)
+            by_id = {int(pid): i for i, pid in enumerate(init_ids.tolist())}
+            rows0 = [by_id[int(pid)] for pid in lost_ids.tolist() if int(pid) in by_id]
+            if rows0:
+                lost_pz0_mean = float(np.mean(initial[rows0, 5])) if initial.shape[1] > 5 else np.nan
+                if t0_mm_c is not None:
+                    t0_full = np.asarray(t0_mm_c, dtype=float).reshape(-1)
+                    if t0_full.size == initial.shape[0]:
+                        lost_t0_mean = float(np.mean(t0_full[rows0]))
 
     def frac(n: int) -> float:
         return float(n / n0) if n0 > 0 else np.nan
@@ -302,10 +334,10 @@ def classify_particle_outcomes(
         "lost": {
             "count": n_lost,
             "fraction": frac(n_lost),
-            "initial_pz_mean": np.nan,
-            "final_pz_mean": np.nan,
-            "initial_t0_mean_mm_c": np.nan,
-            "final_z_mean_mm": np.nan,
+            "initial_pz_mean": lost_pz0_mean,
+            "final_pz_mean": lost_pzf_mean,
+            "initial_t0_mean_mm_c": lost_t0_mean,
+            "final_z_mean_mm": lost_zf_mean_mm,
         },
     }
 

@@ -1,11 +1,11 @@
 """Consolidated beam-properties table: one function, one row per screen.
 
-Computed only on the forward-going, aperture-surviving population (via
+Computed only on the forward-going, dynamic-aperture-surviving population (via
 `rf_gun.particle_tags.surviving_mask`), matching the project's requirement that beam properties
-reflect only the beam that actually makes it through the gun and (when the aperture is enabled)
-the physical aperture. Every quantity is manual (numpy second-moment), consistent with the rest
-of the project's Twiss/emittance pipeline -- see `rf_gun.diagnostics.manual_twiss_and_emittance`'s
-docstring for why RF-Track's native `get_info()` is not used here.
+reflect only the beam that actually makes it through the gun's real transverse channel R(z).
+Every quantity is manual (numpy second-moment), consistent with the rest of the project's
+Twiss/emittance pipeline -- see `rf_gun.diagnostics.manual_twiss_and_emittance`'s docstring for
+why RF-Track's native `get_info()` is not used here.
 
 Column layout assumed for `M_snaps`: `rf_gun.simulation.EXTENDED_PHASE_FMT`
 ("%X %Px %Y %Py %Z %Pz %id %t %E %K"). The core 6 columns (position/momentum) are required;
@@ -13,15 +13,14 @@ Column layout assumed for `M_snaps`: `rf_gun.simulation.EXTENDED_PHASE_FMT`
 against older, un-extended phase-space arrays.
 
 Longitudinal quantities use ToF (`%t`), not `%Z`, throughout -- a screen's own `%Z` is not a
-lab-frame position at all (see `rf_gun.aperture`'s module docstring for the full empirical
-derivation: it's each crossing particle's velocity times its time offset from whichever particle
-currently serves as the bunch's reference particle), whereas `%t` is a genuine, reliable per-particle
-quantity at every screen. So `mean_t_ns`/`sigma_t_ns` (moments) and `alpha_t`/`beta_t`/`gamma_t`/
-`emitt_t` (this project's own longitudinal-Twiss convention, (ToF, Pz/mean(Pz))) replace what used
-to be `mean_z`/`sigma_z`/`alpha_z`/`beta_z`/`gamma_z`/`emitt_z`. The longitudinal Twiss is still
-computed via `rf_gun.diagnostics.manual_twiss_and_emittance` (which is agnostic to what its "z"
-column actually represents) by substituting ToF-in-ns into that column before calling it -- see
-`_row_for_screen`.
+lab-frame position at all (each crossing particle's velocity times its time offset from whichever
+particle currently serves as the bunch's reference particle), whereas `%t` is a genuine, reliable
+per-particle quantity at every screen. So `mean_t_ns`/`sigma_t_ns` (moments) and `alpha_t`/
+`beta_t`/`gamma_t`/`emitt_t` (this project's own longitudinal-Twiss convention, (ToF,
+Pz/mean(Pz))) replace what used to be `mean_z`/`sigma_z`/`alpha_z`/`beta_z`/`gamma_z`/`emitt_z`.
+The longitudinal Twiss is still computed via `rf_gun.diagnostics.manual_twiss_and_emittance`
+(which is agnostic to what its "z" column actually represents) by substituting ToF-in-ns into
+that column before calling it -- see `_row_for_screen`.
 """
 from __future__ import annotations
 
@@ -59,7 +58,7 @@ def compute_beam_properties(
     rows: List[Dict[str, Any]] = []
     for z_m, M in zip(z_snaps, M_snaps):
         arr = np.asarray(M, dtype=float)
-        mask = surviving_mask(arr, tags, screen_z_m=float(z_m)) if arr.shape[0] else np.zeros((0,), dtype=bool)
+        mask = surviving_mask(arr, tags) if arr.shape[0] else np.zeros((0,), dtype=bool)
         rows.append(_row_for_screen(float(z_m), arr[mask], mass_MeV))
     return rows
 
@@ -143,8 +142,8 @@ def transmission_curves(
 
     - `raw`: every particle recorded at that screen, no filtering at all.
     - `forward_only`: backward-tagged particles removed (see `rf_gun.particle_tags`).
-    - `forward_and_aperture`: also removes aperture-lost-tagged particles (identical to
-      `forward_only` when the aperture is disabled, since `aperture_lost_ids` is then empty).
+    - `forward_and_surviving`: also removes particles the dynamic aperture has by then removed
+      (identical to `forward_only` if nothing has been lost yet at that screen's z).
     """
     raw, fwd, surv = [], [], []
     for z_m, M in zip(z_snaps, M_snaps):
@@ -155,14 +154,14 @@ def transmission_curves(
             fwd.append(0)
             surv.append(0)
             continue
-        is_backward, is_aperture_lost = tag_mask(arr, tags, screen_z_m=float(z_m))
+        is_backward, is_lost = tag_mask(arr, tags)
         fwd.append(int(np.sum(~is_backward)))
-        surv.append(int(np.sum(~is_backward & ~is_aperture_lost)))
+        surv.append(int(np.sum(~is_backward & ~is_lost)))
 
     n0 = max(int(n_initial), 1)
     return {
         "z_mm": 1e3 * np.asarray(z_snaps, dtype=float),
         "raw": np.asarray(raw, dtype=float) / n0,
         "forward_only": np.asarray(fwd, dtype=float) / n0,
-        "forward_and_aperture": np.asarray(surv, dtype=float) / n0,
+        "forward_and_surviving": np.asarray(surv, dtype=float) / n0,
     }

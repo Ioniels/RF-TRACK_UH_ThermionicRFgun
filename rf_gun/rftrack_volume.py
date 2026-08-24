@@ -13,6 +13,7 @@ from .deflection_field import (
     DEFAULT_Z_P_MM,
     DeflectionField,
 )
+from .aperture import DEFAULT_DELTA_CATHODE_CHAMFER_MM, build_dynamic_aperture
 
 
 def _call_first_available(obj, names, *args):
@@ -56,7 +57,7 @@ class VolumeBuildParams:
     dt_mm: float
     ode_algorithm: str = "rk2"
     ode_epsabs: float = 1e-10
-    aperture_m: Optional[float] = 1.0
+    aperture_delta_mm: float = DEFAULT_DELTA_CATHODE_CHAMFER_MM
     t_max_mm: float = 2000.0
     fm_nsteps: int = 400
     fm_tt_nsteps: int = 200
@@ -204,11 +205,14 @@ def build_volume(
     """Construct a Volume containing a single RF_FieldMap_2d and optional Screens."""
     p = _coerce_volume_params(p)
 
+    # Constructor is RF_FieldMap_2d(Er, Ez, Bt, Bz, hr, hz, length, frequency, direction,
+    # P_max, P_actual) -- Bt/Bz must be the literal 0.0 (no measured B-field), not map_z0_m.
+    # The map's z-placement is handled below, via V.add(FM, ..., float(p.map_z0_m), ...).
     FM = rft.RF_FieldMap_2d(
         Er_grid,
         Ez_grid,
         0.0,
-        float(p.map_z0_m),
+        0.0,
         float(p.hr_m),
         float(p.hz_m),
         -1,
@@ -236,7 +240,7 @@ def build_volume(
     _attach_beam_loading_sw(rft, FM, p)
 
     V = rft.Volume()
-    V.add(FM, 0.0, 0.0, 0.0, "entrance")
+    V.add(FM, 0.0, 0.0, float(p.map_z0_m), "entrance")
 
     if add_screens_z_m:
         screen_cfg = screen_params if screen_params is not None else ScreenBuildParams()
@@ -260,8 +264,15 @@ def build_volume(
     V.odeint_epsabs = float(p.ode_epsabs)
     V.set_s0(float(p.z_min_m))
     V.set_s1(float(p.z_max_m))
-    if p.aperture_m is not None:
-        V.set_aperture(float(p.aperture_m), float(p.aperture_m), "circular")
+
+    # Dynamic radial aperture R(z): the cavity's real transverse channel (narrow cathode-side
+    # chamfer, wide body, narrow exit transition) -- see rf_gun.aperture. Sampled on the same
+    # z-grid as Er_grid/Ez_grid so the aperture and the field share one z-alignment.
+    nz = int(np.asarray(Ez_grid).shape[0])
+    z_grid_m = np.linspace(float(p.z_min_m), float(p.z_max_m), nz)
+    dyn_aperture = build_dynamic_aperture(rft, z_grid_m, float(p.aperture_delta_mm))
+    V.add(dyn_aperture, 0.0, 0.0, float(p.map_z0_m), "entrance")
+
     V.t_max_mm = float(p.t_max_mm)
 
     if p.deflection_enabled:

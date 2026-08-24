@@ -11,8 +11,9 @@ import numpy as np
 
 from ..back_bombardment import BackBombardmentData
 from ..constants import c, ME_MEV
-from ..particle_tags import ParticleTags, build_particle_tags
+from ..particle_tags import ParticleTags, build_particle_tags, ID_COL, lost_ids_from_lost_table
 from ..beam_properties import compute_beam_properties, transmission_curves
+from .style import COLOR_LOST, COLOR_PRIMARY, COLOR_SECONDARY
 from .back_bombardment import (
     plot_back_bombardment_energy_density,
     plot_back_bombardment_phase_space,
@@ -179,7 +180,13 @@ def plot_class_conditioned_histograms(
     lost_table: np.ndarray | None = None,
     t0_mm_c: np.ndarray | None = None,
 ):
-    """Initial distributions split by final class: transmitted/backward/lost."""
+    """Initial distributions split by final class: transmitted/backward/lost.
+
+    `lost` is an id-based match against `lost_table` (RF-Track's own lost-particle table, see
+    `rf_gun.particle_tags.lost_ids_from_lost_table`) when `initial_M` carries an `%id` column
+    (index `ID_COL`); otherwise `lost` is shown only as a count annotation, since there's no way
+    to pick its rows out of `initial_M` by identity.
+    """
     import matplotlib.pyplot as plt
 
     Mi = np.asarray(initial_M)
@@ -196,6 +203,14 @@ def plot_class_conditioned_histograms(
     transmitted = np.isfinite(zf) & np.isfinite(pzf) & (zf > 0.0) & (pzf > 0.0)
     backward = np.isfinite(zf) & np.isfinite(pzf) & ((zf <= 0.0) | (pzf < 0.0))
 
+    lost = np.zeros(n, dtype=bool)
+    n_lost_total = int(np.asarray(lost_table).shape[0]) if lost_table is not None and np.asarray(lost_table).ndim == 2 else 0
+    if n_lost_total > 0 and Mi.shape[1] > ID_COL:
+        lost_ids = lost_ids_from_lost_table(lost_table)
+        if lost_ids:
+            ids0 = Mi[:n, ID_COL].astype(np.int64)
+            lost = np.isin(ids0, list(lost_ids))
+
     pz0 = np.asarray(Mi[:n, 5], dtype=float)
     r0 = np.sqrt(np.asarray(Mi[:n, 0], dtype=float) ** 2 + np.asarray(Mi[:n, 2], dtype=float) ** 2)
     t0_ns = None
@@ -210,10 +225,12 @@ def plot_class_conditioned_histograms(
 
     bins_pz = np.histogram_bin_edges(1e3 * pz0[np.isfinite(pz0)], bins=60)
     axes[0].hist(1e3 * pz0, bins=bins_pz, alpha=0.4, label="all", color="tab:blue")
-    axes[0].hist(1e3 * pz0[transmitted], bins=bins_pz, alpha=0.6, label="transmitted", color="tab:green")
-    axes[0].hist(1e3 * pz0[backward], bins=bins_pz, alpha=0.6, label="backward/returned", color="tab:red")
-    if lost_table is not None and np.asarray(lost_table).ndim == 2 and np.asarray(lost_table).shape[0] > 0:
-        axes[0].text(0.98, 0.95, f"lost={int(np.asarray(lost_table).shape[0])}", transform=axes[0].transAxes, ha="right", va="top")
+    axes[0].hist(1e3 * pz0[transmitted], bins=bins_pz, alpha=0.6, label="transmitted", color=COLOR_PRIMARY)
+    axes[0].hist(1e3 * pz0[backward], bins=bins_pz, alpha=0.6, label="backward/returned", color=COLOR_SECONDARY)
+    if np.any(lost):
+        axes[0].hist(1e3 * pz0[lost], bins=bins_pz, alpha=0.6, label="lost", color=COLOR_LOST)
+    elif n_lost_total > 0:
+        axes[0].text(0.98, 0.95, f"lost={n_lost_total}", transform=axes[0].transAxes, ha="right", va="top")
     axes[0].set_xlabel("initial pz [keV/c]")
     axes[0].set_ylabel("counts")
     axes[0].grid(alpha=0.3)
@@ -221,8 +238,10 @@ def plot_class_conditioned_histograms(
     if t0_ns is not None:
         bins_t0 = np.histogram_bin_edges(t0_ns[np.isfinite(t0_ns)], bins=60)
         axes[1].hist(t0_ns, bins=bins_t0, alpha=0.4, label="all", color="tab:blue")
-        axes[1].hist(t0_ns[transmitted], bins=bins_t0, alpha=0.6, label="transmitted", color="tab:green")
-        axes[1].hist(t0_ns[backward], bins=bins_t0, alpha=0.6, label="backward/returned", color="tab:red")
+        axes[1].hist(t0_ns[transmitted], bins=bins_t0, alpha=0.6, label="transmitted", color=COLOR_PRIMARY)
+        axes[1].hist(t0_ns[backward], bins=bins_t0, alpha=0.6, label="backward/returned", color=COLOR_SECONDARY)
+        if np.any(lost):
+            axes[1].hist(t0_ns[lost], bins=bins_t0, alpha=0.6, label="lost", color=COLOR_LOST)
         axes[1].set_xlabel("initial t0 [ns]")
         axes[1].set_ylabel("counts")
         axes[1].grid(alpha=0.3)
@@ -232,8 +251,10 @@ def plot_class_conditioned_histograms(
 
     bins_r = np.histogram_bin_edges(r0[np.isfinite(r0)], bins=60)
     axes[2].hist(r0, bins=bins_r, alpha=0.4, label="all", color="tab:blue")
-    axes[2].hist(r0[transmitted], bins=bins_r, alpha=0.6, label="transmitted", color="tab:green")
-    axes[2].hist(r0[backward], bins=bins_r, alpha=0.6, label="backward/returned", color="tab:red")
+    axes[2].hist(r0[transmitted], bins=bins_r, alpha=0.6, label="transmitted", color=COLOR_PRIMARY)
+    axes[2].hist(r0[backward], bins=bins_r, alpha=0.6, label="backward/returned", color=COLOR_SECONDARY)
+    if np.any(lost):
+        axes[2].hist(r0[lost], bins=bins_r, alpha=0.6, label="lost", color=COLOR_LOST)
     axes[2].set_xlabel("initial radius [mm]")
     axes[2].set_ylabel("counts")
     axes[2].grid(alpha=0.3)
@@ -293,13 +314,14 @@ def save_screen_phase_space_batch(
     tags: ParticleTags | None = None,
     phase_fmt: str = EXTENDED_PHASE_FMT_DEFAULT,
     exclude_backward_losses: bool = True,
-    exclude_aperture_losses: bool = True,
+    exclude_lost: bool = True,
     n_macroparticles: int | None = None,
     style=None,
     show_colorbar: bool = False,
     save_json: bool = True,
     figure_formats: Sequence[str] = ("png",),
     timing_log: bool = False,
+    thermo_info: dict | None = None,
 ) -> dict[str, Any]:
     """Save non-interactive phase-space figures for B0 and every screen.
 
@@ -339,10 +361,11 @@ def save_screen_phase_space_batch(
             z_mm=z_mm_local,
             tags=tags,
             exclude_backward_losses=exclude_backward_losses,
-            exclude_aperture_losses=exclude_aperture_losses,
+            exclude_lost=exclude_lost,
             style=style,
             show_colorbar=show_colorbar,
             n_macroparticles=n_macroparticles,
+            thermo_info=thermo_info,
         )
         t_render_s = float(time.perf_counter() - t_render_start)
 
@@ -452,7 +475,7 @@ def save_run_figures(
     tags: ParticleTags | None = None,
     phase_fmt: str = EXTENDED_PHASE_FMT_DEFAULT,
     exclude_backward_losses: bool = True,
-    exclude_aperture_losses: bool = True,
+    exclude_lost: bool = True,
     n_macroparticles: int | None = None,
     mass_MeV: float = ME_MEV,
     lost_table: np.ndarray | None = None,
@@ -462,13 +485,12 @@ def save_run_figures(
     """Generate and save a standard figure bundle for one run.
 
     `tags` (`rf_gun.particle_tags.ParticleTags`) drives every figure in this bundle -- pass one
-    built via `build_particle_tags` (from `Bout` plus, when available, post-hoc aperture
-    entrance/exit screens) so this bundle's tagging is identical to any other output (JSON
-    summaries, the notebook) built from the same run. If not supplied, falls back to
-    backward-tagging only (from `Bout`'s own reliable absolute z/pz), with no aperture-loss
-    tagging. The beam-properties table and transmission curves are always computed on the
-    forward-going + aperture-surviving population, matching
-    `rf_gun.beam_properties.compute_beam_properties`.
+    built via `build_particle_tags` (from `Bout` plus RF-Track's own lost-particle table) so this
+    bundle's tagging is identical to any other output (JSON summaries, the notebook) built from
+    the same run. If not supplied, falls back to backward-tagging only (from `Bout`'s own
+    reliable absolute z/pz), with no lost tagging. The beam-properties table and transmission
+    curves are always computed on the forward-going + dynamic-aperture-surviving population,
+    matching `rf_gun.beam_properties.compute_beam_properties`.
 
     `back_bombardment_data` (from `rf_gun.compute_back_bombardment`), when given, adds the 4
     back-bombardment figures (phase space, screen reach, cathode energy-density map, power
@@ -491,7 +513,7 @@ def save_run_figures(
     Bout_M = np.array(Bout.get_phase_space(phase_fmt, "all"), copy=True)
 
     if tags is None:
-        tags = build_particle_tags(Bout_M, None, None, 0.0, False)
+        tags = build_particle_tags(Bout_M, lost_table)
 
     if M_snaps:
         M_exit = np.asarray(M_snaps[-1], dtype=float)
@@ -501,9 +523,9 @@ def save_run_figures(
             transport_phase_deg,
             tags=tags,
             exclude_backward_losses=exclude_backward_losses,
-            exclude_aperture_losses=exclude_aperture_losses,
+            exclude_lost=exclude_lost,
             phase_fmt=phase_fmt,
-            exit_z_m=float(z_snaps[-1]) if z_snaps else None,
+            thermo_info=thermo_info,
         )
         saved += _capture_current_figure("initial_phase_space_x_px", output_dir)
 

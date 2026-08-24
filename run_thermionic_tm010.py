@@ -18,6 +18,10 @@ matplotlib.use("Agg")
 # Kept separate from rf_gun.finesse_presets.FINESSE_TIERS so `--help` doesn't have to import
 # rf_gun (and RF_Track with it) just to parse arguments; must match it by hand.
 _FINESSE_TIER_NAMES = ("extra_fine", "fine", "medium", "coarse")
+# Kept separate from rf_gun.aperture.R_CAV_MM/DEFAULT_DELTA_CATHODE_CHAMFER_MM for the same
+# reason as _FINESSE_TIER_NAMES above -- must match by hand.
+_R_CAV_MM = 34.0145
+_DEFAULT_DELTA_CATHODE_CHAMFER_MM = 0.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,7 +46,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--f_hz", type=float, default=2.856e9)
     parser.add_argument("--y_cathode_mm", type=float, default=12.75)
-    parser.add_argument("--r_max_m", type=float, default=0.01)
+    parser.add_argument("--r_max_m", type=float, default=_R_CAV_MM * 1e-3)
     parser.add_argument("--dr_um", type=float, default=4.0)
     parser.add_argument("--dz_um", type=float, default=13.0)
     parser.add_argument("--z_min", type=float, default=0.0)
@@ -58,17 +62,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cfx_dt_mm", type=float, default=0.01)
     parser.add_argument("--ode_algorithm", type=str, default="rk2")
     parser.add_argument("--ode_epsabs", type=float, default=1e-6)
-    parser.add_argument("--aperture_m", type=float, default=1.0)
 
-    # Physical exit-aperture channel (post-hoc geometric cut + explicit entrance/exit screens) --
-    # a separate concept from --aperture_m (RF-Track's own whole-Volume aperture bound above).
-    # Matches the notebook's APERTURE_ENABLED/APERTURE_START_M/APERTURE_END_M/APERTURE_DIAMETER_MM;
-    # opt-in (default disabled) so existing scripts/SLURM jobs that don't pass these flags are
-    # unaffected. See `--save-openpmd-beam` for the aperture-aware exit-beam export this enables.
-    parser.add_argument("--aperture_enabled", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--aperture_start_m", type=float, default=0.028854)
-    parser.add_argument("--aperture_end_m", type=float, default=0.040589)
-    parser.add_argument("--aperture_diameter_mm", type=float, default=5.0546)
+    # Dynamic radial aperture R(z): the cavity's real transverse channel (narrow cathode-side
+    # chamfer, wide body, narrow exit transition), enforced by RF-Track itself during tracking
+    # (see rf_gun.aperture). Replaces both the old whole-Volume scalar --aperture_m and the old
+    # post-hoc --aperture_enabled/--aperture_start_m/--aperture_end_m/--aperture_diameter_mm
+    # geometric cut applied after tracking. `--delta_cathode_chamfer_mm` shifts the whole profile
+    # relative to the cathode (0 = cathode exactly at the chamfer start; see rf_gun.aperture's
+    # module docstring for the sign convention) -- the user intends to try different cathode
+    # insertion depths, so this stays a tunable CLI flag rather than a hardcoded constant.
+    parser.add_argument("--delta_cathode_chamfer_mm", type=float, default=None)
 
     parser.add_argument("--sc_enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--beam_loading", action=argparse.BooleanOptionalAction, default=False)
@@ -605,6 +608,12 @@ def main() -> None:
     )
     print(f"Emission window: {float(args.emission_phase_range):.1f} deg")
 
+    delta_cathode_chamfer_mm = (
+        float(args.delta_cathode_chamfer_mm)
+        if args.delta_cathode_chamfer_mm is not None
+        else rg.DEFAULT_DELTA_CATHODE_CHAMFER_MM
+    )
+
     phase_scan_n = max(3, int(args.phase_scan_n))
     phase_scan_n_part = max(1, int(args.phase_scan_n_part))
     phase_scan_rel = np.linspace(float(args.phase_scan_min), float(args.phase_scan_max), phase_scan_n)
@@ -618,7 +627,7 @@ def main() -> None:
         dt_mm=float(args.phase_scan_dt_mm),
         ode_algorithm=str(args.ode_algorithm),
         ode_epsabs=float(args.ode_epsabs),
-        aperture_m=float(args.aperture_m),
+        aperture_delta_mm=delta_cathode_chamfer_mm,
         sc_enabled=False,
         sc_dt_mm=float(args.sc_dt_mm),
         emission_nsteps=int(args.emission_nsteps),
@@ -703,7 +712,7 @@ def main() -> None:
         dt_mm=float(args.dt_mm),
         ode_algorithm=str(args.ode_algorithm),
         ode_epsabs=float(args.ode_epsabs),
-        aperture_m=float(args.aperture_m),
+        aperture_delta_mm=delta_cathode_chamfer_mm,
         sc_enabled=bool(args.sc_enabled),
         sc_dt_mm=float(args.sc_dt_mm),
         emission_nsteps=int(args.emission_nsteps),
@@ -757,12 +766,6 @@ def main() -> None:
         else:
             z_snaps = np.linspace(float(z_min), float(z_max), n_screens + 2)[1:-1].tolist()
 
-    # Insert explicit aperture entrance/exit screens ("before"/"after" views), matching the
-    # notebook's APERTURE_ENABLED handling -- needed so the openPMD exit-beam export below (see
-    # --save-openpmd-beam) has an exact screen at the aperture-exit z to select from.
-    if bool(args.aperture_enabled):
-        z_snaps = sorted(set(z_snaps or []) | {float(args.aperture_start_m), float(args.aperture_end_m)})
-
     tracking = rg.TrackingParams(
         phi_deg=float(phase_deg_transport),
         n_particles=int(args.n_particles),
@@ -812,109 +815,69 @@ def main() -> None:
     mf = np.array(result.Bout.get_phase_space(phase_fmt, "all"), copy=True)
     z_snaps_arr = np.asarray(result.z_snaps, dtype=float)
 
-    # Backward-tagging only: this pipeline has no post-hoc aperture entrance/exit screens (the
-    # notebook's aperture cell is the only place that pairing exists -- see rf_gun/aperture.py's
-    # module docstring), so aperture-loss tagging is always empty here. Computed once and reused
-    # by every figure and every JSON summary built from this run.
-    #
-    # A particle whose radius exceeds the field map's r_max_m extent can pick up an unphysical,
-    # runaway Pz, yet still reads as forward at Bout, corrupting Twiss/emittance for any screen it
-    # reaches. The notebook catches this for free via its aperture radius cut; this script has no
-    # equivalent geometric screen. Not filtered here, since a hidden energy/radius cut would risk
-    # silently dropping legitimate particles too -- pair a tight --aperture_m with r_max_m, or add
-    # a real geometric screen, instead of a numeric cutoff on the tagging itself.
-    tags = rg.build_particle_tags(mf, None, None, 0.0, False)
+    # `Bout` only ever contains particles the dynamic aperture (rf_gun.aperture) did not remove
+    # during tracking -- there is no separate post-hoc radius cut left to apply, so tagging here
+    # is just backward-vs-forward (from Bout's reliable absolute z/pz) plus lost (id-based, from
+    # RF-Track's own lost-particle table). Computed once and reused by every figure and every
+    # JSON summary built from this run.
+    tags = rg.build_particle_tags(mf, result.lost_table)
 
-    # Save the final (forward-going, aperture-clipped when --aperture_enabled) 6D beam as
-    # openPMD-beamphysics HDF5 -- mirrors the notebook's "Export the exit beam" cell exactly
-    # (same source-selection logic, same `Bout_sout<mm>mm_T<K>K_SC<on/off>_BL<on/off>.h5` naming).
+    # Save the final (forward-going, dynamic-aperture-surviving) 6D beam as openPMD-beamphysics
+    # HDF5 -- mirrors the notebook's "Export the exit beam" cell exactly (same
+    # `Bout_sout<mm>mm_T<K>K_SC<on/off>_BL<on/off>.h5` naming).
     openpmd_h5_path = None
     openpmd_exit_beam_summary = None
     if bool(args.save_openpmd_beam):
         openpmd_dir = output_dir / "openpmd"
-        _skip_export = False
 
-        if bool(args.aperture_enabled):
-            aperture_radius_mm = float(args.aperture_diameter_mm) / 2.0
-            _i_ext_save = int(np.argmin(np.abs(z_snaps_arr - float(args.aperture_end_m))))
-            _M_ap_exit_raw = np.asarray(result.M_snaps[_i_ext_save], dtype=float)
-            _is_bw_save, _ = rg.tag_mask(_M_ap_exit_raw, tags, screen_z_m=float(z_snaps_arr[_i_ext_save]))
-            _M_ap_exit_fwd = _M_ap_exit_raw[~_is_bw_save] if _M_ap_exit_raw.shape[0] else _M_ap_exit_raw
-            _r_mask_save = rg.aperture_survival_mask(_M_ap_exit_fwd, aperture_radius_mm)
-            _M_to_save = _M_ap_exit_fwd[_r_mask_save] if _M_ap_exit_fwd.shape[0] else _M_ap_exit_fwd
+        _bunch_to_save = result.Bout
+        _which = "good"
+        _forward_only_save = True
+        s_out_m = float(z_max)
+        _save_source = "Bout (final tracking time, dynamic-aperture survivors)"
 
-            print(
-                f"Aperture-exit screen (z={z_snaps_arr[_i_ext_save]*1e3:.3f} mm): "
-                f"{_M_ap_exit_raw.shape[0]} particles reached this plane, "
-                f"{_M_ap_exit_fwd.shape[0]} forward-going, "
-                f"{_M_to_save.shape[0]} within aperture radius ({aperture_radius_mm:.4f} mm)."
-            )
+        s_out_mm = s_out_m * 1e3
+        _stem = f"Bout_sout{s_out_mm:.1f}mm_T{float(args.t_cathode_k):.0f}K_{rg.sc_bl_tag(bool(args.sc_enabled), bool(args.beam_loading))}"
+        _meta = {
+            "run_name": output_dir.name,
+            "s_out_m": s_out_m,
+            "save_source": _save_source,
+            "delta_cathode_chamfer_mm": float(delta_cathode_chamfer_mm),
+            "transport_phase_deg": float(phase_deg_transport),
+            "f_hz": float(f_hz),
+            "cathode_T_K": float(args.t_cathode_k),
+            "work_function_eV": float(args.phi_eff_ev),
+            "space_charge": bool(args.sc_enabled),
+            "beam_loading": bool(args.beam_loading),
+            "Q_total_C": float(result.thermo_info.get("Q_total_C", float("nan"))),
+        }
+        openpmd_h5_path = rg.save_beam_openpmd(
+            openpmd_dir / f"{_stem}.h5",
+            _bunch_to_save,
+            which=_which,
+            forward_only=_forward_only_save,
+            aperture_radius_mm=None,
+            species="electron",
+            extra_attrs=_meta,
+        )
 
-            if _M_to_save.shape[0] == 0:
-                print("WARNING: no particles within the aperture radius -- skipping openPMD exit-beam export.")
-                _skip_export = True
-            else:
-                # Uniform per-macroparticle weighting (matches build_bunch_thermionic's own N
-                # column, split evenly across all requested macroparticles).
-                _n_real_per_macro = (abs(float(result.thermo_info.get("Q_total_C", 0.0))) / rg.q_e) / float(args.n_particles)
-                _N_real_saved = _n_real_per_macro * _M_to_save.shape[0]
-                _bunch_to_save = rft.Bunch6dT(rg.ME_MEV, float(_N_real_saved), -1.0, _M_to_save[:, :6])
-                _which = "all"
-                _forward_only_save = False
-                _aperture_radius_for_save = None  # already filtered above
-                s_out_m = float(z_snaps_arr[_i_ext_save])
-                _save_source = "aperture-exit screen (exact z of aperture crossing)"
-        else:
-            _bunch_to_save = result.Bout
-            _which = "good"
-            _forward_only_save = True
-            _aperture_radius_for_save = None
-            s_out_m = float(z_max)
-            _save_source = "Bout (final tracking time, no aperture)"
+        from pmd_beamphysics import ParticleGroup
 
-        if not _skip_export:
-            s_out_mm = s_out_m * 1e3
-            _stem = f"Bout_sout{s_out_mm:.1f}mm_T{float(args.t_cathode_k):.0f}K_{rg.sc_bl_tag(bool(args.sc_enabled), bool(args.beam_loading))}"
-            _meta = {
-                "run_name": output_dir.name,
-                "s_out_m": s_out_m,
-                "save_source": _save_source,
-                "aperture_radius_mm": (float(args.aperture_diameter_mm) / 2.0) if bool(args.aperture_enabled) else None,
-                "transport_phase_deg": float(phase_deg_transport),
-                "f_hz": float(f_hz),
-                "cathode_T_K": float(args.t_cathode_k),
-                "work_function_eV": float(args.phi_eff_ev),
-                "space_charge": bool(args.sc_enabled),
-                "beam_loading": bool(args.beam_loading),
-                "Q_total_C": float(result.thermo_info.get("Q_total_C", float("nan"))),
-            }
-            openpmd_h5_path = rg.save_beam_openpmd(
-                openpmd_dir / f"{_stem}.h5",
-                _bunch_to_save,
-                which=_which,
-                forward_only=_forward_only_save,
-                aperture_radius_mm=_aperture_radius_for_save,
-                species="electron",
-                extra_attrs=_meta,
-            )
-
-            from pmd_beamphysics import ParticleGroup
-
-            _pg = ParticleGroup(h5=str(openpmd_h5_path))
-            openpmd_exit_beam_summary = {
-                "file": str(openpmd_h5_path.resolve()),
-                "source": _save_source,
-                "s_out_m": s_out_m,
-                "n_saved": int(_pg.n_particle),
-                "total_charge_C": float(_pg.charge),
-                "mean_energy_eV": float(_pg["mean_energy"]),
-                "norm_emit_x_m": float(_pg["norm_emit_x"]),
-                "norm_emit_y_m": float(_pg["norm_emit_y"]),
-            }
-            print(f"Saved exit beam to: {openpmd_h5_path.resolve()}")
-            print(f"Source                   : {_save_source}")
-            print(f"z of saved distribution  : s_out = {s_out_mm:.3f} mm from cathode (z=0)")
-            print(f"Saved                    : {_pg.n_particle}")
+        _pg = ParticleGroup(h5=str(openpmd_h5_path))
+        openpmd_exit_beam_summary = {
+            "file": str(openpmd_h5_path.resolve()),
+            "source": _save_source,
+            "s_out_m": s_out_m,
+            "n_saved": int(_pg.n_particle),
+            "total_charge_C": float(_pg.charge),
+            "mean_energy_eV": float(_pg["mean_energy"]),
+            "norm_emit_x_m": float(_pg["norm_emit_x"]),
+            "norm_emit_y_m": float(_pg["norm_emit_y"]),
+        }
+        print(f"Saved exit beam to: {openpmd_h5_path.resolve()}")
+        print(f"Source                   : {_save_source}")
+        print(f"z of saved distribution  : s_out = {s_out_mm:.3f} mm from cathode (z=0)")
+        print(f"Saved                    : {_pg.n_particle}")
 
     npz_path = output_dir / "beam_data.npz"
     npz_payload: Dict[str, Any] = {"M0": m0, "Mf": mf, "z_snaps": z_snaps_arr}
@@ -1012,6 +975,7 @@ def main() -> None:
             save_json=bool(args.save_screen_phase_space_json),
             figure_formats=tuple(str(fmt).strip().lower() for fmt in args.screen_frame_formats if str(fmt).strip()),
             timing_log=bool(args.screen_frame_timing_log),
+            thermo_info=dict(result.thermo_info),
         )
 
     saved_screen_json = 0
@@ -1070,12 +1034,9 @@ def main() -> None:
 
     if bool(args.save_class_phase_space):
         if mf.ndim == 2 and mf.shape[0] > 0 and mf.shape[1] >= 6:
-            zf = np.asarray(mf[:, 4], dtype=float)
-            pzf = np.asarray(mf[:, 5], dtype=float)
-            mask_trans = np.isfinite(zf) & np.isfinite(pzf) & (zf >= 0.0) & (pzf > 0.0)
-            mask_back = np.isfinite(zf) & np.isfinite(pzf) & ~mask_trans
-            rg.save_beam_phase_space_json(output_dir / "B_transmitted.json", mf[mask_trans], label="B_transmitted")
-            rg.save_beam_phase_space_json(output_dir / "B_backward_returned.json", mf[mask_back], label="B_backward_returned")
+            is_backward, _is_lost = rg.tag_mask(mf, tags)
+            rg.save_beam_phase_space_json(output_dir / "B_transmitted.json", mf[~is_backward], label="B_transmitted")
+            rg.save_beam_phase_space_json(output_dir / "B_backward_returned.json", mf[is_backward], label="B_backward_returned")
 
     ref_note = "RF-Track may switch to centroid reference if first particle is lost; robust summaries are computed from explicit phase-space arrays."
     ref_warn = bool(result.thermo_info.get("reference_particle_reordered", False))
@@ -1191,16 +1152,18 @@ def main() -> None:
                 "screen_t0_manual_mm_c": float(args.screen_t0_manual_mm_c),
             },
             "aperture": {
-                "volume_aperture_m": args.aperture_m,
-                "physical_exit_aperture_enabled": bool(args.aperture_enabled),
-                "physical_exit_aperture_start_m": float(args.aperture_start_m) if bool(args.aperture_enabled) else None,
-                "physical_exit_aperture_end_m": float(args.aperture_end_m) if bool(args.aperture_enabled) else None,
-                "physical_exit_aperture_diameter_mm": float(args.aperture_diameter_mm) if bool(args.aperture_enabled) else None,
+                "delta_cathode_chamfer_mm": float(delta_cathode_chamfer_mm),
+                "r1_mm": rg.R1_MM,
+                "r2_mm": rg.R2_MM,
+                "R_cav_mm": rg.R_CAV_MM,
+                "chamfer_len_mm": rg.CHAMFER_LEN_MM,
+                "chamfer_angle_deg": rg.CHAMFER_ANGLE_DEG,
+                "rho_mm": rg.RHO_MM,
+                "L_mm": rg.L_MM,
                 "note": (
-                    "'volume_aperture_m' is RF-Track's own whole-Volume aperture bound; the "
-                    "'physical_exit_aperture_*' fields are the separate, opt-in (--aperture_enabled) "
-                    "post-hoc geometric cut matching the notebook's APERTURE_START_M/END_M/"
-                    "APERTURE_DIAMETER_MM, used only for the --save-openpmd-beam export."
+                    "Dynamic radial aperture R(z), enforced by RF-Track's own Aperture_1d element "
+                    "during tracking (see rf_gun.aperture) -- replaces both the old whole-Volume "
+                    "scalar aperture_m and the old post-hoc physical-exit-aperture radius cut."
                 ),
             },
             "deflection_magnet": {
@@ -1254,7 +1217,6 @@ def main() -> None:
                 "tracking_call": rg.to_json_safe(progress_stats),
             },
             "beam_summary": rg.to_json_safe(beam_summary),
-            "aperture_summary": None,
             "back_bombardment": back_bombardment_summary,
             "openpmd_exit_beam": openpmd_exit_beam_summary,
             "reference_particle_warning": bool(ref_warn),

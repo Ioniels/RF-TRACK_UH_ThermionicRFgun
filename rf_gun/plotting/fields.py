@@ -5,9 +5,11 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
+from ..aperture import aperture_radius_profile_mm
 from .style import (
     DEFAULT_PLOT_STYLE,
     PlotStyleConfig,
+    add_aperture_curve,
     add_reference_lines,
     get_default_density_cmap,
     get_recentered_diverging_cmap,
@@ -26,9 +28,7 @@ def field_maps(
     *,
     Er_grid: Optional[np.ndarray] = None,
     z_end_m: Optional[float] = None,
-    aperture_enabled: bool = False,
-    aperture_start_m: Optional[float] = None,
-    aperture_end_m: Optional[float] = None,
+    aperture_delta_mm: Optional[float] = None,
     style: PlotStyleConfig | None = None,
     show_colorbar: bool = True,
     density_cmap=None,
@@ -42,6 +42,11 @@ def field_maps(
     of |value|) than the waveguide view (98.5th percentile), since most of its structure sits at
     lower field magnitude; values beyond that range are clipped to a darker off-scale color
     instead of saturating (see `get_recentered_diverging_cmap`).
+
+    `aperture_delta_mm`, when given, overlays the dynamic aperture's R(z) profile (see
+    `rf_gun.aperture.aperture_radius_profile_mm`) as +/-R(z) curves on both bottom panels -- this
+    is the field map RF-Track actually uses, so it's the natural place to show the physical
+    channel it's paired with during tracking.
     """
     import matplotlib.pyplot as plt
     import matplotlib.tri as mtri
@@ -126,8 +131,11 @@ def field_maps(
 
     z_end_mm = float(z_end_m) * 1e3 if z_end_m is not None else None
     lambda_quarter_mm = lambda_m / 4 * 1e3
-    aperture_start_mm = float(aperture_start_m) * 1e3 if (aperture_enabled and aperture_start_m is not None) else None
-    aperture_end_mm = float(aperture_end_m) * 1e3 if (aperture_enabled and aperture_end_m is not None) else None
+    aperture_r_mm = (
+        aperture_radius_profile_mm(z_grid * 1e3, float(aperture_delta_mm))
+        if aperture_delta_mm is not None
+        else None
+    )
 
     def _bottom_panel(ax, field_full, title, cmap, norm, cbar_label):
         im = ax.imshow(
@@ -143,10 +151,10 @@ def field_maps(
             cathode_z_mm=0.0,
             z_end_mm=z_end_mm,
             lambda_quarter_mm=lambda_quarter_mm,
-            aperture_start_mm=aperture_start_mm,
-            aperture_end_mm=aperture_end_mm,
             halo=True,
         )
+        if aperture_r_mm is not None:
+            add_aperture_curve(ax, z_grid * 1e3, aperture_r_mm)
         ax.axhline(0, color="black", ls=":", lw=0.8, alpha=0.4)
         ax.set_xlabel(r"$z$ (mm)", fontsize=12)
         ax.set_ylabel(r"$r$ (mm)", fontsize=12)
@@ -190,9 +198,6 @@ def axis_phase(
     lambda_m: float,
     *,
     z_end_m: Optional[float] = None,
-    aperture_enabled: bool = False,
-    aperture_start_m: Optional[float] = None,
-    aperture_end_m: Optional[float] = None,
 ) -> Tuple[float, float]:
     """Auto phase from on-axis phasor and plot Ez(z) at a dense, evenly-spaced sweep of phases.
 
@@ -232,16 +237,12 @@ def axis_phase(
         ax.plot(z_grid * 1e3, Ez_phase, lw=1.3, color=color, alpha=0.9)
 
     z_end_mm = float(z_end_m) * 1e3 if z_end_m is not None else None
-    aperture_start_mm = float(aperture_start_m) * 1e3 if (aperture_enabled and aperture_start_m is not None) else None
-    aperture_end_mm = float(aperture_end_m) * 1e3 if (aperture_enabled and aperture_end_m is not None) else None
 
     add_reference_lines(
         ax,
         cathode_z_mm=0.0,
         z_end_mm=z_end_mm,
         lambda_quarter_mm=lambda_m / 4 * 1e3,
-        aperture_start_mm=aperture_start_mm,
-        aperture_end_mm=aperture_end_mm,
         halo=False,
     )
 

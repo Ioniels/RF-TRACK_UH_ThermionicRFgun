@@ -15,7 +15,7 @@
 # solver/meshing resolution knob to the tightest tier (rf_gun/finesse_presets.py): roughly 2x
 # finer than the `fine` tier in run_thermionic_tm010_scanT_1400_1700_fine.slurm, at a
 # proportionally longer runtime. N=100,000 particles, 2 z-snap screens (+2 auto-inserted
-# aperture entrance/exit screens). Deflection magnet OFF: the magnet forces single-threaded
+# Deflection magnet OFF: the magnet forces single-threaded
 # tracking (see rf_gun/deflection_field.py), which would leave --cpus-per-task=32 mostly idle.
 
 set -eo pipefail
@@ -60,7 +60,7 @@ ${PY} ${SCRIPT} \
   --xy_fieldmap field_maps/XYplanarSensorData.mat \
   --yz_fieldmap field_maps/YZplanarSensorData.mat \
   --y_cathode_mm 12.75 \
-  --r_max_m 0.01 \
+  --r_max_m 0.0340145 \
   --ext_zmax 0.0075 \
   --z_min 0.0 \
   --r_cathode_mm 1.57 \
@@ -82,7 +82,7 @@ ${PY} ${SCRIPT} \
   --screen_t0_mode unset \
   --screen_t0_manual_mm_c 0.0 \
   --no-screen_log \
-  --aperture_m 1.0 \
+  --delta_cathode_chamfer_mm 0.0 \
   --ode_algorithm rk2 \
   --sc_enabled \
   --emission_range 10.0 \
@@ -96,10 +96,6 @@ ${PY} ${SCRIPT} \
   --bl_tinj_mode auto_from_emission \
   --bl_tinj_manual_mm_c 0.0 \
   --no-deflection_enabled \
-  --aperture_enabled \
-  --aperture_start_m 0.028854 \
-  --aperture_end_m 0.040589 \
-  --aperture_diameter_mm 5.0546 \
   --n_particles 100000 \
   --n_z_snap 2 \
   --t_cathode_k "${T_CATHODE_K}" \

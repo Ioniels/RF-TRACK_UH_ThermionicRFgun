@@ -2,28 +2,32 @@
 
 Two independent visualization knobs replace the project's former `clean_e`/`clean_except_zpz`/
 `show_zle0`/`highlight_mode`/`highlight_zlt0`/`highlight_pzlt0`/`highlight_mask`/`highlight_cmap`
-parameter set: `exclude_backward_losses` and `exclude_aperture_losses`. Each independently either
-drops the corresponding population entirely or keeps it, highlighted in a distinct color
-(grayscale for backward, green for aperture-loss) -- see `_prepare_plot_population`. Tagging is
-`%id`-based via `rf_gun.particle_tags.ParticleTags` (not a screen's own z/pz, which does not
-reliably carry the true lab-frame sign for a backward-crossing particle -- see
+parameter set: `exclude_backward_losses` and `exclude_lost`. Each independently either drops the
+corresponding population entirely or keeps it, highlighted in a distinct color (grayscale for
+backward, green for lost) -- see `_prepare_plot_population`. Tagging is `%id`-based via
+`rf_gun.particle_tags.ParticleTags` (not a screen's own z/pz, which does not reliably carry the
+true lab-frame sign for a backward-crossing particle -- see
 `rf_gun.diagnostics.manual_twiss_and_emittance`'s docstring for the full empirical finding).
+"Lost" means removed by the dynamic aperture (`rf_gun.aperture`) during tracking; unlike the
+project's former post-hoc radius cut, this tagging needs no per-screen z-gating -- a particle
+that was lost is simply and correctly absent from every screen from that point onward, and
+present (untagged) at every screen upstream of it, by construction of the physical removal.
 
 `Bout` is intentionally not plotted here: unlike a Screen, it is a fixed-*time* snapshot with a
 spread of z among its particles (forward-transmitted ones have traveled further than
 backward-turned ones), so it has no single z to display and is not shown as a phase-space panel.
-The last screen (e.g. the aperture-exit screen) serves as the "exit" view instead.
+The last screen serves as the "exit" view instead.
 
-The third panel in every triplet below shows ToF-pz, not z-pz (confirmed empirically -- see
-`rf_gun.aperture`'s module docstring for the full writeup): a screen's own `%Z` column is not a
-lab-frame position at all -- it's each crossing particle's velocity times its time offset from
-whichever particle is currently the bunch's *reference* particle, so it can be large in either
-sign for a genuinely slow or fast particle without that particle being anywhere near backward.
-`%t` (arrival time), by contrast, is a genuine, reliable per-particle quantity at every screen, so
-it's used instead throughout -- for `Bout`/`B0` too, for consistency between panels/rows in the
-same figure (their own `%Z` is reliable, but mixing conventions within one figure would be worse).
-`exclude_backward_losses`/`exclude_aperture_losses` still filter by particle identity (via `%id`
-against `Bout`'s reliable absolute z/pz), independent of whichever longitudinal quantity is shown.
+The third panel in every triplet below shows ToF-pz, not z-pz (confirmed empirically): a screen's
+own `%Z` column is not a lab-frame position at all -- it's each crossing particle's velocity
+times its time offset from whichever particle is currently the bunch's *reference* particle, so
+it can be large in either sign for a genuinely slow or fast particle without that particle being
+anywhere near backward. `%t` (arrival time), by contrast, is a genuine, reliable per-particle
+quantity at every screen, so it's used instead throughout -- for `Bout`/`B0` too, for consistency
+between panels/rows in the same figure (their own `%Z` is reliable, but mixing conventions within
+one figure would be worse). `exclude_backward_losses`/`exclude_lost` still filter by particle
+identity (via `%id` against `Bout`'s reliable absolute z/pz and RF-Track's own lost-particle
+table), independent of whichever longitudinal quantity is shown.
 """
 from __future__ import annotations
 
@@ -37,14 +41,21 @@ from .style import (
     DEFAULT_PLOT_STYLE,
     PlotStyleConfig,
     get_default_density_cmap,
-    get_aperture_loss_cmap,
+    get_lost_cmap,
     COLOR_PRIMARY,
     COLOR_SECONDARY,
+    COLOR_LOST,
 )
 
 #: Matches `rf_gun.simulation.EXTENDED_PHASE_FMT` (not imported directly to avoid a
 #: plotting -> simulation dependency; kept identical by convention).
 EXTENDED_PHASE_FMT_DEFAULT = "%X %Px %Y %Py %Z %Pz %id %t %E %K"
+
+#: Larger-than-default axis-label/tick/legend sizes for `plot_spectra`'s 2x3 grid, where the
+#: default rcParams sizes read as cramped next to 6 panels' worth of dual axes and legends.
+_LABEL_FONTSIZE = 13
+_TICK_FONTSIZE = 11
+_LEGEND_FONTSIZE = 12
 
 
 def _safe_get_phase_space(bunch, selection: str, phase_fmt: str) -> np.ndarray:
@@ -56,37 +67,32 @@ def _prepare_plot_population(
     tags: Optional[ParticleTags],
     *,
     exclude_backward_losses: bool,
-    exclude_aperture_losses: bool,
-    screen_z_m: Optional[float] = None,
+    exclude_lost: bool,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Split one phase-space snapshot into `(M_plot, backward_highlight, aperture_highlight)`.
+    """Split one phase-space snapshot into `(M_plot, backward_highlight, lost_highlight)`.
 
     - `tags is None` (tagging unavailable, e.g. no `%id` column): returns `M` unchanged with both
       highlight masks all-`False`.
     - `exclude_*=True`: that population is dropped from `M_plot` entirely.
     - `exclude_*=False`: that population stays in `M_plot`; its highlight mask marks which rows
       they are so the caller can render them in a distinct color.
-    - `screen_z_m`: this snapshot's own z (meters, absolute lab frame) -- passed through to
-      `tag_mask` so aperture-loss tagging doesn't apply upstream of the aperture (see
-      `rf_gun.particle_tags.tag_mask`'s docstring). `None` (e.g. Launch/B0) keeps the
-      unconditional behavior, which is correct there since z=0 is always upstream of any aperture.
     """
     arr = np.asarray(M, dtype=float)
     if arr.ndim != 2 or arr.shape[0] == 0 or tags is None:
         empty = np.zeros((arr.shape[0] if arr.ndim == 2 else 0,), dtype=bool)
         return arr, empty, empty
 
-    is_backward, is_aperture_lost = tag_mask(arr, tags, screen_z_m=screen_z_m)
+    is_backward, is_lost = tag_mask(arr, tags)
     keep = np.ones(arr.shape[0], dtype=bool)
     if exclude_backward_losses:
         keep &= ~is_backward
-    if exclude_aperture_losses:
-        keep &= ~is_aperture_lost
+    if exclude_lost:
+        keep &= ~is_lost
 
     M_plot = arr[keep]
     bw_highlight = is_backward[keep] if not exclude_backward_losses else np.zeros(M_plot.shape[0], dtype=bool)
-    ap_highlight = is_aperture_lost[keep] if not exclude_aperture_losses else np.zeros(M_plot.shape[0], dtype=bool)
-    return M_plot, bw_highlight, ap_highlight
+    lost_highlight = is_lost[keep] if not exclude_lost else np.zeros(M_plot.shape[0], dtype=bool)
+    return M_plot, bw_highlight, lost_highlight
 
 
 def phase_space_density(
@@ -108,7 +114,7 @@ def phase_space_density(
     - ``scatter=True``: KDE-colored ``ax.scatter(...)`` (with sparse-data safeguards)
 
     Callers pass an explicit `cmap` for whichever population layer they're drawing (normal,
-    backward-highlighted, aperture-highlighted) -- see `_phase_space_panel`.
+    backward-highlighted, lost-highlighted) -- see `_phase_space_panel`.
     """
     x = np.asarray(x, dtype=float).reshape(-1)
     y = np.asarray(y, dtype=float).reshape(-1)
@@ -185,18 +191,20 @@ def _phase_space_panel(
     title: str,
     style: PlotStyleConfig,
     backward_mask: np.ndarray | None = None,
-    aperture_mask: np.ndarray | None = None,
+    lost_mask: np.ndarray | None = None,
     show_colorbar: bool = False,
     x_scale: float = 1.0,
+    y_scale: float = 1.0,
 ):
     """Draw one canonical phase-space panel with mirrored inset marginals.
 
     Up to three density layers, drawn in order: normal (plasma, default), backward-highlighted
-    (grayscale, `PlotStyleConfig.lost_cmap`), aperture-highlighted (green,
-    `get_aperture_loss_cmap()`). A row is normal iff it is in neither highlight mask.
+    (grayscale, `PlotStyleConfig.backward_cmap`), lost-highlighted (green, `get_lost_cmap()`). A
+    row is normal iff it is in neither highlight mask.
 
-    `x_scale` rescales the raw `M[:, x_idx]` column for display -- used for the ToF panel, whose
-    column (`%t`, mm/c) needs converting to ns; 1.0 (no-op) for every other panel.
+    `x_scale`/`y_scale` rescale the raw `M[:, x_idx]`/`M[:, y_idx]` columns for display -- `x_scale`
+    is used for the ToF panel, whose column (`%t`, mm/c) needs converting to ns; `y_scale` converts
+    the momentum columns (`%Px`/`%Py`/`%Pz`, MeV/c) to keV/c. 1.0 (no-op) where not needed.
     """
     ax_main = fig.add_subplot(sub_spec)
 
@@ -210,13 +218,13 @@ def _phase_space_panel(
         return ax_main
 
     x = np.asarray(M[:, x_idx], dtype=float) * float(x_scale)
-    y = np.asarray(M[:, y_idx], dtype=float)
+    y = np.asarray(M[:, y_idx], dtype=float) * float(y_scale)
     finite = np.isfinite(x) & np.isfinite(y)
 
     n = M.shape[0]
     bw = np.asarray(backward_mask, dtype=bool).reshape(-1) if backward_mask is not None and np.asarray(backward_mask).size == n else np.zeros(n, dtype=bool)
-    ap = np.asarray(aperture_mask, dtype=bool).reshape(-1) if aperture_mask is not None and np.asarray(aperture_mask).size == n else np.zeros(n, dtype=bool)
-    normal = finite & ~bw & ~ap
+    lost = np.asarray(lost_mask, dtype=bool).reshape(-1) if lost_mask is not None and np.asarray(lost_mask).size == n else np.zeros(n, dtype=bool)
+    normal = finite & ~bw & ~lost
 
     x_main = x[finite]
     y_main = y[finite]
@@ -241,19 +249,19 @@ def _phase_space_panel(
             bins=int(style.bins),
             scatter_size=int(style.scatter_size),
             scatter_alpha=float(style.scatter_alpha),
-            cmap=str(style.lost_cmap),
+            cmap=str(style.backward_cmap),
             zorder=2,
         )
-    if np.any(ap & finite):
+    if np.any(lost & finite):
         phase_space_density(
             ax_main,
-            x[ap & finite],
-            y[ap & finite],
+            x[lost & finite],
+            y[lost & finite],
             scatter=bool(style.scatter),
             bins=int(style.bins),
             scatter_size=int(style.scatter_size),
             scatter_alpha=float(style.scatter_alpha),
-            cmap=get_aperture_loss_cmap(),
+            cmap=get_lost_cmap(),
             zorder=3,
         )
 
@@ -325,14 +333,14 @@ def _initial_pz_hist_panel(
     sub_spec,
     M_launch: np.ndarray,
     backward_mask: np.ndarray | None,
-    aperture_mask: np.ndarray | None,
+    lost_mask: np.ndarray | None,
     *,
     style: PlotStyleConfig,
     title: str,
 ):
     """Special launch panel: histogram of initial pz split by final tag (surviving/backward/
-    aperture-lost), in place of a z-pz scatter (which is not meaningful at launch, where all
-    particles sit at z=0)."""
+    lost), in place of a z-pz scatter (which is not meaningful at launch, where all particles sit
+    at z=0)."""
     ax = fig.add_subplot(sub_spec)
     M = np.asarray(M_launch, dtype=float)
     if M.ndim != 2 or M.shape[0] == 0 or M.shape[1] < 6:
@@ -353,9 +361,9 @@ def _initial_pz_hist_panel(
     bins = np.histogram_bin_edges(pz0_keV_f, bins=int(style.bins))
     n = M.shape[0]
     bw = np.asarray(backward_mask, dtype=bool)[finite] if backward_mask is not None and np.asarray(backward_mask).size == n else np.zeros(pz0_keV_f.shape[0], dtype=bool)
-    ap = np.asarray(aperture_mask, dtype=bool)[finite] if aperture_mask is not None and np.asarray(aperture_mask).size == n else np.zeros(pz0_keV_f.shape[0], dtype=bool)
-    normal = ~bw & ~ap
-    any_split = bool(np.any(bw) or np.any(ap))
+    lost = np.asarray(lost_mask, dtype=bool)[finite] if lost_mask is not None and np.asarray(lost_mask).size == n else np.zeros(pz0_keV_f.shape[0], dtype=bool)
+    normal = ~bw & ~lost
+    any_split = bool(np.any(bw) or np.any(lost))
 
     if any_split:
         if np.any(normal):
@@ -370,11 +378,11 @@ def _initial_pz_hist_panel(
                 linewidth=float(getattr(style, "hist_linewidth", 1.2)),
                 color=COLOR_SECONDARY, alpha=float(style.hist_alpha), label="backward",
             )
-        if np.any(ap):
+        if np.any(lost):
             ax.hist(
-                pz0_keV_f[ap], bins=bins, histtype="step",
+                pz0_keV_f[lost], bins=bins, histtype="step",
                 linewidth=float(getattr(style, "hist_linewidth", 1.2)),
-                color="tab:green", alpha=float(style.hist_alpha), label="aperture-lost",
+                color=COLOR_LOST, alpha=float(style.hist_alpha), label="lost",
             )
         ax.legend(frameon=False, loc="best")
     else:
@@ -392,6 +400,32 @@ def _initial_pz_hist_panel(
     return ax
 
 
+def _patch_launch_t_emit(M_launch_all: np.ndarray, thermo_info: dict | None) -> np.ndarray | None:
+    """A copy of `M_launch_all` with its `%t` column (`T_COL`) overwritten by each particle's
+    real emission time (`thermo_info["initial_t0_mm_c"]`), so the Initial row's third panel can
+    show a real (t_emit, pz) distribution instead of RF-Track's own `%t`.
+
+    `initial_t0_mm_c` is already in mm/c -- the same units `_phase_space_triplet` already scales
+    by `_MM_C_TO_NS` for the ToF slot -- and, crucially, in the *same row order* as `M_launch_all`:
+    both come from the same never-tracked, never-filtered `B0` (confirmed empirically against the
+    installed RF-Track binding -- a freshly built `Bunch6dT`'s `%id` is 0..n-1 in construction
+    order), so no `%id` re-matching is needed here, unlike every post-tracking population in this
+    project. Returns `None` (meaning: no substitution, caller should fall back to the pz-only
+    histogram) when `thermo_info` doesn't have a matching-length `initial_t0_mm_c`.
+    """
+    if thermo_info is None or M_launch_all.ndim != 2 or M_launch_all.shape[1] <= T_COL:
+        return None
+    t0_mm_c = thermo_info.get("initial_t0_mm_c", None)
+    if t0_mm_c is None:
+        return None
+    t0_mm_c = np.asarray(t0_mm_c, dtype=float).reshape(-1)
+    if t0_mm_c.size != M_launch_all.shape[0]:
+        return None
+    M_patched = np.array(M_launch_all, dtype=float, copy=True)
+    M_patched[:, T_COL] = t0_mm_c
+    return M_patched
+
+
 def _phase_space_triplet(
     fig,
     row_spec,
@@ -399,28 +433,40 @@ def _phase_space_triplet(
     *,
     style: PlotStyleConfig,
     backward_mask: np.ndarray | None = None,
-    aperture_mask: np.ndarray | None = None,
+    lost_mask: np.ndarray | None = None,
     show_colorbar: bool = False,
     prefix: str = "",
     launch_pz_hist_masks: tuple[np.ndarray | None, np.ndarray | None] | None = None,
+    third_col_is_t_emit: bool = False,
 ):
-    """Render x-px, y-py, ToF-pz using one unified panel layout and density engine.
+    """Render x-px, y-py, (ToF or t_emit)-pz using one unified panel layout and density engine.
 
-    The third panel uses ToF (`%t`), not z (`%Z`) -- see the module docstring for why.
+    The third panel uses `%t`/ToF, not z (`%Z`) -- see the module docstring for why -- *except*
+    for the Initial row, where `%t` is RF-Track's own elapsed-tracking-time field and is identically
+    0 for every particle in a bunch that hasn't been tracked yet (confirmed empirically against
+    the installed RF-Track binding), so a real physical quantity is substituted in: see
+    `_patch_launch_t_emit` and its callers, which overwrite that column with each particle's known
+    emission time before this function ever sees it. `third_col_is_t_emit=True` only changes this
+    panel's label/title to say so; the column read is still `T_COL` either way.
 
-    `launch_pz_hist_masks`, when given, is `(backward_mask, aperture_mask)` for the special
-    ToF-pz-slot launch histogram (see `_initial_pz_hist_panel`) in place of a scatter panel --
-    used only for the Launch row (ToF-pz is not physically meaningful there).
+    `launch_pz_hist_masks`, when given, is `(backward_mask, lost_mask)` for the fallback ToF-pz-
+    slot launch histogram (see `_initial_pz_hist_panel`), used in place of a scatter panel only
+    when the real per-particle emission time isn't available (no `thermo_info`) -- a 1D pz
+    histogram is still more honest than a scatter against a column that is identically zero.
     """
+    third_label = r"$t_{\mathrm{emit}}\,(\mathrm{ns})$" if third_col_is_t_emit else r"$\mathrm{ToF}\,(\mathrm{ns})$"
+    third_title_sym = r"t_{\mathrm{emit}}\!\!-\!p_z" if third_col_is_t_emit else r"\mathrm{ToF}\!\!-\!p_z"
+    # Momentum columns (Px/Py/Pz) are stored in MeV/c but displayed in keV/c (y_scale=1e3) --
+    # more readable given this project's typical thermal/near-cathode momentum scale (~0.1-1 keV/c).
     cfgs = [
-        (0, 1, r"$x\,(\mathrm{mm})$", r"$p_x\,(\mathrm{MeV}/c)$", rf"${prefix}x\!\!-\!p_x$", 1.0),
-        (2, 3, r"$y\,(\mathrm{mm})$", r"$p_y\,(\mathrm{MeV}/c)$", rf"${prefix}y\!\!-\!p_y$", 1.0),
-        (T_COL, 5, r"$\mathrm{ToF}\,(\mathrm{ns})$", r"$p_z\,(\mathrm{MeV}/c)$", rf"${prefix}\mathrm{{ToF}}\!\!-\!p_z$", _MM_C_TO_NS),
+        (0, 1, r"$x\,(\mathrm{mm})$", r"$p_x\,(\mathrm{keV}/c)$", rf"${prefix}x\!\!-\!p_x$", 1.0, 1e3),
+        (2, 3, r"$y\,(\mathrm{mm})$", r"$p_y\,(\mathrm{keV}/c)$", rf"${prefix}y\!\!-\!p_y$", 1.0, 1e3),
+        (T_COL, 5, third_label, r"$p_z\,(\mathrm{keV}/c)$", rf"${prefix}{third_title_sym}$", _MM_C_TO_NS, 1e3),
     ]
-    for j, (ix, iy, xl, yl, ttl, xs) in enumerate(cfgs):
+    for j, (ix, iy, xl, yl, ttl, xs, ys) in enumerate(cfgs):
         if j == 2 and launch_pz_hist_masks is not None:
-            bw_launch, ap_launch = launch_pz_hist_masks
-            _initial_pz_hist_panel(fig, row_spec[j], M, bw_launch, ap_launch, style=style, title=ttl)
+            bw_launch, lost_launch = launch_pz_hist_masks
+            _initial_pz_hist_panel(fig, row_spec[j], M, bw_launch, lost_launch, style=style, title=ttl)
             continue
         _phase_space_panel(
             fig,
@@ -431,10 +477,11 @@ def _phase_space_triplet(
             x_label=xl,
             y_label=yl,
             x_scale=xs,
+            y_scale=ys,
             title=ttl,
             style=style,
             backward_mask=backward_mask,
-            aperture_mask=aperture_mask,
+            lost_mask=lost_mask,
             show_colorbar=show_colorbar,
         )
 
@@ -446,19 +493,24 @@ def render_screen_phase_space_figure(
     z_mm: float | None = None,
     tags: ParticleTags | None = None,
     exclude_backward_losses: bool = True,
-    exclude_aperture_losses: bool = True,
+    exclude_lost: bool = True,
     style: PlotStyleConfig | None = None,
     show_colorbar: bool = False,
     n_macroparticles: int | None = None,
     n_ref: int | None = None,
     frame_position: tuple[int, int] | None = None,
+    thermo_info: dict | None = None,
 ):
     """Render one screen-style phase-space figure without widgets/display side effects.
 
     Transmission-percentage text is always row-count-based (`M_plot.shape[0]` vs. whichever of
     `n_macroparticles`/`n_ref` is available) -- this no longer reads an RF-Track
     `Screen.get_info()` object for anything (mean-arrival-time, when shown, comes from the `%t`
-    column already present in `M` itself via the extended phase-space format).
+    column already present in `M` itself via the extended phase-space format) -- *except* for the
+    Initial (B0) frame, identified by `z_mm is None`: `%t` there is RF-Track's own elapsed-tracking-
+    time field, identically 0 for every particle before any tracking happens, so `thermo_info`
+    (when given, with a matching-length `initial_t0_mm_c`) substitutes each particle's real
+    emission time instead -- see `_patch_launch_t_emit`.
 
     There used to be an `n_real_ref` option here (the *real*, charge-weighted electron count,
     `Q_total_C / q_e`) -- removed because it's a category error against a row count: a
@@ -477,11 +529,15 @@ def render_screen_phase_space_figure(
     if M_raw.ndim != 2 or M_raw.shape[1] < 6:
         M_raw = np.zeros((0, 6), dtype=float)
 
-    M_plot, bw_mask, ap_mask = _prepare_plot_population(
+    is_launch_frame = z_mm is None
+    M_launch_patched = _patch_launch_t_emit(M_raw, thermo_info) if is_launch_frame else None
+    if M_launch_patched is not None:
+        M_raw = M_launch_patched
+
+    M_plot, bw_mask, lost_mask = _prepare_plot_population(
         M_raw, tags,
         exclude_backward_losses=exclude_backward_losses,
-        exclude_aperture_losses=exclude_aperture_losses,
-        screen_z_m=(float(z_mm) / 1e3) if z_mm is not None else None,
+        exclude_lost=exclude_lost,
     )
 
     if n_macroparticles is not None and int(n_macroparticles) > 0:
@@ -525,9 +581,11 @@ def render_screen_phase_space_figure(
         M_plot,
         style=style,
         backward_mask=bw_mask,
-        aperture_mask=ap_mask,
+        lost_mask=lost_mask,
         show_colorbar=bool(show_colorbar),
         prefix="",
+        launch_pz_hist_masks=(bw_mask, lost_mask) if (is_launch_frame and M_launch_patched is None) else None,
+        third_col_is_t_emit=M_launch_patched is not None,
     )
     fig.suptitle(title)
     fig.tight_layout()
@@ -544,14 +602,51 @@ def plot_spectra(
     exclude_backward_losses: bool = False,
     phase_fmt: str = EXTENDED_PHASE_FMT_DEFAULT,
 ):
-    """Plot emission-time, final kinetic-energy, and time-of-flight histograms.
+    """2x3 spectra figure, no figure-level title: Initial longitudinal kinetic energy, Initial-time,
+    and Initial radial distributions (top row, split into forward vs. backward-and-lost by `%id`,
+    with a shared legend above the row); Output longitudinal kinetic energy, Output time-of-flight,
+    and Output radial distributions (bottom row, the forward population -- already
+    backward-excluded when `exclude_backward_losses=True`, the default -- split further into
+    forward-transmitted vs. forward-but-removed-by-the-dynamic-aperture, by `%id` against
+    `tags.lost_ids`, with its own shared legend positioned in the gap above that row). If nothing
+    was removed, `tags` reports no lost particles, so the "not transmitted" series is simply
+    empty and the bottom row degrades gracefully to a single series.
+
+    Every time-axis panel (emission-time, output ToF) reports the same two physical quantities as
+    `plot_emission_history`'s J(t) panel: current density J (A/cm^2, left) and current I (A,
+    right), since each histogram bin there is literally dQ/dt, a rate in time. Every energy-axis
+    panel (emission K_z, output K_z) reports the energy-domain analogue instead: current *spectral*
+    density dJ/dK_z (mA/(cm^2 keV), left) and dI/dK_z (mA/keV, right), since each bin there is a
+    slice of the total emitted charge by energy, not by time -- dividing that charge by the emission
+    window `tau` (not a local time step) turns it into the average current attributable to that
+    energy slice, the energy-domain counterpart of a current. Both pairs share the same relation,
+    (absolute) = (density) x (cathode area) -- only the denominator (time vs. energy) differs.
+
+    The radial panels (initial/output r) are areal particle densities, dN_e/dA in mm^-2 -- *not*
+    a plain per-bin count vs. r: an equal-width bin in r covers an annulus of area
+    pi*(r_hi^2-r_lo^2), which grows with r, so a naive count-per-bin histogram makes even a
+    spatially uniform beam look like its density ramps up toward larger r, an artifact of the
+    growing bin area rather than the actual radial profile. Dividing each bin's count by its own
+    annulus area (see `_radial_density_hist`) removes that artifact. There is no equally natural
+    "current-like" absolute quantity to pair on a secondary axis here, unlike time or energy, so
+    these two panels are single-axis.
+
+    The energy-axis panels plot K_z = sqrt(p_z^2 + m_e^2) - m_e, the *longitudinal* kinetic energy
+    from p_z alone (not the total 3-momentum p = sqrt(p_x^2+p_y^2+p_z^2)) -- deliberately, since
+    p_x/p_y are the beam's transverse degrees of freedom (already shown in the phase-space scatter
+    panels elsewhere) and mixing them into this energy axis would conflate a longitudinal spectrum
+    with transverse spread.
 
     `exclude_backward_losses` controls only whether backward-tagged particles are removed before
-    histogramming (via `%id` lookup against `tags`, not `Bout`'s own z/pz directly) -- there is no
-    aperture-loss split here since these are 1D distributions of the final bunch as a whole, not
-    phase-space scatter panels.
+    histogramming the *output* population (via `%id` lookup against `tags`, not `Bout`'s own z/pz
+    directly). `Bout` only ever contains particles the dynamic aperture did not remove, and a
+    particle's fate is fully settled by the time it reaches `Bout`, so `tag_mask` is read
+    unconditionally here. The *emission*-side panels (top row) always show both the forward and
+    backward-and-lost populations, colored, regardless of `exclude_backward_losses` -- that split
+    is the point of those two panels.
     """
     import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
 
     try:
         Mf_f_all = _safe_get_phase_space(Bout, "all", phase_fmt)
@@ -560,17 +655,65 @@ def plot_spectra(
 
     finite_z = np.isfinite(Mf_f_all[:, 4])
     is_backward = np.zeros(Mf_f_all.shape[0], dtype=bool)
+    is_lost = np.zeros(Mf_f_all.shape[0], dtype=bool)
     if tags is not None and Mf_f_all.shape[0]:
-        is_backward, _ = tag_mask(Mf_f_all, tags)
+        is_backward, is_lost = tag_mask(Mf_f_all, tags)
 
-    Mf_f = Mf_f_all[finite_z & ~is_backward] if exclude_backward_losses else Mf_f_all[finite_z]
+    Mf_f_mask = (finite_z & ~is_backward) if exclude_backward_losses else finite_z
+    Mf_f = Mf_f_all[Mf_f_mask]
     if Mf_f.shape[0] == 0:
         print("No particles in output bunch.")
         return
+    # Aligned to `Mf_f`'s rows: True where that forward particle was removed by the dynamic
+    # aperture. Empty (never True) if nothing was removed -- the "not transmitted" series below
+    # is simply absent then, and the bottom row degrades gracefully to a single-series appearance.
+    lost_f = is_lost[Mf_f_mask]
 
     pz_f = Mf_f[:, 5]
-    tof_ns = Mf_f[:, 4] * _MM_C_TO_NS
-    tof_ns = tof_ns[np.isfinite(tof_ns)]
+    tof_ns_all = Mf_f[:, 4] * _MM_C_TO_NS
+    kz_out_keV_all = (np.sqrt(pz_f**2 + ME_MEV**2) - ME_MEV) * 1e3
+    r_out_mm_all = np.sqrt(Mf_f[:, 0] ** 2 + Mf_f[:, 2] ** 2)
+
+    finite_tof = np.isfinite(tof_ns_all)
+    finite_kz_out = np.isfinite(kz_out_keV_all)
+    finite_r_out = np.isfinite(r_out_mm_all)
+    tof_ns_trans = tof_ns_all[finite_tof & ~lost_f]
+    tof_ns_untrans = tof_ns_all[finite_tof & lost_f]
+    kz_out_keV_trans = kz_out_keV_all[finite_kz_out & ~lost_f]
+    kz_out_keV_untrans = kz_out_keV_all[finite_kz_out & lost_f]
+    r_out_mm_trans = r_out_mm_all[finite_r_out & ~lost_f]
+    r_out_mm_untrans = r_out_mm_all[finite_r_out & lost_f]
+
+    mask_good = finite_z & ~is_backward
+    mask_bad = finite_z & is_backward
+
+    ids_exit = _try_get_ids(Mf_f_all)
+    ids_launch = None
+    M0 = None
+    if B0 is not None:
+        try:
+            M0 = _safe_get_phase_space(B0, "all", phase_fmt)
+            ids_launch = _try_get_ids(M0)
+        except Exception:
+            M0, ids_launch = None, None
+
+    def _split_by_id(values_at_launch: np.ndarray):
+        """(good, bad) split of a per-launch-particle quantity, matched to the exit population's
+        forward/backward split by `%id`; particles present at launch but absent at exit (lost)
+        join `bad`. Returns empty arrays if id-matching isn't possible."""
+        if ids_launch is None or ids_exit is None:
+            return np.array([]), np.array([])
+        vals = np.asarray(values_at_launch, dtype=float)
+        by_id = {int(pid): v for pid, v in zip(ids_launch, vals)}
+        v_exit = np.array([by_id.get(int(pid), np.nan) for pid in ids_exit], dtype=float)
+        good = v_exit[mask_good]
+        bad = v_exit[mask_bad]
+        ids_exit_set = set(int(x) for x in ids_exit.tolist())
+        lost_mask = np.array([int(pid) not in ids_exit_set for pid in ids_launch.tolist()])
+        lost_vals = vals[lost_mask]
+        good = good[np.isfinite(good)]
+        bad = np.concatenate([bad[np.isfinite(bad)], lost_vals[np.isfinite(lost_vals)]])
+        return good, bad
 
     t_emit_ns_good = np.array([])
     t_emit_ns_bad = np.array([])
@@ -578,132 +721,219 @@ def plot_spectra(
         t_emit_s = thermo_info.get("t_emit_s", None)
         if t_emit_s is not None:
             t_emit_s = np.asarray(t_emit_s, dtype=float).reshape(-1)
-            ids_exit = _try_get_ids(Mf_f_all)
-            ids_launch = None
-            if B0 is not None:
-                try:
-                    M0 = _safe_get_phase_space(B0, "all", phase_fmt)
-                    ids_launch = _try_get_ids(M0)
-                except Exception:
-                    ids_launch = None
-
-            mask_good = finite_z & ~is_backward
-            mask_bad = finite_z & is_backward
-            if ids_exit is not None and ids_launch is not None and ids_launch.size == t_emit_s.size:
-                t_by_id = {int(pid): tval for pid, tval in zip(ids_launch, t_emit_s)}
-                t_emit_exit = np.array([t_by_id.get(int(pid), np.nan) for pid in ids_exit], dtype=float)
-                t_emit_ns_good = t_emit_exit[mask_good] * 1e9
-                t_emit_ns_bad = t_emit_exit[mask_bad] * 1e9
-                ids_exit_set = set(ids_exit.tolist())
-                lost_t = np.array(
-                    [t_by_id.get(int(pid), np.nan) for pid in ids_launch.tolist() if int(pid) not in ids_exit_set],
-                    dtype=float,
-                )
-                lost_t_ns = lost_t[np.isfinite(lost_t)] * 1e9
-                if lost_t_ns.size:
-                    t_emit_ns_bad = np.concatenate([t_emit_ns_bad, lost_t_ns])
+            if ids_launch is not None and ids_launch.size == t_emit_s.size:
+                g, b = _split_by_id(t_emit_s)
+                t_emit_ns_good, t_emit_ns_bad = g * 1e9, b * 1e9
             elif t_emit_s.size == Mf_f_all.shape[0]:
                 t_emit_ns_good = t_emit_s[mask_good] * 1e9
                 t_emit_ns_bad = t_emit_s[mask_bad] * 1e9
 
-    t_emit_ns_good = t_emit_ns_good[np.isfinite(t_emit_ns_good)] if t_emit_ns_good.size else t_emit_ns_good
-    t_emit_ns_bad = t_emit_ns_bad[np.isfinite(t_emit_ns_bad)] if t_emit_ns_bad.size else t_emit_ns_bad
+    kz0_keV_good = np.array([])
+    kz0_keV_bad = np.array([])
+    if M0 is not None and M0.ndim == 2 and M0.shape[1] > 5 and ids_launch is not None:
+        pz0 = np.asarray(M0[:, 5], dtype=float)
+        g, b = _split_by_id(pz0)
+        kz0_keV_good = (np.sqrt(g**2 + ME_MEV**2) - ME_MEV) * 1e3 if g.size else g
+        kz0_keV_bad = (np.sqrt(b**2 + ME_MEV**2) - ME_MEV) * 1e3 if b.size else b
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4))
+    r0_mm_good = np.array([])
+    r0_mm_bad = np.array([])
+    if M0 is not None and M0.ndim == 2 and M0.shape[1] > 5 and ids_launch is not None:
+        r0_mm_all = np.sqrt(np.asarray(M0[:, 0], dtype=float) ** 2 + np.asarray(M0[:, 2], dtype=float) ** 2)
+        r0_mm_good, r0_mm_bad = _split_by_id(r0_mm_all)
 
-    if t_emit_ns_good.size > 0 or t_emit_ns_bad.size > 0:
-        t_all = np.concatenate([arr for arr in (t_emit_ns_good, t_emit_ns_bad) if arr.size > 0])
-        bins_t = np.histogram_bin_edges(t_all, bins=60)
-        bin_width_s = float(bins_t[1] - bins_t[0]) * 1e-9 if bins_t.size > 1 else np.nan
-
-        # Convert the per-macroparticle emission-time histogram into a current density: each
-        # macroparticle represents Q_total_C/N_total of real charge, so summing that charge over
-        # a bin's width gives the current in that bin, and dividing by the cathode area gives J
-        # -- same convention as `plot_emission_history`'s J(t) panel (left: J in A/cm^2, right: I
-        # in A via a linear secondary axis).
-        _area_cm2 = None
-        _J_weight = None
-        if thermo_info is not None and np.isfinite(bin_width_s) and bin_width_s > 0.0:
-            _Q_tot = float(thermo_info.get("Q_total_C", np.nan))
-            _area_m2 = thermo_info.get("area_m2", None)
-            _N_tot = int(Mf_f_all.shape[0])
-            if np.isfinite(_Q_tot) and _area_m2 is not None and _N_tot > 0:
-                _q_macro = abs(_Q_tot) / _N_tot
-                _area_cm2 = float(_area_m2) * 1e4
-                if _area_cm2 > 0.0:
-                    _J_weight = _q_macro / bin_width_s / _area_cm2
-
-        _stk_data = [arr for arr in (t_emit_ns_bad, t_emit_ns_good) if arr.size > 0]
-        _stk_colors = ([COLOR_SECONDARY] if t_emit_ns_bad.size > 0 else []) + ([COLOR_PRIMARY] if t_emit_ns_good.size > 0 else [])
-        _stk_labels = (["backward/lost"] if t_emit_ns_bad.size > 0 else []) + (["surviving"] if t_emit_ns_good.size > 0 else [])
-        _stk_weights = [np.full(arr.shape, _J_weight) for arr in _stk_data] if _J_weight is not None else None
-        if _stk_data:
-            axes[0].hist(
-                _stk_data, bins=bins_t, stacked=True, color=_stk_colors, label=_stk_labels,
-                weights=_stk_weights, alpha=0.8, edgecolor="black", lw=0.4,
-            )
-        axes[0].set_xlabel(r"$t_{\mathrm{emit}}\,(\mathrm{ns})$")
-        if _J_weight is not None:
-            axes[0].set_ylabel(r"$J\,(\mathrm{A\,cm^{-2}})$")
-            ax0_right = axes[0].secondary_yaxis(
-                "right",
-                functions=(
-                    lambda y: y * _area_cm2,
-                    lambda y: y / _area_cm2,
-                ),
-            )
-            ax0_right.set_ylabel(r"$I\,(\mathrm{A})$")
-        else:
-            axes[0].set_ylabel(r"$N_e$")
-            axes[0].ticklabel_format(axis="y", style="sci", scilimits=(0, 0), useMathText=True)
-        axes[0].grid(alpha=0.3)
-        axes[0].set_title("Emission-time distribution")
-        axes[0].legend(frameon=False)
-    else:
-        axes[0].axis("off")
-        axes[0].text(0.5, 0.5, "Emission-time distribution not available", ha="center", va="center")
-
-    # Convert pz (MeV/c) to relativistic kinetic energy (keV).
-    ke_keV = (np.sqrt(pz_f**2 + ME_MEV**2) - ME_MEV) * 1e3
-
-    _ma_kev_factor = None
+    # Real-electron weighting, shared by every panel below: every histogram here is built from a
+    # subset of the same N_total macroparticles launched from B0, and each macroparticle
+    # represents an equal share (Q_total_C/N_total) of the real emitted charge, regardless of
+    # which quantity (time or energy) or which subset (forward/backward-and-lost/output) is being
+    # histogrammed -- so this one q_macro/tau/area normalization serves all four panels.
+    q_macro = tau_s = area_cm2 = None
     if thermo_info is not None:
         _Q = float(thermo_info.get("Q_total_C", np.nan))
         _tau_ns = float(thermo_info.get("tau_ns", np.nan))
         _N_total = int(Mf_f_all.shape[0])
-        if np.isfinite(_Q) and np.isfinite(_tau_ns) and _tau_ns > 0 and _N_total > 0:
-            _q_macro = abs(_Q) / _N_total
-            _tau_s = _tau_ns * 1e-9
-            _ma_kev_factor = _q_macro / _tau_s * 1e3
+        _area_m2 = thermo_info.get("area_m2", None)
+        if np.isfinite(_Q) and _N_total > 0:
+            q_macro = abs(_Q) / _N_total
+        if np.isfinite(_tau_ns) and _tau_ns > 0:
+            tau_s = _tau_ns * 1e-9
+        if _area_m2 is not None and np.isfinite(float(_area_m2)) and float(_area_m2) > 0.0:
+            area_cm2 = float(_area_m2) * 1e4
 
-    if _ma_kev_factor is not None and ke_keV.size > 1:
-        _counts, _edges = np.histogram(ke_keV, bins=60)
-        _widths = np.diff(_edges)
-        _centers = 0.5 * (_edges[:-1] + _edges[1:])
-        _hist_ma_kev = _counts * _ma_kev_factor / _widths
-        axes[1].bar(_centers, _hist_ma_kev, width=_widths, alpha=0.8, edgecolor="black", linewidth=0.5, color=COLOR_PRIMARY)
-        axes[1].set_xlabel(r"$K\,(\mathrm{keV})$")
-        axes[1].set_ylabel(r"$dI/dK\,(\mathrm{mA/keV})$")
-        axes[1].grid(alpha=0.3)
-        axes[1].set_title(rf"Output spectrum, $\phi={transport_phase_deg:.1f}^\circ$")
-    else:
-        axes[1].hist(ke_keV, bins=60, alpha=0.8, edgecolor="black", lw=0.5, color=COLOR_PRIMARY)
-        axes[1].set_xlabel(r"$K\,(\mathrm{keV})$")
-        axes[1].set_ylabel(r"$N_e$")
-        axes[1].ticklabel_format(axis="y", style="sci", scilimits=(0, 0), useMathText=True)
-        axes[1].grid(alpha=0.3)
-        axes[1].set_title(rf"Output spectrum, $\phi={transport_phase_deg:.1f}^\circ$")
+    def _dual_axis_hist(ax, groups, *, weight, xlabel, y_density, y_absolute, title):
+        """`groups`: list of (data, color) pairs to stack (1 pair = a single, unsplit series).
+        `weight`: the per-event scalar height contribution for the *density* (left) axis --
+        already normalized by bin width and by area/tau as appropriate -- or `None` to fall back
+        to a plain counts histogram (`N_e`, no secondary axis, used when `thermo_info` lacks the
+        charge/area/timing needed to convert counts into a physical rate).
+        """
+        data_list = [d for d, _c in groups if d.size > 0]
+        color_list = [c for d, c in groups if d.size > 0]
+        if not data_list:
+            ax.axis("off")
+            ax.text(0.5, 0.5, "not available", ha="center", va="center")
+            return
+        bins = np.histogram_bin_edges(np.concatenate(data_list), bins=60)
+        weights_list = [np.full(d.shape, weight) for d in data_list] if weight is not None else None
+        ax.hist(
+            data_list, bins=bins, stacked=True, color=color_list,
+            weights=weights_list, alpha=0.8, edgecolor="black", lw=0.4,
+        )
+        ax.set_xlabel(xlabel, fontsize=_LABEL_FONTSIZE)
+        if weight is not None and area_cm2 is not None:
+            ax.set_ylabel(y_density, fontsize=_LABEL_FONTSIZE)
+            ax_right = ax.secondary_yaxis(
+                "right", functions=(lambda y: y * area_cm2, lambda y: y / area_cm2)
+            )
+            ax_right.set_ylabel(y_absolute, fontsize=_LABEL_FONTSIZE)
+            ax_right.tick_params(labelsize=_TICK_FONTSIZE)
+        else:
+            ax.set_ylabel(r"$N_e$", fontsize=_LABEL_FONTSIZE)
+            ax.ticklabel_format(axis="y", style="sci", scilimits=(0, 0), useMathText=True)
+        ax.tick_params(labelsize=_TICK_FONTSIZE)
+        ax.grid(alpha=0.3)
+        ax.set_title(title)
 
-    if tof_ns.size > 0:
-        axes[2].hist(tof_ns, bins=60, alpha=0.8, edgecolor="black", lw=0.5, color=COLOR_PRIMARY)
-        axes[2].set_xlabel(r"$\mathrm{ToF}\,(\mathrm{ns})$")
-        axes[2].set_ylabel(r"$N_e$")
-        axes[2].ticklabel_format(axis="y", style="sci", scilimits=(0, 0), useMathText=True)
-        axes[2].grid(alpha=0.3)
-        axes[2].set_title("Time-of-flight distribution")
-    else:
-        axes[2].axis("off")
-        axes[2].text(0.5, 0.5, "ToF not available", ha="center", va="center")
+    def _radial_density_hist(ax, groups, *, title, bins=60):
+        """Particles per unit transverse *area* in each radial bin, not a raw per-bin count: an
+        equal-width bin in r covers an annulus of area pi*(r_hi^2 - r_lo^2), which grows with r,
+        so a plain `ax.hist(r, ...)` makes even a spatially uniform (or centrally peaked) beam
+        look like it ramps up toward larger r -- an artifact of growing bin area, not of the
+        actual density. Dividing each bin's count by its own annulus area removes that artifact
+        and gives the physical quantity a radial profile is supposed to show: density at r, not
+        count in [r, r+dr). `groups`: list of (data, color) pairs to stack (matches
+        `_dual_axis_hist`'s convention).
+        """
+        data_list = [d for d, _c in groups if d.size > 0]
+        color_list = [c for d, c in groups if d.size > 0]
+        if not data_list:
+            ax.axis("off")
+            ax.text(0.5, 0.5, "not available", ha="center", va="center")
+            return
+        edges = np.histogram_bin_edges(np.concatenate(data_list), bins=bins)
+        annulus_area_mm2 = np.pi * (edges[1:] ** 2 - edges[:-1] ** 2)
+        widths = np.diff(edges)
+        bottom = np.zeros(edges.shape[0] - 1)
+        for d, color in zip(data_list, color_list):
+            density = np.histogram(d, bins=edges)[0].astype(float) / annulus_area_mm2
+            ax.bar(
+                edges[:-1], density, width=widths, bottom=bottom, align="edge",
+                color=color, alpha=0.8, edgecolor="black", linewidth=0.4,
+            )
+            bottom = bottom + density
+        ax.set_xlabel(r"$r\,(\mathrm{mm})$", fontsize=_LABEL_FONTSIZE)
+        ax.set_ylabel(r"$dN_e/dA\,(\mathrm{mm^{-2}})$", fontsize=_LABEL_FONTSIZE)
+        ax.tick_params(labelsize=_TICK_FONTSIZE)
+        ax.grid(alpha=0.3)
+        ax.set_title(title)
+
+    fig, axes = plt.subplots(2, 3, figsize=(19.5, 9), gridspec_kw={"hspace": 0.5, "wspace": 0.45})
+
+    # -- Initial longitudinal kinetic energy, K_z (top row, col 1) --
+    kz0_bins = np.concatenate([arr for arr in (kz0_keV_good, kz0_keV_bad) if arr.size > 0])
+    kz0_bin_width_keV = float(np.diff(np.histogram_bin_edges(kz0_bins, bins=60))[0]) if kz0_bins.size > 1 else np.nan
+    kz_weight = None
+    if q_macro is not None and tau_s is not None and area_cm2 is not None and np.isfinite(kz0_bin_width_keV) and kz0_bin_width_keV > 0.0:
+        kz_weight = (q_macro / tau_s * 1e3) / kz0_bin_width_keV / area_cm2
+    _dual_axis_hist(
+        axes[0, 0],
+        [(kz0_keV_bad, COLOR_SECONDARY), (kz0_keV_good, COLOR_PRIMARY)],
+        weight=kz_weight,
+        xlabel=r"$K_{z,\mathrm{emit}}\,(\mathrm{keV})$",
+        y_density=r"$dJ/dK_z\,(\mathrm{mA\,cm^{-2}\,keV^{-1}})$",
+        y_absolute=r"$dI/dK_z\,(\mathrm{mA/keV})$",
+        title="Initial Longitudinal Kinetic Energy distribution",
+    )
+
+    # -- Initial-time (top row, col 2) --
+    t_emit_bins = np.concatenate([arr for arr in (t_emit_ns_good, t_emit_ns_bad) if arr.size > 0])
+    t_emit_bin_width_s = float(np.diff(np.histogram_bin_edges(t_emit_bins, bins=60))[0]) * 1e-9 if t_emit_bins.size > 1 else np.nan
+    t_weight = None
+    if q_macro is not None and area_cm2 is not None and np.isfinite(t_emit_bin_width_s) and t_emit_bin_width_s > 0.0:
+        t_weight = q_macro / t_emit_bin_width_s / area_cm2
+    _dual_axis_hist(
+        axes[0, 1],
+        [(t_emit_ns_bad, COLOR_SECONDARY), (t_emit_ns_good, COLOR_PRIMARY)],
+        weight=t_weight,
+        xlabel=r"$t_{\mathrm{emit}}\,(\mathrm{ns})$",
+        y_density=r"$J\,(\mathrm{A\,cm^{-2}})$",
+        y_absolute=r"$I\,(\mathrm{A})$",
+        title="Initial-time distribution",
+    )
+
+    # -- Initial radial distribution (top row, col 3) --
+    _radial_density_hist(
+        axes[0, 2],
+        [(r0_mm_bad, COLOR_SECONDARY), (r0_mm_good, COLOR_PRIMARY)],
+        title="Initial radial distribution",
+    )
+
+    # -- Output longitudinal kinetic energy, K_z (bottom row, col 1) -- split forward-transmitted
+    # vs. forward-not-transmitted (lost) instead of one undifferentiated forward series.
+    kz_out_bins = np.concatenate([arr for arr in (kz_out_keV_trans, kz_out_keV_untrans) if arr.size > 0])
+    kz_out_bin_width_keV = float(np.diff(np.histogram_bin_edges(kz_out_bins, bins=60))[0]) if kz_out_bins.size > 1 else np.nan
+    kz_out_weight = None
+    if q_macro is not None and tau_s is not None and area_cm2 is not None and np.isfinite(kz_out_bin_width_keV) and kz_out_bin_width_keV > 0.0:
+        kz_out_weight = (q_macro / tau_s * 1e3) / kz_out_bin_width_keV / area_cm2
+    _dual_axis_hist(
+        axes[1, 0],
+        [(kz_out_keV_untrans, COLOR_LOST), (kz_out_keV_trans, COLOR_PRIMARY)],
+        weight=kz_out_weight,
+        xlabel=r"$K_z\,(\mathrm{keV})$",
+        y_density=r"$dJ/dK_z\,(\mathrm{mA\,cm^{-2}\,keV^{-1}})$",
+        y_absolute=r"$dI/dK_z\,(\mathrm{mA/keV})$",
+        title="Output Longitudinal Kinetic Energy distribution",
+    )
+
+    # -- Output time-of-flight (bottom row, col 2) -- same forward-transmitted/not split --
+    tof_bins = np.concatenate([arr for arr in (tof_ns_trans, tof_ns_untrans) if arr.size > 0])
+    tof_bin_width_s = float(np.diff(np.histogram_bin_edges(tof_bins, bins=60))[0]) * 1e-9 if tof_bins.size > 1 else np.nan
+    tof_weight = None
+    if q_macro is not None and area_cm2 is not None and np.isfinite(tof_bin_width_s) and tof_bin_width_s > 0.0:
+        tof_weight = q_macro / tof_bin_width_s / area_cm2
+    _dual_axis_hist(
+        axes[1, 1],
+        [(tof_ns_untrans, COLOR_LOST), (tof_ns_trans, COLOR_PRIMARY)],
+        weight=tof_weight,
+        xlabel=r"$\mathrm{ToF}\,(\mathrm{ns})$",
+        y_density=r"$J\,(\mathrm{A\,cm^{-2}})$",
+        y_absolute=r"$I\,(\mathrm{A})$",
+        title="Output Time-of-flight distribution",
+    )
+
+    # -- Output radial distribution (bottom row, col 3) -- same forward-transmitted/not split --
+    _radial_density_hist(
+        axes[1, 2],
+        [(r_out_mm_untrans, COLOR_LOST), (r_out_mm_trans, COLOR_PRIMARY)],
+        title="Output radial distribution",
+    )
+
+    # Two shared legends, one per row, since each row splits its population into a different
+    # pair of categories/colors -- a single legend can't describe both. No figure suptitle: the
+    # per-panel titles plus these two legends already say everything a title would.
+    top_legend_handles = [
+        Patch(facecolor=COLOR_PRIMARY, edgecolor="black", label="forward"),
+        Patch(facecolor=COLOR_SECONDARY, edgecolor="black", label="backward and lost"),
+    ]
+    fig.legend(
+        handles=top_legend_handles, loc="upper center", ncol=2, frameon=False,
+        bbox_to_anchor=(0.5, 1.02), fontsize=_LEGEND_FONTSIZE,
+    )
+
+    # Positioned in the actual gap between the two rows (not a guessed constant), biased toward
+    # the bottom row's top edge so it clears the top row's x-tick labels, which encroach downward
+    # into that gap.
+    row0_bottom = min(ax.get_position().y0 for ax in axes[0, :])
+    row1_top = max(ax.get_position().y1 for ax in axes[1, :])
+    bottom_legend_y = row1_top + 0.35 * (row0_bottom - row1_top)
+    bottom_legend_handles = [
+        Patch(facecolor=COLOR_PRIMARY, edgecolor="black", label="forward, transmitted"),
+        Patch(facecolor=COLOR_LOST, edgecolor="black", label="forward, not transmitted (lost)"),
+    ]
+    fig.legend(
+        handles=bottom_legend_handles, loc="center", ncol=2, frameon=False,
+        bbox_to_anchor=(0.5, bottom_legend_y), fontsize=_LEGEND_FONTSIZE,
+    )
 
     plt.tight_layout()
     plt.show()
@@ -725,20 +955,22 @@ def plot_phase_space(
     *,
     tags: ParticleTags | None = None,
     exclude_backward_losses: bool = True,
-    exclude_aperture_losses: bool = True,
+    exclude_lost: bool = True,
     phase_fmt: str = EXTENDED_PHASE_FMT_DEFAULT,
     style: PlotStyleConfig | None = None,
     show_colorbar: bool = False,
-    exit_label: str = r"\mathrm{Exit}:\ ",
-    exit_z_m: float | None = None,
+    output_label: str = r"\mathrm{Output}:\ ",
+    thermo_info: dict | None = None,
 ):
-    """Plot Launch (B0) vs. Exit phase-space using one shared panel engine.
+    """Plot Initial (B0) vs. Output phase-space using one shared panel engine.
 
-    `M_exit` is an already-extracted phase-space array (e.g. the last/aperture-exit screen) --
-    *not* `Bout`, which is a fixed-time snapshot with a spread of z among its particles and so has
-    no single z to plot against (see the module docstring). `exit_z_m` is that screen's own z
-    (meters, absolute lab frame) -- pass it so aperture-loss tagging doesn't apply if `M_exit`
-    happens to be upstream of the aperture (see `rf_gun.particle_tags.tag_mask`).
+    `M_exit` is an already-extracted phase-space array (e.g. the last screen) -- *not* `Bout`,
+    which is a fixed-time snapshot with a spread of z among its particles and so has no single z
+    to plot against (see the module docstring).
+
+    `thermo_info`, when given (with a matching-length `initial_t0_mm_c`), lets the Initial row's
+    third panel show the real (t_emit, pz) distribution -- see `_patch_launch_t_emit` -- instead
+    of the pz-only histogram fallback used when it's unavailable.
     """
     import matplotlib.pyplot as plt
     from matplotlib.gridspec import GridSpec
@@ -748,22 +980,21 @@ def plot_phase_space(
     M_launch_all = _safe_get_phase_space(B0, "all", phase_fmt)
     M_exit_all = np.asarray(M_exit, dtype=float)
 
-    M_launch, bw_launch, ap_launch = _prepare_plot_population(
-        M_launch_all, tags,
-        exclude_backward_losses=exclude_backward_losses, exclude_aperture_losses=exclude_aperture_losses,
-        screen_z_m=0.0,
+    M_launch_patched = _patch_launch_t_emit(M_launch_all, thermo_info)
+    M_launch, bw_launch, lost_launch = _prepare_plot_population(
+        M_launch_patched if M_launch_patched is not None else M_launch_all, tags,
+        exclude_backward_losses=exclude_backward_losses, exclude_lost=exclude_lost,
     )
-    M_ex, bw_ex, ap_ex = _prepare_plot_population(
+    M_ex, bw_ex, lost_ex = _prepare_plot_population(
         M_exit_all, tags,
-        exclude_backward_losses=exclude_backward_losses, exclude_aperture_losses=exclude_aperture_losses,
-        screen_z_m=exit_z_m,
+        exclude_backward_losses=exclude_backward_losses, exclude_lost=exclude_lost,
     )
 
     if tags is not None and M_exit_all.shape[0]:
-        is_bw_all, is_ap_all = tag_mask(M_exit_all, tags, screen_z_m=exit_z_m)
+        is_bw_all, is_lost_all = tag_mask(M_exit_all, tags)
         print(
-            f"Exit snapshot: N_raw={M_exit_all.shape[0]} | backward-tagged={int(np.sum(is_bw_all))} "
-            f"| aperture-lost-tagged={int(np.sum(is_ap_all))} | plotted={M_ex.shape[0]}"
+            f"Output snapshot: N_raw={M_exit_all.shape[0]} | backward-tagged={int(np.sum(is_bw_all))} "
+            f"| lost-tagged={int(np.sum(is_lost_all))} | plotted={M_ex.shape[0]}"
         )
 
     if M_ex.shape[0] == 0 or M_launch.shape[0] == 0:
@@ -779,10 +1010,11 @@ def plot_phase_space(
         M_launch,
         style=style,
         backward_mask=bw_launch,
-        aperture_mask=ap_launch,
+        lost_mask=lost_launch,
         show_colorbar=bool(show_colorbar),
-        prefix=r"\mathrm{Launch}:\ ",
-        launch_pz_hist_masks=(bw_launch, ap_launch),
+        prefix=r"\mathrm{Initial}:\ ",
+        launch_pz_hist_masks=None if M_launch_patched is not None else (bw_launch, lost_launch),
+        third_col_is_t_emit=M_launch_patched is not None,
     )
     _phase_space_triplet(
         fig,
@@ -790,17 +1022,12 @@ def plot_phase_space(
         M_ex,
         style=style,
         backward_mask=bw_ex,
-        aperture_mask=ap_ex,
+        lost_mask=lost_ex,
         show_colorbar=bool(show_colorbar),
-        prefix=exit_label,
+        prefix=output_label,
     )
 
-    fig.suptitle(
-        rf"$\mathrm{{Phase\ space\ diagnostics}}\;\left(\phi={transport_phase_deg:.1f}^\circ\right)$",
-        y=0.995,
-    )
-
-    fig.subplots_adjust(top=0.93, wspace=0.28, hspace=0.28)
+    fig.subplots_adjust(top=0.96, wspace=0.28, hspace=0.28)
     plt.show()
 
 
@@ -810,18 +1037,22 @@ def plot_screen_phase_space_slider(
     *,
     tags: ParticleTags | None = None,
     exclude_backward_losses: bool = True,
-    exclude_aperture_losses: bool = True,
+    exclude_lost: bool = True,
     bins: int | None = None,
     n_macroparticles: int | None = None,
     style: PlotStyleConfig | None = None,
     show_colorbar: bool = False,
     B0=None,
     phase_fmt: str = EXTENDED_PHASE_FMT_DEFAULT,
+    thermo_info: dict | None = None,
 ):
-    """Interactive screen phase-space slider: Launch (B0) plus every screen.
+    """Interactive screen phase-space slider: Initial (B0) plus every screen.
 
     `Bout` is intentionally not included as a frame -- see the module docstring; the last screen
-    (e.g. the aperture exit) serves as the final "exit-like" frame instead, with a real, single z.
+    serves as the final "exit-like" frame instead, with a real, single z.
+
+    `thermo_info`, when given, lets the Initial (B0) frame's third panel show the real (t_emit, pz)
+    distribution instead of a pz-only histogram -- see `render_screen_phase_space_figure`.
     """
     import matplotlib.pyplot as plt
 
@@ -834,7 +1065,7 @@ def plot_screen_phase_space_slider(
             hist_alpha=style.hist_alpha,
             hist_color=style.hist_color,
             hist_linewidth=style.hist_linewidth,
-            lost_cmap=style.lost_cmap,
+            backward_cmap=style.backward_cmap,
             show_histograms=style.show_histograms,
             dezoom_frac=style.dezoom_frac,
             scatter=style.scatter,
@@ -845,7 +1076,7 @@ def plot_screen_phase_space_slider(
     datasets: list[dict] = []
     if B0 is not None:
         try:
-            datasets.append({"label": "Launch (B0)", "M": _safe_get_phase_space(B0, "all", phase_fmt), "z_mm": np.nan})
+            datasets.append({"label": "Initial (B0)", "M": _safe_get_phase_space(B0, "all", phase_fmt), "z_mm": np.nan})
         except Exception:
             pass
 
@@ -861,12 +1092,10 @@ def plot_screen_phase_space_slider(
     n = len(datasets)
 
     def _plotted_count(i: int) -> int:
-        z_mm_i = datasets[i]["z_mm"]
         M_plot, _, _ = _prepare_plot_population(
             datasets[i]["M"], tags,
             exclude_backward_losses=exclude_backward_losses,
-            exclude_aperture_losses=exclude_aperture_losses,
-            screen_z_m=(float(z_mm_i) / 1e3) if np.isfinite(z_mm_i) else 0.0,
+            exclude_lost=exclude_lost,
         )
         return int(M_plot.shape[0])
 
@@ -881,12 +1110,13 @@ def plot_screen_phase_space_slider(
             z_mm=rec["z_mm"] if np.isfinite(rec["z_mm"]) else None,
             tags=tags,
             exclude_backward_losses=exclude_backward_losses,
-            exclude_aperture_losses=exclude_aperture_losses,
+            exclude_lost=exclude_lost,
             style=style,
             show_colorbar=bool(show_colorbar),
             n_macroparticles=n_macroparticles,
             n_ref=n_ref,
             frame_position=(i + 1, n),
+            thermo_info=thermo_info,
         )
         plt.show()
 

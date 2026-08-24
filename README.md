@@ -177,6 +177,12 @@ beam, with the backward/aperture-lost populations available wherever a figure ch
 notebook); the script has no equivalent post-hoc aperture screens, so it always tags zero
 particles as aperture-lost and does not expose this as a CLI flag.
 
+`plot_spectra`'s output-side panels (longitudinal kinetic energy, time-of-flight, radial position)
+split the forward population by aperture transmission instead of a drop/highlight switch --
+forward-transmitted vs. forward-not-transmitted, colored consistently (green always means "failed
+the exit-aperture cut," the same convention used everywhere else that category is shown) -- since
+these are 1D distributions of the whole output bunch rather than phase-space scatter panels.
+
 ## RF-Track reference
 
 - RF-Track project page: `https://abpcomputing.web.cern.ch/codes/codes_pages/RF-Track/`
