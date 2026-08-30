@@ -15,12 +15,12 @@ against older, un-extended phase-space arrays.
 Longitudinal quantities use ToF (`%t`), not `%Z`, throughout -- a screen's own `%Z` is not a
 lab-frame position at all (each crossing particle's velocity times its time offset from whichever
 particle currently serves as the bunch's reference particle), whereas `%t` is a genuine, reliable
-per-particle quantity at every screen. So `mean_t_ns`/`sigma_t_ns` (moments) and `alpha_t`/
-`beta_t`/`gamma_t`/`emitt_t` (this project's own longitudinal-Twiss convention, (ToF,
-Pz/mean(Pz))) replace what used to be `mean_z`/`sigma_z`/`alpha_z`/`beta_z`/`gamma_z`/`emitt_z`.
-The longitudinal Twiss is still computed via `rf_gun.diagnostics.manual_twiss_and_emittance`
-(which is agnostic to what its "z" column actually represents) by substituting ToF-in-ns into
-that column before calling it -- see `_row_for_screen`.
+per-particle quantity at every screen. `mean_t_ns`/`sigma_t_ns` (moments) and `alpha_t`/`beta_t`/
+`gamma_t`/`emitt_t` (this project's own longitudinal-Twiss convention, (ToF, Pz/mean(Pz))) are the
+longitudinal analogs of the transverse Twiss/emittance quantities. The longitudinal Twiss is still
+computed via `rf_gun.diagnostics.manual_twiss_and_emittance` (which is agnostic to what its "z"
+column actually represents) by substituting ToF-in-ns into that column before calling it -- see
+`_row_for_screen`.
 """
 from __future__ import annotations
 
@@ -55,6 +55,8 @@ def compute_beam_properties(
 
     Returns a flat `list[dict]`, one per screen, directly usable as `pandas.DataFrame(rows)`.
     """
+    if len(z_snaps) != len(M_snaps):
+        raise ValueError(f"z_snaps and M_snaps must have the same length, got {len(z_snaps)} and {len(M_snaps)}")
     rows: List[Dict[str, Any]] = []
     for z_m, M in zip(z_snaps, M_snaps):
         arr = np.asarray(M, dtype=float)
@@ -100,12 +102,25 @@ def _row_for_screen(z_m: float, Mf: np.ndarray, mass_MeV: float) -> Dict[str, An
         row[k] = twiss.get(k, np.nan)
 
     pz_mean = row["mean_pz"]
+    # `pz_mean != 0.0` only guards the *population* mean; a single near-zero per-particle `pz`
+    # (physically possible before RF acceleration takes hold, at an early/mid-cavity screen) still
+    # blows up `px/pz`/`py/pz` even when the mean is healthy -- floor relative to this screen's own
+    # peak |pz| (mirrors `rf_gun.back_bombardment`'s `safe_pz` guard for the identical hazard) and
+    # drop those rows from all four dispersion quantities together, so x/y/px'/py' stay computed
+    # over the same particle subset rather than partially masked.
     if np.isfinite(pz_mean) and pz_mean != 0.0:
         delta = (pz - pz_mean) / pz_mean
-        row["disp_x"] = dispersion_from_moments(x, delta)
-        row["disp_px"] = dispersion_from_moments(px / pz, delta)
-        row["disp_y"] = dispersion_from_moments(y, delta)
-        row["disp_py"] = dispersion_from_moments(py / pz, delta)
+        pz_floor = 1e-6 * max(float(np.max(np.abs(pz))), 1e-300)
+        safe = np.isfinite(pz) & (np.abs(pz) > pz_floor)
+        if np.count_nonzero(safe) >= 2:
+            x_s, y_s, px_s, py_s, pz_s, delta_s = (a[safe] for a in (x, y, px, py, pz, delta))
+            row["disp_x"] = dispersion_from_moments(x_s, delta_s)
+            row["disp_px"] = dispersion_from_moments(px_s / pz_s, delta_s)
+            row["disp_y"] = dispersion_from_moments(y_s, delta_s)
+            row["disp_py"] = dispersion_from_moments(py_s / pz_s, delta_s)
+        else:
+            for k in DISPERSION_KEYS:
+                row[k] = np.nan
     else:
         for k in DISPERSION_KEYS:
             row[k] = np.nan
@@ -149,6 +164,8 @@ def transmission_curves(
     - `forward_and_surviving`: also excludes backward-going particles -- forward-going AND
       surviving the aperture.
     """
+    if len(z_snaps) != len(M_snaps):
+        raise ValueError(f"z_snaps and M_snaps must have the same length, got {len(z_snaps)} and {len(M_snaps)}")
     not_lost, fwd_surv = [], []
     for z_m, M in zip(z_snaps, M_snaps):
         arr = np.asarray(M, dtype=float)

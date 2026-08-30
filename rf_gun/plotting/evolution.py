@@ -3,11 +3,9 @@
 Both figures are driven entirely by the table returned by
 `rf_gun.beam_properties.compute_beam_properties` (a `list[dict]`, one row per screen, already
 computed on the forward-going + aperture-surviving population -- see that module's docstring) --
-neither figure recomputes anything from `M_snaps` itself. This replaces the project's former
-`plot_evolution`/`plot_twiss_evolution`/`plot_emittance_evolution`/`plot_transmission_evolution`
-(the last of which read RF-Track's per-screen `Screen.get_info()` "transmission" field; the
-three-curve transmission panel here is row-count-based instead, via
-`rf_gun.beam_properties.transmission_curves`).
+neither figure recomputes anything from `M_snaps` itself. The transmission panel is row-count-based
+(`rf_gun.beam_properties.transmission_curves`), not read from RF-Track's per-screen
+`Screen.get_info()` "transmission" field.
 
 Color convention (see `rf_gun.plotting.style`'s module docstring): `_pair` panels (x-plane vs
 y-plane) are always blue (solid circle) vs red (dashed square); `_single` panels are blue for

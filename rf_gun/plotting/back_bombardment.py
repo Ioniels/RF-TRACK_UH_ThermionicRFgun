@@ -36,6 +36,35 @@ def _robust_range(*arrays: np.ndarray, lo_pct: float = 1.0, hi_pct: float = 99.0
     return float(lo - pad), float(hi + pad)
 
 
+def _weighted_range(values: np.ndarray, weights: np.ndarray, *, lo_pct: float, hi_pct: float, pad_frac: float):
+    """Like `_robust_range`, but the percentile is taken over `values` weighted by `weights`
+    (rather than treating every sample as equally important) -- used for the heat-flux-vs-time
+    figure, where a near-zero-Pz straggler's reconstructed re-hit time can be extreme even though
+    it carries almost none of the deposited energy (see `rf_gun.back_bombardment`'s module
+    docstring); weighting by energy keeps the range tied to where the energy actually lands rather
+    than to the mere presence of an outlier particle.
+    """
+    v = np.asarray(values, dtype=float)
+    w = np.asarray(weights, dtype=float)
+    finite = np.isfinite(v) & np.isfinite(w) & (w >= 0.0)
+    v, w = v[finite], w[finite]
+    if v.size == 0 or float(np.sum(w)) <= 0.0:
+        return _robust_range(values, lo_pct=lo_pct, hi_pct=hi_pct, pad_frac=pad_frac)
+    order = np.argsort(v)
+    v_sorted, w_sorted = v[order], w[order]
+    cum_w = np.cumsum(w_sorted) / np.sum(w_sorted)
+    lo = float(np.interp(lo_pct / 100.0, cum_w, v_sorted))
+    hi = float(np.interp(hi_pct / 100.0, cum_w, v_sorted))
+    if hi <= lo:
+        lo, hi = float(np.min(v)), float(np.max(v))
+        if hi <= lo:
+            pad = max(abs(lo), 1.0) * pad_frac
+            return lo - pad, hi + pad
+    span = hi - lo
+    pad = span * pad_frac
+    return lo - pad, hi + pad
+
+
 def _sci(value: float, precision: int = 2) -> str:
     """`1.08e-04` -> `1.08\\times10^{-4}` -- proper mathtext scientific notation for titles.
 
@@ -64,8 +93,20 @@ def plot_back_bombardment_phase_space(data: BackBombardmentData, *, style=None):
         return
 
     v = data.valid
+    x_hit_mm = data.x_hit_mm[v]
+    y_hit_mm = data.y_hit_mm[v]
     t_hit_ns = data.t_hit_s[v] * 1e9
-    M_for_plot = np.column_stack([data.x_hit_mm[v], data.y_hit_mm[v], t_hit_ns, data.pz_MeVc[v]])
+    pz_MeVc = data.pz_MeVc[v]
+    M_for_plot = np.column_stack([x_hit_mm, y_hit_mm, t_hit_ns, pz_MeVc])
+
+    # Robust (percentile-based) axis ranges -- a handful of extreme ballistic-reconstruction
+    # outliers (near-zero-Pz stragglers, see `rf_gun.back_bombardment`'s module docstring) would
+    # otherwise single-handedly set a plain min/max axis range, squashing the rest of the
+    # population into an unreadable sliver at the panel's center.
+    x_range = _robust_range(x_hit_mm)
+    y_range = _robust_range(y_hit_mm)
+    t_range = _robust_range(t_hit_ns)
+    pz_range = _robust_range(pz_MeVc)
 
     fig = plt.figure(figsize=(12.5, 5.4))
     gs = GridSpec(1, 2, figure=fig, wspace=0.28)
@@ -74,13 +115,13 @@ def plot_back_bombardment_phase_space(data: BackBombardmentData, *, style=None):
         fig, gs[0, 0], M_for_plot,
         x_idx=0, y_idx=1, x_label=r"$x\,(\mathrm{mm})$", y_label=r"$y\,(\mathrm{mm})$",
         title=rf"Position at $z=0$ ($N={data.n_valid}$)",
-        style=style,
+        style=style, xlim=x_range, ylim=y_range,
     )
     _phase_space_panel(
         fig, gs[0, 1], M_for_plot,
         x_idx=2, y_idx=3, x_label=r"$\mathrm{ToF}\,(\mathrm{ns})$", y_label=r"$p_z\,(\mathrm{MeV}/c)$",
         title="Longitudinal phase space",
-        style=style,
+        style=style, xlim=t_range, ylim=pz_range,
     )
     fig.suptitle("Back-bombardment phase space", y=1.02)
     plt.tight_layout()
@@ -222,51 +263,48 @@ def plot_back_bombardment_screen_reach(
 def plot_back_bombardment_energy_density(
     data: BackBombardmentData,
     *,
+    cathode_radius_mm: float,
     bins: int = 60,
     cmap: str = "inferno",
+    range_pad_frac: float = 0.15,
 ) -> Optional[Dict[str, Any]]:
     """Figure 2: 2D map of kinetic-energy density deposited at z=0, in J/mm^2.
 
-    Uses each macroparticle's real-electron weight (`rf_gun.back_bombardment`'s
-    `weight_per_macroparticle`) so the values are physical (Joules), not macroparticle counts, and
-    divides by each bin's area so the map is independent of the `bins` choice -- both needed to
-    make this usable directly for a cathode temperature-rise estimate. Kinetic, not total, energy:
-    only kinetic energy converts to heat on absorption.
+    Weighted by real-electron count (physical Joules, not macroparticle counts) and divided by
+    bin area (independent of `bins`) -- kinetic, not total, energy, since only kinetic energy
+    converts to heat on absorption.
 
-    `data.valid` already excludes non-finite/implausible-energy particles (see
-    `rf_gun.back_bombardment.compute_back_bombardment`'s `max_kinetic_energy_mev`), so `k_joules`
-    below is guaranteed finite.
+    `data.heating_relevant` already excludes implausible reconstructions and holder/cavity-wall
+    impacts, so `k_joules` is guaranteed finite and physically part of the cathode.
+
+    Range is fixed to the cathode's own footprint (`+-cathode_radius_mm`, padded by
+    `range_pad_frac`), not a percentile of hit positions, since this figure is specifically about
+    the cathode region.
     """
     import matplotlib.pyplot as plt
 
-    if data.n_valid == 0:
-        print("No particles behind the cathode with a physically plausible reconstruction.")
+    from .style import add_cathode_boundary_circle
+
+    v = data.heating_relevant
+    if not np.any(v):
+        print("No particles with a physically plausible, cathode-relevant reconstruction.")
         return None
 
-    v = data.valid
     x = data.x_hit_mm[v]
     y = data.y_hit_mm[v]
     k_joules = kinetic_energy_joules(data)[v]
 
-    # Robust (percentile-based) bin range -- `valid` (rf_gun.back_bombardment) only bounds
-    # |x_hit|/|y_hit| by the field map's full r_max_mm extent, generous compared to the cathode's
-    # actual footprint, so a handful of wide-radius reconstructions would otherwise zoom the whole
-    # map out far past where the real deposited-energy density lives.
-    xrange = _robust_range(x)
-    yrange = _robust_range(y)
-    have_range = xrange is not None and yrange is not None
-    if have_range:
-        n_outside = int(np.sum((x < xrange[0]) | (x > xrange[1]) | (y < yrange[0]) | (y > yrange[1])))
-        if n_outside > 0:
-            print(
-                f"Note: {n_outside} of {x.size} back-bombardment particle(s) fall outside the "
-                "plotted map's range (kept in the reported total, dropped from the density map "
-                "so a few wide-radius outliers don't dictate the whole map's scale)."
-            )
-    counts, xedges, yedges = np.histogram2d(
-        x, y, bins=bins, weights=k_joules,
-        range=[xrange, yrange] if have_range else None,
-    )
+    half_range = float(cathode_radius_mm) * (1.0 + float(range_pad_frac))
+    xrange = (-half_range, half_range)
+    yrange = (-half_range, half_range)
+    n_outside = int(np.sum((x < xrange[0]) | (x > xrange[1]) | (y < yrange[0]) | (y > yrange[1])))
+    if n_outside > 0:
+        print(
+            f"Note: {n_outside} of {x.size} back-bombardment particle(s) fall outside the "
+            "cathode-region map's range (kept in the reported total, dropped from the density map "
+            "-- this figure is restricted to the cathode's own footprint)."
+        )
+    counts, xedges, yedges = np.histogram2d(x, y, bins=bins, weights=k_joules, range=[xrange, yrange])
     bin_area_mm2 = float(xedges[1] - xedges[0]) * float(yedges[1] - yedges[0])
     density = counts / bin_area_mm2 if bin_area_mm2 > 0.0 else counts
     total_j = float(np.sum(k_joules))
@@ -274,6 +312,11 @@ def plot_back_bombardment_energy_density(
     fig, ax = plt.subplots(figsize=(7.5, 6))
     im = ax.pcolormesh(xedges, yedges, density.T, cmap=cmap, shading="auto")
     fig.colorbar(im, ax=ax, label=r"$dK/dA\,(\mathrm{J/mm^2})$")
+    add_cathode_boundary_circle(ax, cathode_radius_mm)
+    # labelcolor="white": default black legend text is invisible against this dark colormap.
+    ax.legend(frameon=False, fontsize=9, loc="upper right", labelcolor="white")
+    ax.set_xlim(*xrange)
+    ax.set_ylim(*yrange)
     ax.set_xlabel(r"$x\,(\mathrm{mm})$")
     ax.set_ylabel(r"$y\,(\mathrm{mm})$")
     ax.set_aspect("equal")
@@ -288,36 +331,35 @@ def plot_back_bombardment_power_density_vs_time(
     data: BackBombardmentData,
     *,
     cathode_radius_mm: float,
-    bins: int = 60,
+    bins: Optional[int] = None,
+    lo_pct: float = 0.5,
+    hi_pct: float = 99.5,
+    pad_frac: float = 0.15,
 ) -> Optional[Dict[str, Any]]:
     """Figure 3: average power density (heat flux) delivered to the cathode surface vs time.
 
-    Reconstructed from each particle's time-of-flight at the moment it crossed back through z=0
-    (`data.t_hit_s`). Kinetic energy per time bin (real electrons, via each macroparticle's
-    weight) is divided by the bin width (-> power) and by the cathode's own disk area (-> average
-    heat flux, W/mm^2) -- a first-order estimate that assumes the deposited heat spreads evenly
-    over the nominal cathode area, not the (generally larger) actual bombarded footprint shown by
-    `plot_back_bombardment_energy_density`.
+    Built from each particle's z=0 crossing time (`data.t_hit_s`): kinetic energy per time bin,
+    divided by bin width (-> power) and the cathode's disk area (-> W/mm^2) -- a first-order
+    estimate assuming heat spreads evenly over the nominal cathode area, not the generally larger
+    actual footprint (see `plot_back_bombardment_energy_density`).
 
-    `data.valid` already excludes non-finite/implausible-energy particles (see
-    `rf_gun.back_bombardment.compute_back_bombardment`'s `max_kinetic_energy_mev`), so `k_joules`
-    below is guaranteed finite.
+    `data.heating_relevant` excludes implausible reconstructions and holder/cavity-wall impacts.
+
+    Bin range/count are data-driven: an energy-weighted percentile range (`_weighted_range`)
+    keeps the axis tied to where the energy actually lands rather than a rare extreme-ToF
+    straggler, and `bins=None` (default) scales the bin count to the in-range population.
     """
     import matplotlib.pyplot as plt
 
-    if data.n_valid == 0:
-        print("No particles behind the cathode with a physically plausible reconstruction.")
+    v = data.heating_relevant
+    if not np.any(v):
+        print("No particles with a physically plausible, cathode-relevant reconstruction.")
         return None
 
-    v = data.valid
     t_s = data.t_hit_s[v]
     k_joules = kinetic_energy_joules(data)[v]
 
-    # Robust (percentile-based) bin range -- `valid` doesn't bound `t_hit_s` at all (only
-    # x_hit/y_hit/Pz), so a near-zero-Pz straggler's reconstructed re-hit time can be extreme even
-    # though its position looks fine; unrestricted, that single point would stretch the whole time
-    # axis and flatten every real re-hit into one bin.
-    t_range = _robust_range(t_s)
+    t_range = _weighted_range(t_s, k_joules, lo_pct=lo_pct, hi_pct=hi_pct, pad_frac=pad_frac)
     if t_range is not None:
         n_outside = int(np.sum((t_s < t_range[0]) | (t_s > t_range[1])))
         if n_outside > 0:
@@ -326,6 +368,13 @@ def plot_back_bombardment_power_density_vs_time(
                 "plotted time range (kept in the reported total, dropped from the histogram so a "
                 "few extreme re-hit-time outliers don't dictate the whole axis scale)."
             )
+        n_in_range = int(t_s.size - n_outside)
+    else:
+        n_in_range = int(t_s.size)
+
+    if bins is None:
+        bins = int(np.clip(np.sqrt(max(n_in_range, 1)) * 3.0, 20, 200))
+
     counts, edges = np.histogram(t_s, bins=bins, weights=k_joules, range=t_range)
     bin_width_s = float(edges[1] - edges[0])
     cathode_area_mm2 = float(np.pi * float(cathode_radius_mm) ** 2)

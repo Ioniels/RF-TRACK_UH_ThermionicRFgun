@@ -1,7 +1,12 @@
 """Plotting helpers for RF gun simulations."""
 
 from .fields import field_maps, axis_phase
-from .emission import plot_emission_history, plot_j_vs_n
+from .emission import plot_emission_history, plot_j_vs_n, plot_emission_model_sensitivities
+from .iteration import (
+    plot_emission_iteration_convergence,
+    plot_emission_iteration_waveforms,
+    plot_emission_iteration_near_cathode,
+)
 from .phase_space import plot_phase_space, plot_spectra, plot_screen_phase_space_slider
 from .evolution import (
     plot_beam_moments_evolution,
@@ -32,10 +37,12 @@ from .style import (
     get_recentered_diverging_cmap,
     add_reference_lines,
     add_aperture_curve,
+    add_cathode_boundary_circle,
     COLOR_PRIMARY,
     COLOR_SECONDARY,
     COLOR_NEUTRAL,
     COLOR_LOST,
+    EMISSION_MODEL_COLORS,
 )
 
 __all__ = [
@@ -43,6 +50,10 @@ __all__ = [
     "axis_phase",
     "plot_emission_history",
     "plot_j_vs_n",
+    "plot_emission_model_sensitivities",
+    "plot_emission_iteration_convergence",
+    "plot_emission_iteration_waveforms",
+    "plot_emission_iteration_near_cathode",
     "plot_phase_space",
     "plot_spectra",
     "plot_screen_phase_space_slider",
@@ -68,8 +79,10 @@ __all__ = [
     "get_recentered_diverging_cmap",
     "add_reference_lines",
     "add_aperture_curve",
+    "add_cathode_boundary_circle",
     "COLOR_PRIMARY",
     "COLOR_SECONDARY",
     "COLOR_NEUTRAL",
     "COLOR_LOST",
+    "EMISSION_MODEL_COLORS",
 ]

@@ -1,17 +1,15 @@
 """Phase space and spectrum plots.
 
-Two independent visualization knobs replace the project's former `clean_e`/`clean_except_zpz`/
-`show_zle0`/`highlight_mode`/`highlight_zlt0`/`highlight_pzlt0`/`highlight_mask`/`highlight_cmap`
-parameter set: `exclude_backward_losses` and `exclude_lost`. Each independently either drops the
-corresponding population entirely or keeps it, highlighted in a distinct color (grayscale for
-backward, green for lost) -- see `_prepare_plot_population`. Tagging is `%id`-based via
-`rf_gun.particle_tags.ParticleTags` (not a screen's own z/pz, which does not reliably carry the
-true lab-frame sign for a backward-crossing particle -- see
+Two independent visualization knobs: `exclude_backward_losses` and `exclude_lost`. Each
+independently either drops the corresponding population entirely or keeps it, highlighted in a
+distinct color (grayscale for backward, green for lost) -- see `_prepare_plot_population`.
+Tagging is `%id`-based via `rf_gun.particle_tags.ParticleTags` (not a screen's own z/pz, which
+does not reliably carry the true lab-frame sign for a backward-crossing particle -- see
 `rf_gun.diagnostics.manual_twiss_and_emittance`'s docstring for the full empirical finding).
-"Lost" means removed by the dynamic aperture (`rf_gun.aperture`) during tracking; unlike the
-project's former post-hoc radius cut, this tagging needs no per-screen z-gating -- a particle
-that was lost is simply and correctly absent from every screen from that point onward, and
-present (untagged) at every screen upstream of it, by construction of the physical removal.
+"Lost" means removed by the dynamic aperture (`rf_gun.aperture`) during tracking: a particle that
+was lost is simply and correctly absent from every screen from that point onward, and present
+(untagged) at every screen upstream of it, by construction of the physical removal -- no
+per-screen z-gating is needed.
 
 `Bout` is intentionally not plotted here: unlike a Screen, it is a fixed-*time* snapshot with a
 spread of z among its particles (forward-transmitted ones have traveled further than
@@ -148,7 +146,22 @@ def phase_space_density(
             if np.std(x) <= 0.0 or np.std(y) <= 0.0:
                 use_kde = False
             else:
-                dens = gaussian_kde(np.vstack([x, y]))(np.vstack([x, y]))
+                # `gaussian_kde(ref)(query)` costs O(len(ref)*len(query)) -- fine at a few thousand
+                # points, but squares away at production macroparticle counts (1e5): evaluating a
+                # 1e5-point KDE against itself is ~1e10 ops, effectively hanging every phase-space
+                # figure. Fit on a bounded random subsample instead of the full population when
+                # large -- every point is still plotted (this only bounds the *reference* set used
+                # to color them), so the figure's population/statistics are unaffected, only the
+                # density-color estimate is (a KDE is a statistical estimate to begin with; a few
+                # thousand points already gives a stable one).
+                _KDE_FIT_MAX_POINTS = 4000
+                if x.size > _KDE_FIT_MAX_POINTS:
+                    _rng = np.random.default_rng(0)
+                    _sub = _rng.choice(x.size, size=_KDE_FIT_MAX_POINTS, replace=False)
+                    ref = np.vstack([x[_sub], y[_sub]])
+                else:
+                    ref = np.vstack([x, y])
+                dens = gaussian_kde(ref)(np.vstack([x, y]))
                 order = np.argsort(dens)
                 x_plot = x[order]
                 y_plot = y[order]
@@ -195,6 +208,8 @@ def _phase_space_panel(
     show_colorbar: bool = False,
     x_scale: float = 1.0,
     y_scale: float = 1.0,
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
 ):
     """Draw one canonical phase-space panel with mirrored inset marginals.
 
@@ -205,6 +220,12 @@ def _phase_space_panel(
     `x_scale`/`y_scale` rescale the raw `M[:, x_idx]`/`M[:, y_idx]` columns for display -- `x_scale`
     is used for the ToF panel, whose column (`%t`, mm/c) needs converting to ns; `y_scale` converts
     the momentum columns (`%Px`/`%Py`/`%Pz`, MeV/c) to keV/c. 1.0 (no-op) where not needed.
+
+    `xlim`/`ylim`, when given, override the default plain-min/max dezoom (`style.dezoom_frac`) for
+    that axis -- e.g. a robust, percentile-based range (see
+    `rf_gun.plotting.back_bombardment._robust_range`) when a handful of extreme outliers would
+    otherwise single-handedly set the axis limits via a plain min/max. The marginal histograms
+    (inset axes below) always match whatever range the main axis ends up with, override or not.
     """
     ax_main = fig.add_subplot(sub_spec)
 
@@ -266,16 +287,20 @@ def _phase_space_panel(
         )
 
     dezoom_frac = float(getattr(style, "dezoom_frac", 0.05))
-    if np.isfinite(dezoom_frac) and dezoom_frac > 0.0 and x_main.size and y_main.size:
+    if xlim is not None:
+        ax_main.set_xlim(*xlim)
+    elif np.isfinite(dezoom_frac) and dezoom_frac > 0.0 and x_main.size:
         x_min, x_max = float(np.min(x_main)), float(np.max(x_main))
-        y_min, y_max = float(np.min(y_main)), float(np.max(y_main))
-
         x_span = x_max - x_min
-        y_span = y_max - y_min
         x_pad = dezoom_frac * x_span if x_span > 0.0 else max(1.0, abs(x_max)) * dezoom_frac
-        y_pad = dezoom_frac * y_span if y_span > 0.0 else max(1.0, abs(y_max)) * dezoom_frac
-
         ax_main.set_xlim(x_min - x_pad, x_max + x_pad)
+
+    if ylim is not None:
+        ax_main.set_ylim(*ylim)
+    elif np.isfinite(dezoom_frac) and dezoom_frac > 0.0 and y_main.size:
+        y_min, y_max = float(np.min(y_main)), float(np.max(y_main))
+        y_span = y_max - y_min
+        y_pad = dezoom_frac * y_span if y_span > 0.0 else max(1.0, abs(y_max)) * dezoom_frac
         ax_main.set_ylim(y_min - y_pad, y_max + y_pad)
 
     if bool(style.show_histograms):
@@ -504,22 +529,20 @@ def render_screen_phase_space_figure(
     """Render one screen-style phase-space figure without widgets/display side effects.
 
     Transmission-percentage text is always row-count-based (`M_plot.shape[0]` vs. whichever of
-    `n_macroparticles`/`n_ref` is available) -- this no longer reads an RF-Track
-    `Screen.get_info()` object for anything (mean-arrival-time, when shown, comes from the `%t`
-    column already present in `M` itself via the extended phase-space format) -- *except* for the
+    `n_macroparticles`/`n_ref` is available); this never reads an RF-Track `Screen.get_info()`
+    object for anything (mean-arrival-time, when shown, comes from the `%t` column already
+    present in `M` itself via the extended phase-space format) -- *except* for the
     Initial (B0) frame, identified by `z_mm is None`: `%t` there is RF-Track's own elapsed-tracking-
     time field, identically 0 for every particle before any tracking happens, so `thermo_info`
     (when given, with a matching-length `initial_t0_mm_c`) substitutes each particle's real
     emission time instead -- see `_patch_launch_t_emit`.
 
-    There used to be an `n_real_ref` option here (the *real*, charge-weighted electron count,
-    `Q_total_C / q_e`) -- removed because it's a category error against a row count: a
-    thermionic bunch's real electron count is many orders of magnitude larger than its
-    macroparticle count (e.g. ~1e10 real electrons vs. ~1e4 macroparticles), so dividing a row
-    count by it silently produced a "transmission" smaller than reality by that same many orders
-    of magnitude. Since every macroparticle in this project represents an equal share of the real
-    bunch (no per-particle weight column anywhere in the phase-space format), a macroparticle-count
-    ratio *is* the real transmission fraction; there is nothing `n_real_ref` could have added.
+    A macroparticle-count ratio *is* the real transmission fraction here: every macroparticle in a
+    given bunch represents an equal share of its real (charge-weighted) electron count, and the
+    plotted phase-space arrays carry no per-particle weight column (`EXTENDED_PHASE_FMT` has no
+    `%N`), so there is no separate real-electron-count reference to divide by -- the real electron
+    count (`Q_total_C / q_e`, many orders of magnitude larger than the macroparticle count) and the
+    macroparticle count both scale by the same overall factor, and that factor cancels in a ratio.
     """
     import matplotlib.pyplot as plt
 

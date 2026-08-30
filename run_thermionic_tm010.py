@@ -65,15 +65,18 @@ def parse_args() -> argparse.Namespace:
 
     # Dynamic radial aperture R(z): the cavity's real transverse channel (narrow cathode-side
     # chamfer, wide body, narrow exit transition), enforced by RF-Track itself during tracking
-    # (see rf_gun.aperture). Replaces both the old whole-Volume scalar --aperture_m and the old
-    # post-hoc --aperture_enabled/--aperture_start_m/--aperture_end_m/--aperture_diameter_mm
-    # geometric cut applied after tracking. `--delta_cathode_chamfer_mm` shifts the whole profile
-    # relative to the cathode (0 = cathode exactly at the chamfer start; see rf_gun.aperture's
-    # module docstring for the sign convention) -- the user intends to try different cathode
-    # insertion depths, so this stays a tunable CLI flag rather than a hardcoded constant.
+    # (see rf_gun.aperture). `--delta_cathode_chamfer_mm` shifts the whole profile relative to the
+    # cathode (0 = cathode exactly at the chamfer start; see rf_gun.aperture's module docstring for
+    # the sign convention) -- a tunable CLI flag so different cathode insertion depths can be tried.
     parser.add_argument("--delta_cathode_chamfer_mm", type=float, default=None)
 
     parser.add_argument("--sc_enabled", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--sc-nx", dest="sc_nx", type=int, default=32)
+    parser.add_argument("--sc-ny", dest="sc_ny", type=int, default=32)
+    parser.add_argument("--sc-nz", dest="sc_nz", type=int, default=32)
+    parser.add_argument("--mirror-charges", dest="mirror_charges", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--mirror-z-m", dest="mirror_z_m", type=float, default=0.0)
+    parser.add_argument("--mirror-charge-tolerance", dest="mirror_charge_tolerance", type=float, default=None)
     parser.add_argument("--beam_loading", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--bl_q0", type=float, default=4000.0)
     parser.add_argument("--bl_qext", type=float, default=3500.0)
@@ -96,14 +99,79 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--screen_log", action=argparse.BooleanOptionalAction, default=False)
 
     parser.add_argument("--r_cathode_mm", type=float, default=3.14 / 2)
+    parser.add_argument(
+        "--cathode_chamfer_width_mm", type=float, default=rg.DEFAULT_CATHODE_CHAMFER_WIDTH_MM,
+        help="Radial width of the cathode's 45deg outer chamfer; impacts there still heat the "
+             "cathode (see rg.classify_impact_surface), unlike the holder/wall beyond it.",
+    )
     parser.add_argument("--emission_scale", type=float, default=1.0)
     parser.add_argument("--use_const_pz", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--pz_init_mevc", type=float, default=4.0e-3)
     parser.add_argument("--ra_um", type=float, default=0.0)
     parser.add_argument("--re_um", type=float, default=0.0)
-    parser.add_argument("--emission_law", choices=["RD_schottky", "unified"], default="RD_schottky")
+    parser.add_argument(
+        "--emission_law",
+        choices=["RD_schottky", "rld_schottky_plus_mg", "unified", "rgtf_2019", "murphy_good_direct_reference"],
+        default="RD_schottky",
+    )
+    parser.add_argument("--compare-emission-models", dest="compare_emission_models", type=str, nargs="*", default=None)
+    parser.add_argument("--richardson-constant", dest="richardson_constant", type=float, default=None)
+    parser.add_argument("--chemical-potential-eV", dest="chemical_potential_eV", type=float, default=None)
+    parser.add_argument(
+        "--beta-application", dest="beta_application",
+        choices=["total_macro_field", "external_field_only"], default="total_macro_field",
+    )
+
+    parser.add_argument(
+        "--emission-field-iteration", dest="emission_field_iteration",
+        action=argparse.BooleanOptionalAction, default=False,
+    )
+    parser.add_argument("--emission-iteration-particles", dest="emission_iteration_particles", type=int, default=1000)
+    # NOTE: --emission-iteration-particles does NOT control the iteration's actual sample size --
+    # that is n_x_bins*n_y_bins*n_time_bins (see rf_gun.emission_iteration.EmissionFieldIterationConfig
+    # and its module docstring's "fixed source samples" section); EmissionFieldIterationConfig.n_particles
+    # is accepted but never read by run_emission_field_iteration. Kept for backward CLI compatibility;
+    # use the two flags below to actually change the cathode grid resolution.
+    parser.add_argument("--emission-iteration-nx", dest="emission_iteration_nx", type=int, default=12,
+                         help="Cathode x-grid resolution for the Emission Fields Iteration (and its near-cathode figures).")
+    parser.add_argument("--emission-iteration-ny", dest="emission_iteration_ny", type=int, default=12,
+                         help="Cathode y-grid resolution for the Emission Fields Iteration (and its near-cathode figures).")
+    parser.add_argument("--emission-iteration-finesse", dest="emission_iteration_finesse", choices=["coarse", "medium"], default="medium")
+    parser.add_argument("--emission-iteration-max-iterations", dest="emission_iteration_max_iterations", type=int, default=12)
+    parser.add_argument("--emission-iteration-relaxation", dest="emission_iteration_relaxation", type=float, default=0.30)
+    parser.add_argument("--emission-iteration-current-tolerance", dest="emission_iteration_current_tolerance", type=float, default=1.0e-2)
+    parser.add_argument("--emission-iteration-field-tolerance", dest="emission_iteration_field_tolerance", type=float, default=1.0e-2)
+    parser.add_argument("--emission-iteration-charge-tolerance", dest="emission_iteration_charge_tolerance", type=float, default=1.0e-2)
+    parser.add_argument("--emission-iteration-z-max-mm", dest="emission_iteration_z_max_mm", type=float, default=2.0)
+    parser.add_argument("--emission-field-probe-z-um", dest="emission_field_probe_z_um", type=float, default=None)
+    parser.add_argument(
+        "--emission-iteration-include-beam-loading", dest="emission_iteration_include_beam_loading",
+        action=argparse.BooleanOptionalAction, default=False,
+    )
+    parser.add_argument(
+        "--spatial-emission-sampling", dest="spatial_emission_sampling",
+        action=argparse.BooleanOptionalAction, default=False,
+        help="Sample the production bunch jointly in (x,y,t) from the RF field alone (guide Sec. "
+             "6.4), instead of the default independent radius-uniform/on-axis-F(t) model. "
+             "Superseded by --use-converged-iteration-source when both are set and the iteration "
+             "converged.",
+    )
+    parser.add_argument(
+        "--use-converged-iteration-source", dest="use_converged_iteration_source",
+        action=argparse.BooleanOptionalAction, default=False,
+        help="Requires --emission-field-iteration. If the iteration converges, use its final "
+             "J(x,y,t) (RF+SC+mirror) directly as the production source (guide Sec. 13.6) instead "
+             "of the prescribed on-axis model. Falls back clearly (prints a message, keeps the "
+             "prescribed source) if the iteration does not converge.",
+    )
     parser.add_argument("--t_cathode_k", type=float, default=1700.0)
     parser.add_argument("--phi_eff_ev", type=float, default=2.1)
+    parser.add_argument(
+        "--work-function-temperature-model", dest="work_function_temperature_model",
+        choices=["constant_phi_eff", "linear_tcwf", "piecewise_surface_evolution"], default=None,
+        help="LaB6<100> phi_eff(T) model (manual_references/LaB6_100_work_function_models.md); "
+             "overrides --phi_eff_ev with a temperature-resolved value when set.",
+    )
     parser.add_argument("--beta_f", type=float, default=1.0)
     parser.add_argument("--emission_phase_range", type=float, default=90.0)
 
@@ -188,15 +256,12 @@ def resolve_output_dir(args: argparse.Namespace, *, rg) -> Path:
 def _beam_parameters_summary_from_table(table: list[dict[str, Any]], *, rg) -> tuple[dict[str, Any], dict[str, Any]]:
     """Twiss + emittance summaries from `rg.compute_beam_properties`'s per-screen table.
 
-    Replaces two previous, independent implementations: a hand-rolled Twiss computation that
-    passed raw `px` (not `px/pz`) as the divergence, and an emittance summary read from RF-Track's
-    per-screen `get_info()` (`info_snaps`) -- found unreliable since a `Screen`'s `get_info()`
-    returns an internal `Bunch6d` object, not `Bunch6dT` (confirmed against RF-Track 2.5.4 and
-    2.6.3 -- see `UPGRADE_PLAN_notebook_and_architecture.md`). `compute_beam_properties` forward-
-    filters via `%id` lookup against `Bout`'s own reliable absolute z/pz
-    (`rf_gun.particle_tags.ParticleTags`) instead of a raw z/pz sign check on the screen's own
-    columns, and additionally restricts to the aperture-surviving population when tagged -- the
-    same population used by every other summary and figure built from this run.
+    `compute_beam_properties` uses `px/pz` (not raw `px`) as the divergence, and forward-filters
+    via `%id` lookup against `Bout`'s own reliable absolute z/pz (`rf_gun.particle_tags.
+    ParticleTags`) rather than a screen's own `get_info()` (a `Screen`'s `get_info()` returns an
+    internal `Bunch6d` object, not `Bunch6dT`, and its z/pz do not reliably carry lab-frame sign).
+    It additionally restricts to the aperture-surviving population when tagged -- the same
+    population used by every other summary and figure built from this run.
     """
 
     def _col(key):
@@ -429,6 +494,24 @@ def main() -> None:
     args = parse_args()
     threads_requested_explicit = args.threads is not None
     apply_preset(args)
+
+    if args.richardson_constant is not None or args.chemical_potential_eV is not None:
+        raise NotImplementedError(
+            "--richardson-constant and --chemical-potential-eV are not yet threaded into the "
+            "tracking pipeline's emission law (rf_gun.simulation calls J_rld_schottky/J_unified "
+            "directly with their built-in defaults) -- they are only honored by direct "
+            "evaluate_emission_model(...) calls, e.g. in the sensitivity/comparison figures. "
+            "Wiring a per-run material-parameter override through EmissionParams into the "
+            "tracking source is a separate follow-on change; leave both flags unset for now."
+        )
+
+    if str(args.beta_application) == "external_field_only":
+        raise NotImplementedError(
+            "--beta-application external_field_only is not wired into the tracking pipeline yet "
+            "(guide Sec. 6.6): beta_enh is currently always applied to the total macroscopic field "
+            "(E_RF+E_SC+E_mirror), not just the external RF component. Use "
+            "--beta-application total_macro_field (the default) or leave the flag unset."
+        )
 
     import rf_gun as rg
     from rf_gun.finesse_presets import apply_finesse_preset_to_args
@@ -673,8 +756,7 @@ def main() -> None:
     r_over_q_ohm = (veff_v**2) / (p_del_w * q_loaded)
     # Kept distinct from `bl_r_over_q_ohm_per_m` (the value actually used in transport, below) so
     # the from-scan estimate is still reported correctly even when --no-calibrate-bl-r-over-q
-    # overrides it with the fixed CLI/default value -- previously both prints read the same
-    # (possibly-overridden) variable, so "from scan" silently showed the fixed value instead.
+    # overrides it with the fixed CLI/default value.
     bl_r_over_q_ohm_per_m_from_scan = r_over_q_per_m(veff_v, p_del_w, q_loaded, l_eff_m)
     bl_r_over_q_ohm_per_m = bl_r_over_q_ohm_per_m_from_scan
 
@@ -720,6 +802,14 @@ def main() -> None:
         aperture_delta_mm=delta_cathode_chamfer_mm,
         sc_enabled=bool(args.sc_enabled),
         sc_dt_mm=float(args.sc_dt_mm),
+        sc_nx=int(args.sc_nx),
+        sc_ny=int(args.sc_ny),
+        sc_nz=int(args.sc_nz),
+        mirror_charge_enabled=bool(args.mirror_charges),
+        mirror_z_m=float(args.mirror_z_m),
+        mirror_charge_tolerance=(
+            float(args.mirror_charge_tolerance) if args.mirror_charge_tolerance is not None else None
+        ),
         emission_nsteps=int(args.emission_nsteps),
         emission_range=float(args.emission_range),
         fm_nsteps=int(args.fm_nsteps),
@@ -752,6 +842,7 @@ def main() -> None:
         pz0_MeV_c=float(args.pz_init_mevc),
         pz_model=pz_model,
         emission_law=str(args.emission_law),
+        work_function_temperature_model=args.work_function_temperature_model,
         beta_enh=float(args.beta_f),
         roughness=roughness,
         time_dependent=True,
@@ -801,6 +892,103 @@ def main() -> None:
         save_lost_particles=bool(args.save_lost_particles),
     )
 
+    emission_iteration_result = None
+    if bool(args.emission_field_iteration):
+        iter_z_probe_m = (
+            float(args.emission_field_probe_z_um) * 1.0e-6
+            if args.emission_field_probe_z_um is not None else None
+        )
+        iteration_config = rg.EmissionFieldIterationConfig(
+            enabled=True,
+            n_particles=int(args.emission_iteration_particles),
+            finesse=str(args.emission_iteration_finesse),
+            max_iterations=int(args.emission_iteration_max_iterations),
+            n_x_bins=int(args.emission_iteration_nx),
+            n_y_bins=int(args.emission_iteration_ny),
+            relaxation=float(args.emission_iteration_relaxation),
+            current_tolerance=float(args.emission_iteration_current_tolerance),
+            field_tolerance=float(args.emission_iteration_field_tolerance),
+            charge_tolerance=float(args.emission_iteration_charge_tolerance),
+            z_probe_m=iter_z_probe_m,
+            z_max_m=float(args.emission_iteration_z_max_mm) * 1.0e-3,
+            include_space_charge=True,
+            include_mirror=bool(args.mirror_charges),
+            include_beam_loading=bool(args.emission_iteration_include_beam_loading),
+            sc_nx=int(args.sc_nx), sc_ny=int(args.sc_ny), sc_nz=int(args.sc_nz),
+            mirror_z_m=float(args.mirror_z_m),
+            random_seed=int(args.seed),
+        )
+        # The iteration's actual sample size is n_x_bins*n_y_bins*n_time_bins, not
+        # iteration_config.n_particles (see the CLI help for --emission-iteration-particles above).
+        _n_iter_time_bins = 24  # EmissionFieldIterationConfig's own default; not independently configurable here
+        print(
+            f"Emission Fields Iteration: grid={iteration_config.n_x_bins}x{iteration_config.n_y_bins} "
+            f"x~{_n_iter_time_bins} time bins, "
+            f"max_iter={iteration_config.max_iterations}, omega0={iteration_config.relaxation}",
+            flush=True,
+        )
+        t_iter_start = time.time()
+        emission_iteration_result = rg.run_emission_field_iteration(
+            rft, er_grid, ez_grid, ez0_phasor_axis, vol_params, emission,
+            iteration_config, phi_deg=float(phase_deg_transport),
+        )
+        print(
+            f"Emission Fields Iteration finished in {rg.format_duration(time.time() - t_iter_start)}: "
+            f"converged={emission_iteration_result.converged} "
+            f"({len(emission_iteration_result.eps_J_history)} iterations)"
+        )
+        if not emission_iteration_result.converged:
+            print(f"  Reason: {emission_iteration_result.failure_reason}")
+        try:
+            rg.plot_emission_iteration_convergence(emission_iteration_result)
+            rg.plot_emission_iteration_waveforms(emission_iteration_result)
+            rg.plot_emission_iteration_near_cathode(emission_iteration_result)
+        except Exception as exc:
+            print(f"  Warning: iteration figures failed: {exc}")
+
+        # Large (x,y,t)-and-iteration-resolved arrays go in a compressed NPZ, not run_results.json
+        # (guide Sec. 15.3) -- only a scalar summary is recorded in run_results.json below.
+        emission_iteration_npz_path = output_dir / "emission_iteration.npz"
+        np.savez_compressed(
+            emission_iteration_npz_path,
+            schema_version=np.array(2),
+            x_grid_m=emission_iteration_result.x_grid_m,
+            y_grid_m=emission_iteration_result.y_grid_m,
+            t_grid_s=emission_iteration_result.t_grid_s,
+            temperature_K=emission_iteration_result.temperature_K,
+            J_history_Apm2=np.array(emission_iteration_result.J_history_Apm2),
+            E_RF_history_Vpm=np.array(emission_iteration_result.E_RF_history_Vpm),
+            E_SC_history_Vpm=np.array(emission_iteration_result.E_SC_history_Vpm),
+            E_mirror_history_Vpm=np.array(emission_iteration_result.E_mirror_history_Vpm),
+            E_total_history_Vpm=np.array(emission_iteration_result.E_total_history_Vpm),
+            Q_history_C=np.array(emission_iteration_result.Q_history_C),
+            I_peak_history_A=np.array(emission_iteration_result.I_peak_history_A),
+            eps_J_history=np.array(emission_iteration_result.eps_J_history),
+            eps_E_history=np.array(emission_iteration_result.eps_E_history),
+            eps_Q_history=np.array(emission_iteration_result.eps_Q_history),
+            relaxation_history=np.array(emission_iteration_result.relaxation_history),
+        )
+    else:
+        emission_iteration_npz_path = None
+
+    spatial_source = None
+    if bool(args.use_converged_iteration_source):
+        if emission_iteration_result is None:
+            raise ValueError("--use-converged-iteration-source requires --emission-field-iteration")
+        if emission_iteration_result.converged:
+            spatial_source = rg.spatial_source_from_iteration_result(emission_iteration_result)
+            print("Using the converged Emission Fields Iteration source (RF+SC+mirror) for production tracking.")
+        else:
+            print(
+                "--use-converged-iteration-source requested but the iteration did not converge "
+                f"({emission_iteration_result.failure_reason}); falling back to the prescribed source."
+            )
+    elif bool(args.spatial_emission_sampling):
+        spatial_source = rg.build_cathode_rf_source(
+            rft, er_grid, ez_grid, float(phase_deg_transport), vol_params, emission,
+        )
+        print("Using RF-only spatially-resolved emission sampling (no SC/mirror feedback) for production tracking.")
+
     result, progress_stats = rg.run_transport_with_progress(
         rft,
         er_grid,
@@ -813,6 +1001,7 @@ def main() -> None:
         timing_diagnostics=bool(args.timing_diagnostics),
         slow_step_warn_s=float(args.slow_step_warn_s),
         rng=rng,
+        spatial_source=spatial_source,
     )
 
     phase_fmt = rg.EXTENDED_PHASE_FMT
@@ -825,7 +1014,22 @@ def main() -> None:
     # is just backward-vs-forward (from Bout's reliable absolute z/pz) plus lost (id-based, from
     # RF-Track's own lost-particle table). Computed once and reused by every figure and every
     # JSON summary built from this run.
-    tags = rg.build_particle_tags(mf, result.lost_table)
+    #
+    # The acceptance scan's trailing-particle removal (`extra_backward_ids`) is folded in here to
+    # match the notebook's own tagging exactly (see its "Particle classification" cell) -- this
+    # was previously omitted from this script, so its "backward" population (and everything
+    # downstream: figures, particle_classes, beam-property tables) classified more loosely than
+    # the notebook for the same physics run.
+    _backward_ids_strict = rg.backward_ids_from_bout(mf, threshold_backward_mevc=0.0)
+    _unphysical_ids = rg.unphysical_ids_from_bout(mf)
+    acceptance_scan = rg.scan_acceptance(mf, _backward_ids_strict | _unphysical_ids)
+    print(
+        f"Acceptance scan: n_forward={acceptance_scan.n_forward} | "
+        f"k_core={acceptance_scan.k_core:.2f} (main-beam selection, reference only, NOT applied) | "
+        f"k_trailing={acceptance_scan.k_trailing:.2f} (trailing removal, applied) | "
+        f"{len(acceptance_scan.trailing_ids)} particle(s) newly tagged backward (trailing)."
+    )
+    tags = rg.build_particle_tags(mf, result.lost_table, extra_backward_ids=acceptance_scan.trailing_ids)
 
     # Save the final (forward-going, dynamic-aperture-surviving) 6D beam as openPMD-beamphysics
     # HDF5 -- mirrors the notebook's "Export the exit beam" cell exactly (same
@@ -885,7 +1089,7 @@ def main() -> None:
         print(f"Saved                    : {_pg.n_particle}")
 
     npz_path = output_dir / "beam_data.npz"
-    npz_payload: Dict[str, Any] = {"M0": m0, "Mf": mf, "z_snaps": z_snaps_arr}
+    npz_payload: Dict[str, Any] = {"schema_version": np.array(1), "M0": m0, "Mf": mf, "z_snaps": z_snaps_arr}
     if result.M_snaps:
         for i, M in enumerate(result.M_snaps):
             npz_payload[f"screen_phase_space_{i:04d}"] = np.asarray(M)
@@ -914,6 +1118,41 @@ def main() -> None:
     peak_current_A = float(thermo_summary.get("I_peak_A", float("nan")))
     peak_current_density_A_cm2 = float(thermo_summary.get("J_Apm2", float("nan"))) * 1e-4
 
+    emission_model_comparison = None
+    if args.compare_emission_models:
+        F_t_hist = np.asarray(result.thermo_info.get("F_t", []), dtype=float)
+        F_t_hist = F_t_hist[np.isfinite(F_t_hist) & (F_t_hist > 0.0)]
+        if F_t_hist.size == 0:
+            print("--compare-emission-models: no populated extraction-field history to compare over; skipping.")
+        else:
+            # The resolved value actually used by this run (from thermo_info, not the raw
+            # --phi_eff_ev CLI value, which --work-function-temperature-model may override) --
+            # matches the notebook's own PHI_EFF_EV_USED convention (see its "Emission geometry"/
+            # thermionic config cell).
+            phi_eff_ev_used = float(result.thermo_info.get("work_function_eV", args.phi_eff_ev))
+            models_to_compare = list(args.compare_emission_models)
+            F_domain = rg.select_operating_field_domain(F_t_hist)
+            F_scan = np.geomspace(max(F_domain[0], 1.0), max(F_domain[2], F_domain[0] + 1.0), 60)
+            comparison = rg.compare_emission_models(models_to_compare, F_scan, float(args.t_cathode_k), phi_eff_ev_used)
+            print("Emission-model comparison (charge-weighted error vs "
+                  f"{comparison['reference_model']}):")
+            for m, err in comparison["charge_weighted_error"].items():
+                print(f"  {m}: {'n/a (not implemented)' if err is None else f'{err:.4%}'}")
+            emission_model_comparison = {
+                "models": models_to_compare,
+                "reference_model": comparison["reference_model"],
+                "charge_weighted_error": comparison["charge_weighted_error"],
+                "F_domain_Vpm": [float(x) for x in F_domain],
+            }
+            try:
+                with rg.capture_figures("emission_sensitivity", output_dir / "figures", formats=("png",)):
+                    rg.plot_emission_model_sensitivities(
+                        F_scan, float(args.t_cathode_k), phi_eff_ev_used,
+                        models=models_to_compare, F_populated_range=F_domain,
+                    )
+            except Exception as exc:
+                print(f"  Warning: sensitivity figure failed: {exc}")
+
     # Back-bombardment: reconstructed for free from Bout's already-tracked state (no extra
     # tracking cost -- see rf_gun.back_bombardment's module docstring), so always computed,
     # independent of --save-figures.
@@ -924,14 +1163,23 @@ def main() -> None:
         q_total_C=float(result.thermo_info.get("Q_total_C", 0.0)),
         n_macroparticles=int(args.n_particles),
         r_max_mm=float(args.r_max_m) * 1e3,
+        cathode_radius_mm=cathode_radius_mm,
+        cathode_chamfer_width_mm=float(args.cathode_chamfer_width_mm),
     )
     back_bombardment_summary: Dict[str, Any] = {
         "n_behind_cathode": int(back_bombardment_data.n_behind_cathode),
         "n_valid": int(back_bombardment_data.n_valid),
         "n_never_reached_a_screen": int(np.sum(back_bombardment_data.n_screens_reached == 0)),
+        "n_cathode_face": int(back_bombardment_data.n_cathode_face),
+        "n_cathode_chamfer": int(back_bombardment_data.n_cathode_chamfer),
+        "n_excluded_geometry": int(back_bombardment_data.n_excluded_geometry),
         "total_deposited_energy_J": None,
         "energy_map_file": None,
+        "events_file": None,
     }
+    back_bombardment_events_path = rg.save_back_bombardment_events_hdf5(output_dir, back_bombardment_data)
+    if back_bombardment_events_path is not None:
+        back_bombardment_summary["events_file"] = str(back_bombardment_events_path)
 
     saved_figures: List[str] = []
     back_bombardment_energy_map = None
@@ -1018,10 +1266,9 @@ def main() -> None:
     lost_path = rg.save_lost_particles_json(output_dir, result.lost_table) if bool(args.save_lost_particles) else None
 
     # One consolidated beam-properties-vs-z summary (particle counts, per-screen curves,
-    # evolution, Twiss/emittance, classification, consistency checks) -- this used to also be
-    # written standalone to beam_summary.json and particle_classes_summary.json; now it lives only
-    # inside run_results.json (below), since every one of these is a small per-screen/per-class
-    # quantity, never a per-particle array.
+    # evolution, Twiss/emittance, classification, consistency checks), written only inside
+    # run_results.json (below) since every one of these is a small per-screen/per-class quantity,
+    # never a per-particle array.
     beam_summary = _build_beam_summary(
         rg=rg,
         args=args,
@@ -1103,6 +1350,7 @@ def main() -> None:
             },
             "cathode_emission": {
                 "r_cathode_mm": float(args.r_cathode_mm),
+                "cathode_chamfer_width_mm": float(args.cathode_chamfer_width_mm),
                 "emission_scale": float(args.emission_scale),
                 "use_const_pz": bool(args.use_const_pz),
                 "pz_init_mevc": float(args.pz_init_mevc),
@@ -1114,6 +1362,28 @@ def main() -> None:
                 "beta_f": float(args.beta_f),
                 "emission_phase_range_deg": float(args.emission_phase_range),
                 "emission_phase_start_deg": float(args.emission_phase_start),
+                "work_function_temperature_model": args.work_function_temperature_model,
+                "spatial_emission_sampling": bool(args.spatial_emission_sampling),
+                "use_converged_iteration_source": bool(args.use_converged_iteration_source),
+                "compare_emission_models": list(args.compare_emission_models) if args.compare_emission_models else None,
+                "richardson_constant_Apm2K2": float(args.richardson_constant) if args.richardson_constant is not None else None,
+                "chemical_potential_eV": float(args.chemical_potential_eV) if args.chemical_potential_eV is not None else None,
+                "beta_application": str(args.beta_application),
+            },
+            "emission_field_iteration": {
+                "enabled": bool(args.emission_field_iteration),
+                "n_particles": int(args.emission_iteration_particles),
+                "n_x_bins": int(args.emission_iteration_nx),
+                "n_y_bins": int(args.emission_iteration_ny),
+                "finesse": str(args.emission_iteration_finesse),
+                "max_iterations": int(args.emission_iteration_max_iterations),
+                "relaxation": float(args.emission_iteration_relaxation),
+                "current_tolerance": float(args.emission_iteration_current_tolerance),
+                "field_tolerance": float(args.emission_iteration_field_tolerance),
+                "charge_tolerance": float(args.emission_iteration_charge_tolerance),
+                "z_max_mm": float(args.emission_iteration_z_max_mm),
+                "probe_z_um": float(args.emission_field_probe_z_um) if args.emission_field_probe_z_um is not None else None,
+                "include_beam_loading": bool(args.emission_iteration_include_beam_loading),
             },
             "integration": {
                 "dt_mm": float(args.dt_mm),
@@ -1125,8 +1395,17 @@ def main() -> None:
             "space_charge": {
                 "enabled": bool(args.sc_enabled),
                 "sc_dt_mm": float(args.sc_dt_mm),
+                "sc_nx": int(args.sc_nx),
+                "sc_ny": int(args.sc_ny),
+                "sc_nz": int(args.sc_nz),
+                "mirror_charge_enabled": bool(args.mirror_charges),
+                "mirror_z_m": float(args.mirror_z_m),
+                "mirror_charge_tolerance": (
+                    float(args.mirror_charge_tolerance) if args.mirror_charge_tolerance is not None else None
+                ),
                 "emission_nsteps": int(args.emission_nsteps),
                 "emission_range": float(args.emission_range),
+                "rftrack_capabilities": rg.inspect_rftrack_capabilities(rft),
             },
             "beam_loading": {
                 "enabled": bool(args.beam_loading),
@@ -1167,8 +1446,7 @@ def main() -> None:
                 "L_mm": rg.L_MM,
                 "note": (
                     "Dynamic radial aperture R(z), enforced by RF-Track's own Aperture_1d element "
-                    "during tracking (see rf_gun.aperture) -- replaces both the old whole-Volume "
-                    "scalar aperture_m and the old post-hoc physical-exit-aperture radius cut."
+                    "during tracking (see rf_gun.aperture)."
                 ),
             },
             "deflection_magnet": {
@@ -1229,9 +1507,27 @@ def main() -> None:
             "screen_phase_space_batch": rg.to_json_safe(screen_phase_space_batch),
             "saved_screen_json_count": int(saved_screen_json),
             "saved_screen_hdf5_files": [str(p) for p in saved_screen_hdf5_paths],
+            "emission_model_comparison": emission_model_comparison,
+            "emission_iteration": (
+                {
+                    "converged": bool(emission_iteration_result.converged),
+                    "n_iterations": len(emission_iteration_result.eps_J_history),
+                    "failure_reason": emission_iteration_result.failure_reason,
+                    "final_eps_J": emission_iteration_result.eps_J_history[-1] if emission_iteration_result.eps_J_history else None,
+                    "final_eps_E": emission_iteration_result.eps_E_history[-1] if emission_iteration_result.eps_E_history else None,
+                    "final_eps_Q": emission_iteration_result.eps_Q_history[-1] if emission_iteration_result.eps_Q_history else None,
+                    "initial_charge_C": emission_iteration_result.Q_history_C[0] if emission_iteration_result.Q_history_C else None,
+                    "final_charge_C": emission_iteration_result.Q_history_C[-1] if emission_iteration_result.Q_history_C else None,
+                    "initial_peak_current_A": emission_iteration_result.I_peak_history_A[0] if emission_iteration_result.I_peak_history_A else None,
+                    "final_peak_current_A": emission_iteration_result.I_peak_history_A[-1] if emission_iteration_result.I_peak_history_A else None,
+                    "capability_report": emission_iteration_result.capability_report,
+                }
+                if emission_iteration_result is not None else None
+            ),
         },
         output_files={
             "beam_data_npz": str(npz_path.resolve()),
+            "emission_iteration_npz": str(emission_iteration_npz_path.resolve()) if emission_iteration_npz_path is not None else None,
             "figures_dir": str((output_dir / "figures").resolve()) if saved_figures else None,
             "openpmd_dir": str(openpmd_h5_path.parent.resolve()) if openpmd_h5_path is not None else None,
             "screens_dir": str((output_dir / "screen_distributions_hdf5").resolve()) if saved_screen_hdf5_paths else None,

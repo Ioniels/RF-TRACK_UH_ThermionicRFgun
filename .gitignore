@@ -18,6 +18,10 @@ manual_references/
 logs/
 .rf_gun_transport_runtime_history.json
 
+# Tests and local docs (not shared on GitHub)
+tests/
+RF_TRACK_2_7_SELF_CONSISTENT_EMISSION_IMPLEMENTATION_GUIDE.md
+
 # Local artifacts / OS metadata
 *.zip
 *:Zone.Identifier

@@ -13,10 +13,9 @@ are absolute and reliable, so tagging is done there and propagated to screens by
 identity (`%id`, confirmed to survive intact through B0 -> Screen -> Bout) rather than trusted
 from the screen's own columns.
 
-Unlike the previous post-hoc, entrance/exit-screen-pair radius cut this replaces, a particle
-removed by the dynamic aperture is physically gone from the moment it's removed onward: every
-screen upstream of that point still records it (it was alive then), and every screen downstream
-never records it at all. So, unlike before, no z-gating is needed here -- `lost_ids` is simply
+A particle removed by the dynamic aperture is physically gone from the moment it's removed
+onward: every screen upstream of that point still records it (it was alive then), and every
+screen downstream never records it at all. No z-gating is needed here -- `lost_ids` is simply
 "this id appears in RF-Track's own lost-particle table," true everywhere, always.
 """
 from __future__ import annotations
@@ -150,8 +149,9 @@ def build_particle_tags(
     `lost_ids` comes straight from RF-Track's own lost-particle table (see
     `lost_ids_from_lost_table`), unioned with `unphysical_ids_from_bout` (any `Bout` particle whose
     kinetic energy is non-finite or exceeds `max_kinetic_energy_mev` -- pass `None` to disable this
-    backstop) -- there is no longer a radius cut or entrance/exit screen pair to reconcile here,
-    since the dynamic aperture already removed those particles during tracking.
+    backstop). The dynamic aperture (`rf_gun.aperture`, an `Aperture_1d` element enforced during
+    tracking) already removes particles outside the gun's real transverse channel R(z), so no
+    separate radius cut is needed here.
 
     `threshold_backward_mevc` is passed straight to `backward_ids_from_bout` -- see its docstring
     for the stagnant-near-cathode-beamlet rationale.

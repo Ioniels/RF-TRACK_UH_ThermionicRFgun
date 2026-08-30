@@ -9,8 +9,7 @@ anything inside `$...$` using matplotlib's own bundled glyphs, with a serif `fon
 regular text. Applied once, at import time, project-wide.
 
 `COLOR_PRIMARY`/`COLOR_SECONDARY`/`COLOR_NEUTRAL` are the project's standard curve palette for
-figures with one or two curves (a nice blue/red/gray), replacing what used to be an ad hoc
-"tab:purple"/"tab:brown"/etc. per call site. Convention: x-plane vs y-plane pairs -> blue/red;
+figures with one or two curves (a nice blue/red/gray). Convention: x-plane vs y-plane pairs -> blue/red;
 mean-type vs sigma/spread-type single curves -> blue/red; a de-emphasized third "baseline" curve
 (e.g. an unfiltered reference) -> gray. `COLOR_LOST` is the one fixed exception to that
 two-color convention: green specifically and only means "removed by the dynamic aperture,"
@@ -22,6 +21,7 @@ parentheses, not brackets (`x\\,(\\mathrm{mm})`, not `x [mm]`).
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Optional
 
@@ -35,11 +35,32 @@ plt.rcParams["font.family"] = "serif"
 plt.rcParams["font.serif"] = ["cmr10", "DejaVu Serif"]
 plt.rcParams["axes.formatter.use_mathtext"] = True
 
+# Phase-space panels draw mirrored marginal histograms as inset axes (see
+# phase_space._phase_space_panel), which tight_layout() cannot lay out and warns about on every
+# such figure. The layout is correct in practice (checked visually) -- benign, so silenced here.
+warnings.filterwarnings(
+    "ignore",
+    message="This figure includes Axes that are not compatible with tight_layout",
+    category=UserWarning,
+)
+
 #: Standard curve palette -- see module docstring for the convention.
 COLOR_PRIMARY = "#0072B2"
 COLOR_SECONDARY = "#C0392B"
 COLOR_NEUTRAL = "#7F7F7F"
 COLOR_LOST = "tab:green"
+
+#: Per-model color convention (implementation guide Sec. 4.1), used consistently across every
+#: emission-model figure (history overlay, sensitivity panels, comparison curves) so a reader
+#: learns a model's color once. Solid lines for fast production models; the direct reference uses
+#: a dark dashed line (guide's own convention) rather than a distinct color.
+EMISSION_MODEL_COLORS = {
+    "RD_schottky": "tab:blue",
+    "rld_schottky_plus_mg": "tab:orange",
+    "jensen_gtf_2007": "tab:purple",
+    "rgtf_2019": "tab:green",
+    "murphy_good_direct_reference": "tab:red",
+}
 
 
 def get_default_density_cmap() -> LinearSegmentedColormap:
@@ -100,7 +121,7 @@ def add_reference_lines(
     """Shared reference lines for `fields.field_maps`/`fields.axis_phase`: cathode (z=0) and
     z_end solid, lambda/4 dotted. `halo=True` adds a white stroke so black stays legible over a
     dark colormap panel. Any position left `None` skips that line. See `add_aperture_curve` for
-    the dynamic aperture's R(z) profile, which replaced the old fixed start/end markers here.
+    the dynamic aperture's R(z) profile.
     """
     effects = [patheffects.withStroke(linewidth=lw + 1.8, foreground="white", alpha=0.9)] if halo else None
 
@@ -134,6 +155,33 @@ def add_aperture_curve(
     r_mm = np.asarray(r_mm, dtype=float)
     ax.plot(z_mm, r_mm, color=color, lw=lw, alpha=alpha, ls="--", path_effects=effects, zorder=zorder, label=label)
     ax.plot(z_mm, -r_mm, color=color, lw=lw, alpha=alpha, ls="--", path_effects=effects, zorder=zorder)
+
+
+def add_cathode_boundary_circle(
+    ax,
+    radius_mm: float,
+    *,
+    color: str = "white",
+    lw: float = 1.4,
+    alpha: float = 0.95,
+    ls: str = "--",
+    zorder: float = 6,
+    label: str = "Cathode boundary",
+) -> None:
+    """Draw the cathode disk's boundary (radius `radius_mm`, centered on the emission axis) as a
+    circle on an (x, y) cathode-plane panel -- shared across every such figure (back-bombardment
+    energy density, near-cathode emission-iteration state) so the boundary looks identical
+    wherever it appears. A black halo (mirroring `add_reference_lines`/`add_aperture_curve`'s own
+    styling) keeps the default white line legible over both a dark heatmap background and a
+    bright, near-white hot spot.
+    """
+    effects = [patheffects.withStroke(linewidth=lw + 1.6, foreground="black", alpha=0.85)]
+    theta = np.linspace(0.0, 2.0 * np.pi, 256)
+    r = float(radius_mm)
+    ax.plot(
+        r * np.cos(theta), r * np.sin(theta),
+        color=color, lw=lw, alpha=alpha, ls=ls, path_effects=effects, zorder=zorder, label=label,
+    )
 
 
 @dataclass(frozen=True)

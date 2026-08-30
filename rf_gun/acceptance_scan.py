@@ -1,12 +1,11 @@
 """Threshold-free identification of trailing (stagnant/halo) particles via an acceptance scan.
 
-Replaces the ad hoc `THRESHOLD_BACKWARD_MEVC` constant (a fixed Pz cutoff) with an automatic,
-data-driven cut in the (z, Pz) phase space at `Bout`. `Bout` is used (not a screen) because it is
-the one place a particle's `z`/`Pz` are absolute, reliable lab-frame quantities -- see
-`rf_gun.particle_tags`'s module docstring; `Bout`'s own `%t` is, conversely, *not* usable here
+An automatic, data-driven cut in the (z, Pz) phase space at `Bout`. `Bout` is used (not a screen)
+because it is the one place a particle's `z`/`Pz` are absolute, reliable lab-frame quantities --
+see `rf_gun.particle_tags`'s module docstring; `Bout`'s own `%t` is, conversely, *not* usable here
 (every particle shares the same value, since `Bout` is a fixed-time snapshot of a `Bunch6dT`
-bunch -- confirmed empirically, std strictly 0.0 across an entire population), so this module is
-the one place in the project that keeps `z` rather than switching to ToF.
+bunch -- std strictly 0.0 across an entire population), so this module is the one place in the
+project that keeps `z` rather than switching to ToF.
 
 Algorithm, run once per `k` in a scanned range:
 
@@ -164,6 +163,8 @@ def scan_acceptance(
     k_values = np.asarray(k_values, dtype=float)
 
     arr = np.asarray(Bout_M, dtype=float)
+    if arr.ndim != 2:
+        raise ValueError(f"scan_acceptance: Bout_M must be 2D, got shape {arr.shape}")
     ids_all = arr[:, id_col].astype(np.int64) if arr.shape[1] > id_col else np.full(arr.shape[0], -1, dtype=np.int64)
     is_backward = np.isin(ids_all, list(backward_ids_strict)) if backward_ids_strict else np.zeros(arr.shape[0], dtype=bool)
     forward = ~is_backward

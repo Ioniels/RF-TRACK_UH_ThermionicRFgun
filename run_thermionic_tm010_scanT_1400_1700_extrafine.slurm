@@ -10,13 +10,14 @@
 #SBATCH --output=logs/%x_%A_%a.out
 #SBATCH --error=logs/%x_%A_%a.err
 
-# Temperature scan: T = 1400 K to 1700 K in steps of 10 K (31 runs), one per array task
-# (SLURM_ARRAY_TASK_ID 0..30 -> T = 1400 + 10*task_id). `--finesse extra_fine` sets every
-# solver/meshing resolution knob to the tightest tier (rf_gun/finesse_presets.py): roughly 2x
-# finer than the `fine` tier in run_thermionic_tm010_scanT_1400_1700_fine.slurm, at a
-# proportionally longer runtime. N=100,000 particles, 2 z-snap screens (+2 auto-inserted
-# Deflection magnet OFF: the magnet forces single-threaded
-# tracking (see rf_gun/deflection_field.py), which would leave --cpus-per-task=32 mostly idle.
+# Temperature scan: T = 1400-1700 K in 10 K steps (31 runs), one per array task
+# (SLURM_ARRAY_TASK_ID 0..30 -> T = 1400 + 10*task_id). `--finesse extra_fine`: tightest tier,
+# ~2x finer than `fine` (see the `_fine.slurm` variant), at a proportionally longer runtime.
+# N=100,000 particles, 2 z-snap screens. Deflection magnet OFF: it forces single-threaded
+# tracking, which would leave --cpus-per-task=32 mostly idle.
+
+# Mirror charges are explicitly OFF (validated, tests/test_mirror_charge.py) -- must be enabled
+# deliberately rather than inherited from a CLI default.
 
 set -eo pipefail
 
@@ -85,6 +86,8 @@ ${PY} ${SCRIPT} \
   --delta_cathode_chamfer_mm 0.0 \
   --ode_algorithm rk2 \
   --sc_enabled \
+  --sc-nx 32 --sc-ny 32 --sc-nz 32 \
+  --no-mirror-charges \
   --emission_range 10.0 \
   --beam_loading \
   --bl_q0 4000 \

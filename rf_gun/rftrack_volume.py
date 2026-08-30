@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Optional, Sequence, Tuple, Literal
+from typing import Optional, Sequence, Literal
 
 import numpy as np
 
@@ -13,7 +13,12 @@ from .deflection_field import (
     DEFAULT_Z_P_MM,
     DeflectionField,
 )
-from .aperture import DEFAULT_DELTA_CATHODE_CHAMFER_MM, build_dynamic_aperture
+from .aperture import (
+    DEFAULT_DELTA_CATHODE_CHAMFER_MM,
+    DEFAULT_CATHODE_BACKSTOP_THICKNESS_MM,
+    build_dynamic_aperture,
+    build_cathode_backstop,
+)
 
 
 def _call_first_available(obj, names, *args):
@@ -63,6 +68,12 @@ class VolumeBuildParams:
     fm_tt_nsteps: int = 200
     sc_enabled: bool = False
     sc_dt_mm: float = 1.0
+    sc_nx: int = 32
+    sc_ny: int = 32
+    sc_nz: int = 32
+    mirror_charge_enabled: bool = False
+    mirror_z_m: float = 0.0
+    mirror_charge_tolerance: Optional[float] = None
     emission_nsteps: int = 1
     emission_range: float = 0.0
     cfx_dt_mm: float = 1.0
@@ -78,6 +89,11 @@ class VolumeBuildParams:
     deflection_B_pk_per_A_T: float = DEFAULT_B_PK_PER_A_T
     deflection_z_p_mm: float = DEFAULT_Z_P_MM
     deflection_w_mm: float = DEFAULT_W_MM
+    #: Opt-in, default off: a thin absorbing element behind z=0 recording each backward-crossing
+    #: particle's exact state via RF-Track's own particle-loss table (see
+    #: `rf_gun.aperture.build_cathode_backstop`). Provisional -- not yet checked against a real run.
+    cathode_backstop_enabled: bool = False
+    cathode_backstop_thickness_mm: float = DEFAULT_CATHODE_BACKSTOP_THICKNESS_MM
 
 
 @dataclass(frozen=True)
@@ -147,6 +163,15 @@ def _attach_beam_loading_sw(rft, FM, p: VolumeBuildParams):
         tinj_mm_c = float(p.bl_tinj_manual_mm_c)
     tinj_s = (tinj_mm_c * 1e-3) / c
     tinj_tau = tinj_s / tau_s if tau_s > 0.0 else 0.0
+    if tinj_tau <= 0.0:
+        # RF-Track 2.7's BeamLoadingSW constructor rejects tinj/tau == 0 outright ("requires ...
+        # nonzero charge" -- its validation message bundles several unrelated preconditions, but
+        # isolated testing (tinj_mm_c=1e-9 vs 0.0, all else identical) confirmed the actual failing
+        # check is tinj>0). Physically, "the bunch starts loading the cavity at t=0" (the emission
+        # start, which is exactly what tinj_mm_c=0.0 means for auto_from_emission) is a legitimate
+        # value, not an error -- so floor it to a numerically-negligible positive fraction of tau
+        # rather than reinterpreting auto_from_emission's actual timing.
+        tinj_tau = 1.0e-9
 
     Q_scalar = float(p.bl_Q_loaded)
     rQ_scalar = float(p.bl_r_over_q_ohm_per_m)
@@ -183,6 +208,72 @@ def _attach_beam_loading_sw(rft, FM, p: VolumeBuildParams):
             f"f={p.f_hz:.6g} Hz, tau={tau_s:.4e} s, "
             f"tinj={tinj_mm_c:.4e} mm/c (tinj/tau={tinj_tau:.4e})"
         )
+
+
+def build_space_charge_engine(rft, p: "VolumeBuildParams"):
+    """Construct a fresh SpaceCharge_PIC_FreeSpace engine per the confirmed RF-Track 2.7 API
+    (manual_references/RF_Track_2.5.5_reference_manual.pdf, Sec. 5.1.3/7.5): set_mirror(z_m) takes
+    the cathode position in meters and set_mirror_charge_tolerance() must be applied and verified,
+    never silently skipped, since it is requested physics.
+
+    Scope: `set_mirror` models a single conducting plane at the cathode. It does not impose
+    conducting electrostatic boundary conditions on the rest of the cavity (chamfer, main wall,
+    exit nose, pipe 2) -- `rf_gun.aperture`'s `Aperture_1d` profile is a particle-loss geometry,
+    not a Poisson boundary condition. A full conducting-wall response would need a separate
+    axisymmetric Poisson or boundary-element solver.
+    """
+    sc = rft.SpaceCharge_PIC_FreeSpace(int(p.sc_nx), int(p.sc_ny), int(p.sc_nz))
+
+    if p.mirror_charge_enabled:
+        sc.set_mirror(float(p.mirror_z_m))
+
+        if p.mirror_charge_tolerance is not None:
+            setter = getattr(sc, "set_mirror_charge_tolerance", None)
+            if not callable(setter):
+                raise RuntimeError(
+                    "Mirror-charge tolerance was requested, but the installed RF-Track "
+                    "binding does not expose set_mirror_charge_tolerance()."
+                )
+            setter(float(p.mirror_charge_tolerance))
+
+    return sc
+
+
+def inspect_rftrack_capabilities(rft) -> dict:
+    """Record the RF-Track binding's actual API surface for space charge/mirror controls, per
+    RF_TRACK_2_7_SELF_CONSISTENT_EMISSION_IMPLEMENTATION_GUIDE.md Sec. 5.5. Never guess these --
+    RF-Track 2.7 changes them across templated SpaceCharge_PIC variants without notice.
+    """
+    report: dict = {}
+    report["rf_track_version"] = str(getattr(rft, "version", "unknown"))
+
+    sc_cls = getattr(rft, "SpaceCharge_PIC_FreeSpace", None)
+    report["SpaceCharge_PIC_FreeSpace_available"] = sc_cls is not None
+    if sc_cls is not None:
+        try:
+            probe = rft.SpaceCharge_PIC_FreeSpace(4, 4, 4)
+        except Exception as exc:
+            report["SpaceCharge_PIC_FreeSpace_construction_error"] = str(exc)
+            probe = None
+        if probe is not None:
+            report["set_mirror_available"] = callable(getattr(probe, "set_mirror", None))
+            report["set_mirror_charge_tolerance_available"] = callable(
+                getattr(probe, "set_mirror_charge_tolerance", None)
+            )
+            report["default_mirror_charge_tolerance"] = (
+                float(probe.get_mirror_charge_tolerance())
+                if callable(getattr(probe, "get_mirror_charge_tolerance", None))
+                else None
+            )
+            report["compute_force_available"] = callable(getattr(probe, "compute_force", None))
+            report["compute_field_available"] = callable(getattr(probe, "compute_field", None)) or callable(
+                getattr(probe, "get_field", None)
+            )
+
+    report["Volume_set_sc_engine_available"] = callable(getattr(rft.Volume, "set_sc_engine", None))
+    report["Volume_sc_dt_mm_available"] = hasattr(rft.Volume(), "sc_dt_mm")
+
+    return report
 
 
 def _coerce_volume_params(p: VolumeBuildParams | dict) -> VolumeBuildParams:
@@ -262,16 +353,30 @@ def build_volume(
         )
     V.odeint_algorithm = p.ode_algorithm
     V.odeint_epsabs = float(p.ode_epsabs)
-    V.set_s0(float(p.z_min_m))
+
+    # NOTE: the manual (Sec. 4.1.4) recommends set_s0()/set_s1() only after adding every element,
+    # since adding one auto-resizes s0/s1. That ordering was tried here and, on a real production
+    # run (not synthetic), made the phase scan converge on a spurious crest with every particle
+    # lost there (NaN mean pz) -- root cause not understood. Reverted to set_s0/set_s1 BEFORE
+    # adding the dynamic aperture/deflection field, this function's original, validated order.
+    s0_m = float(p.z_min_m)
+    if p.cathode_backstop_enabled:
+        # Extend s0 backward so the backstop's z<0 span is inside the Volume's active region.
+        s0_m -= float(p.cathode_backstop_thickness_mm) * 1e-3
+    V.set_s0(s0_m)
     V.set_s1(float(p.z_max_m))
 
-    # Dynamic radial aperture R(z): the cavity's real transverse channel (narrow cathode-side
-    # chamfer, wide body, narrow exit transition) -- see rf_gun.aperture. Sampled on the same
-    # z-grid as Er_grid/Ez_grid so the aperture and the field share one z-alignment.
+    # Dynamic radial aperture R(z): narrow cathode-side chamfer, wide body, narrow exit -- see
+    # rf_gun.aperture. Same z-grid and placement offset as the field map.
     nz = int(np.asarray(Ez_grid).shape[0])
     z_grid_m = np.linspace(float(p.z_min_m), float(p.z_max_m), nz)
     dyn_aperture = build_dynamic_aperture(rft, z_grid_m, float(p.aperture_delta_mm))
-    V.add(dyn_aperture, 0.0, 0.0, float(p.map_z0_m), "entrance")
+    V.add(dyn_aperture, 0.0, 0.0, float(z_grid_m[0]), "entrance")
+
+    if p.cathode_backstop_enabled:
+        backstop = build_cathode_backstop(rft, thickness_mm=float(p.cathode_backstop_thickness_mm))
+        backstop_thickness_m = float(p.cathode_backstop_thickness_mm) * 1e-3
+        V.add(backstop, 0.0, 0.0, float(z_grid_m[0]) - backstop_thickness_m, "entrance")
 
     V.t_max_mm = float(p.t_max_mm)
 
@@ -298,20 +403,30 @@ def build_volume(
         V._rf_gun_deflection_field_ref = deflection_field
 
     if p.sc_enabled:
-        _call_first_available(
-            V,
-            (
-                "set_sc_on",
-                "enable_sc",
-                "enable_space_charge",
-                "set_space_charge",
-            ),
-            True,
-        )
-        _set_first_available_attr(V, ("sc_on", "sc_enabled", "sc_enable", "space_charge"), True)
+        # V.sc_dt_mm is the actual space-charge activation switch in RF-Track 2.7 (confirmed
+        # against manual_references/RF_Track_2.5.5_reference_manual.pdf Sec. 5.1.1); it always
+        # used the SC_engine current at track() time, which -- unless explicitly assigned, as
+        # below -- silently fell back to RF-Track's own built-in SpaceCharge_PIC_FreeSpace(32,32,32)
+        # with no cathode mirror. Assigning a per-Volume engine here makes the mesh and mirror
+        # state explicit, saved, and immune to leaking from a prior run/engine in the same process.
+        sc_engine = build_space_charge_engine(rft, p)
+        if not callable(getattr(V, "set_sc_engine", None)):
+            raise RuntimeError(
+                "Space charge was requested, but the installed RF-Track binding's Volume has "
+                "no set_sc_engine()."
+            )
+        V.set_sc_engine(sc_engine)
+        V._rf_gun_sc_engine_ref = sc_engine
 
-        if hasattr(V, "sc_dt_mm"):
-            V.sc_dt_mm = float(p.sc_dt_mm)
+        if p.mirror_charge_enabled:
+            mirror_state = sc_engine.get_mirror()
+            if not np.isfinite(np.asarray(mirror_state, dtype=float)).all():
+                raise RuntimeError(
+                    "Cathode mirror charges were requested but SpaceCharge_PIC_FreeSpace.get_mirror() "
+                    f"reports an unset mirror plane after set_mirror(): {mirror_state!r}."
+                )
+
+        V.sc_dt_mm = float(p.sc_dt_mm)
         if hasattr(V, "emission_nsteps"):
             V.emission_nsteps = int(p.emission_nsteps)
         if hasattr(V, "emission_range"):

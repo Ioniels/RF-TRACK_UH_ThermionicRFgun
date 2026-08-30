@@ -47,6 +47,14 @@ def load_fieldmap_mat(filename, verbose=False):
     if verbose:
         print("Available variables:", sorted(mat.keys()))
 
+    required = ("vertex_X", "vertex_Y", "vertex_Z", "Time_Dimension_2", "TotalField_E_X", "TotalField_E_Y", "TotalField_E_Z")
+    missing = [k for k in required if k not in mat]
+    if missing:
+        raise KeyError(
+            f"load_fieldmap_mat({filename!r}): missing expected variable(s) {missing} -- "
+            f"available: {sorted(mat.keys())}"
+        )
+
     X = np.asarray(mat["vertex_X"]).ravel()
     Y = np.asarray(mat["vertex_Y"]).ravel()
     Z = np.asarray(mat["vertex_Z"]).ravel()

@@ -11,7 +11,6 @@ from .style import (
     PlotStyleConfig,
     add_aperture_curve,
     add_reference_lines,
-    get_default_density_cmap,
     get_recentered_diverging_cmap,
 )
 
@@ -55,7 +54,6 @@ def field_maps(
     style = DEFAULT_PLOT_STYLE if style is None else style
     cmap_diverging = plt.get_cmap("RdBu_r") if density_cmap is None else density_cmap
     cmap_xy = get_recentered_diverging_cmap(base="RdBu_r")
-    cmap_ez = get_default_density_cmap()
 
     i_snap = int(np.argmin(np.abs(t_ns - t_crest)))
 
@@ -167,9 +165,16 @@ def field_maps(
             ax.legend(handles, labels, loc="lower right", frameon=True, facecolor="white", framealpha=0.75, fontsize=9)
         return im
 
+    # Ez is signed, like Er below it -- use the same diverging colormap and a symmetric
+    # (zero-centered) normalization rather than a sequential density colormap (which would neither
+    # show sign nor be centered on zero; see `rf_gun.plotting.style`'s module docstring for the
+    # density-vs-signed-field colormap distinction this project draws).
+    vmax_ez = float(np.percentile(np.abs(np.real(Ez_full)), 98.5)) if Ez_full.size else 1.0
+    vmax_ez = vmax_ez if vmax_ez > 0 else 1.0
     ax_rf_ez = fig.add_subplot(gs[1, :])
     _bottom_panel(
-        ax_rf_ez, Ez_full, r"Field map used by RF-Track: $\Re(E_z)$", cmap_ez, None, r"$\Re(E_z)$ (V/m)"
+        ax_rf_ez, Ez_full, r"Field map used by RF-Track: $\Re(E_z)$", cmap_diverging,
+        colors.Normalize(vmin=-vmax_ez, vmax=vmax_ez), r"$\Re(E_z)$ (V/m)",
     )
 
     if has_er:
@@ -203,8 +208,9 @@ def axis_phase(
 
     Each curve is colored by `cos(phase offset from crest)` on a red-blue diverging colormap
     (`RdBu`): blue (+1) at the crest -- the phase of maximum acceleration -- through white (0) at
-    the +/-90 deg transition, to red (-1) at 180 deg from crest -- maximum deceleration. A colorbar
-    replaces the old one-legend-entry-per-curve approach, which does not scale to a dense sweep.
+    the +/-90 deg transition, to red (-1) at 180 deg from crest -- maximum deceleration. A single
+    colorbar encodes phase instead of a per-curve legend entry, which would not scale to a dense
+    sweep.
     """
     import matplotlib.pyplot as plt
     from matplotlib import cm

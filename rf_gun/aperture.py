@@ -6,15 +6,16 @@ into pipe 1), wide through the main cavity body, narrow again near the exit (a r
 into pipe 2). A single scalar aperture cannot represent this shape, so this module builds a
 tabulated R(z) profile (`aperture_radius_profile_mm`) sampled on the same z-grid as the RF field
 map, and wraps it into an `Aperture_1d` element added to the same `Volume` as the field map
-(`build_dynamic_aperture`) -- replacing both RF-Track's own scalar `set_aperture` and the previous
-post-hoc, Python-side radius cut applied to screen snapshots after the fact.
+(`build_dynamic_aperture`), so a particle is removed the instant it crosses the real transverse
+channel during tracking.
 
-Critical, empirically-verified `Aperture_1d` gotcha (not documented anywhere, verified against
-the installed RF-Track 2.6.3 binary with a real field-map + tracking test): the constructor
-`Aperture_1d(R_array, hz, z0)` registers the mesh data correctly (`get_nz()` reports the right
-count), but `get_z1()`/`get_length()` remain stuck at 0 unless `.set_z1(...)` (equivalently
-`.set_length(...)`) is called *explicitly* after construction -- without it, the element is
-silently inert (kills nothing). `build_dynamic_aperture` below does this for you.
+`Aperture_1d` gotchas (manual Sec. 5.3.1: `Aperture_1d(Ra, hz, length=-1)` -- third arg is
+*length*, not z0):
+  1. `get_z0()` is always 0 after construction, regardless of the third argument -- the element's
+     frame is always 0-based; place it globally via `V.add(A, 0, 0, global_z0, "entrance")`, never
+     via `A.set_z0(...)` (confirmed to break particle-loss detection for a sub-range element).
+  2. `get_z1()`/`get_length()` stay 0 (element silently inert) unless `.set_z1(length)` is called
+     explicitly after construction. `build_dynamic_aperture` handles both below.
 
 Coordinate convention: `s = z + delta_cathode_chamfer_mm`, where z=0 is the cathode emission
 surface. `delta_cathode_chamfer_mm=0` means the cathode sits exactly at the start of the chamfer;
@@ -84,26 +85,75 @@ def important_locations_mm(delta_mm: float) -> Dict[str, float]:
 
 
 def build_dynamic_aperture(rft, z_grid_m: np.ndarray, delta_mm: float):
-    """Build an `Aperture_1d` element spanning `z_grid_m`, ready for `V.add(A, 0.0, 0.0, 0.0,
-    "entrance")` in the same Volume as the RF field map (same placement convention as the field
-    map itself -- both start at the Volume's own local z=0).
+    """Build an `Aperture_1d` element spanning `z_grid_m`, for `V.add(A, 0.0, 0.0, z_grid_m[0],
+    "entrance")` in the same Volume as the RF field map, at the field map's own placement offset
+    (see module docstring gotcha #1).
 
-    `z_grid_m` must be the same uniform grid used to build the RF field map's `Er_grid`/`Ez_grid`
-    (so the aperture and the field share one z-alignment). Requires at least 2 points.
+    `z_grid_m` must be the same uniform grid used for the field map's `Er_grid`/`Ez_grid`, with at
+    least 2 points.
     """
     z_grid_m = np.asarray(z_grid_m, dtype=float).reshape(-1)
     if z_grid_m.size < 2:
         raise ValueError("build_dynamic_aperture: z_grid_m needs at least 2 points")
 
     hz_m = float(z_grid_m[1] - z_grid_m[0])
-    z0_m = float(z_grid_m[0])
-    z1_m = float(z_grid_m[-1])
+    # A non-uniform z_grid_m would silently misalign R(z) against the field rather than raising.
+    steps = np.diff(z_grid_m)
+    if not np.allclose(steps, hz_m, rtol=1e-6, atol=1e-12):
+        raise ValueError(
+            "build_dynamic_aperture: z_grid_m must be uniformly spaced "
+            f"(step varies from {float(np.min(steps)):.6g} to {float(np.max(steps)):.6g} m, "
+            f"expected {hz_m:.6g} m)"
+        )
+    length_m = float(z_grid_m[-1] - z_grid_m[0])
 
     R_mm = aperture_radius_profile_mm(z_grid_m * 1e3, delta_mm)
     R_m = (R_mm * 1e-3).astype(float)
 
-    A = rft.Aperture_1d(R_m, hz_m, z0_m)
-    # Required: without this, Aperture_1d's own z0/z1/length stay at 0 and the element is
-    # silently inert (verified empirically -- see module docstring).
-    A.set_z1(z1_m)
+    # Third arg is length, not z0 (gotcha #1); caller places this at the field map's own offset.
+    A = rft.Aperture_1d(R_m, hz_m, length_m)
+    A.set_z1(length_m)  # required, else silently inert (gotcha #2)
+    return A
+
+
+#: Backstop thickness [mm]: generous vs. a tracking step (dt_mm<=0.05mm typically) so a backward
+#: particle can't skip over the whole band; costs nothing physically since z<0 carries no field.
+DEFAULT_CATHODE_BACKSTOP_THICKNESS_MM = 2.0
+
+#: Backstop absorbing radius [m]: small vs. this project's ~mm transverse scale, but not exactly
+#: 0 (untested degenerate r<=0 comparison).
+DEFAULT_CATHODE_BACKSTOP_RADIUS_M = 1.0e-9
+
+
+def build_cathode_backstop(
+    rft,
+    thickness_mm: float = DEFAULT_CATHODE_BACKSTOP_THICKNESS_MM,
+    r_absorb_m: float = DEFAULT_CATHODE_BACKSTOP_RADIUS_M,
+):
+    """Thin absorbing `Aperture_1d` spanning `thickness_mm` immediately behind z=0, for
+    `V.add(A, 0.0, 0.0, z0_global - thickness_mm*1e-3, "entrance")` at the same `z0_global` offset
+    as the field map/dynamic aperture (global span `[z0_global - thickness_mm*1e-3, z0_global]`).
+
+    Gives an exact z=0-crossing event for back-bombarding electrons via RF-Track's own
+    `V.get_lost_particles()`, instead of `rf_gun.back_bombardment`'s field-free-drift
+    extrapolation from `Bout` -- weakest for particles that turn around immediately, where
+    RF/image fields vary fastest.
+
+    Verified against a synthetic field (ending at z=0, like every real field map here) with
+    backward-crossing test particles at a range of speeds/positions -- all correctly absorbed.
+    Not yet verified against this project's real field map or a production run.
+
+    Caveat: `V.get_lost_particles()` returns one combined table for every aperture-bearing element
+    in the Volume (this backstop and the dynamic aperture alike) with no per-row element tag.
+    Separating backstop losses (back-bombardment) from dynamic-aperture losses (ordinary transverse
+    loss) in that table isn't implemented here -- the table's Z/T semantics for a multi-element
+    Volume need their own verification (e.g. cross-referencing IDs against `Bout`'s z<0 tagging)
+    first.
+    """
+    thickness_m = float(thickness_mm) * 1e-3
+    if thickness_m <= 0.0:
+        raise ValueError(f"build_cathode_backstop: thickness_mm must be positive, got {thickness_mm!r}")
+    R_m = np.array([float(r_absorb_m), float(r_absorb_m)])
+    A = rft.Aperture_1d(R_m, thickness_m, thickness_m)
+    A.set_z1(thickness_m)
     return A

@@ -13,17 +13,29 @@ def show_versions():
 
 
 def resolve_threads(requested: Optional[int] = None, default: int = 1) -> int:
-    """Resolve runtime thread count from explicit value or scheduler environment."""
+    """Resolve runtime thread count from explicit value or scheduler environment.
+
+    A malformed `requested` value or a garbage `SLURM_CPUS_PER_TASK` is a real misconfiguration
+    (a typo'd CLI flag, a broken scheduler environment) -- it prints a warning and falls back to
+    `default` rather than silently masking it, so a user relying on `--threads` actually taking
+    effect finds out if it didn't.
+    """
     if requested is not None:
         try:
             return max(1, int(requested))
-        except Exception:
+        except (TypeError, ValueError):
+            print(f"Warning: resolve_threads: requested={requested!r} is not a valid thread count; "
+                  f"using default={default}.", flush=True)
             return max(1, int(default))
 
-    slurm_cpus = os.environ.get("SLURM_CPUS_PER_TASK", str(default))
+    slurm_cpus = os.environ.get("SLURM_CPUS_PER_TASK")
+    if slurm_cpus is None:
+        return max(1, int(default))
     try:
         return max(1, int(slurm_cpus))
-    except Exception:
+    except (TypeError, ValueError):
+        print(f"Warning: resolve_threads: SLURM_CPUS_PER_TASK={slurm_cpus!r} is not a valid thread "
+              f"count; using default={default}.", flush=True)
         return max(1, int(default))
 
 

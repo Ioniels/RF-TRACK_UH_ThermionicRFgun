@@ -261,9 +261,8 @@ def classify_particle_outcomes(
     `max_kinetic_energy_mev` -- see `rf_gun.particle_tags.MAX_PHYSICAL_KINETIC_ENERGY_MEV`'s
     docstring for why this backstop exists (a particle can stay within the dynamic aperture's
     transverse bound yet still blow up numerically in momentum, and would otherwise be silently
-    counted as "transmitted"). Pass `max_kinetic_energy_mev=None` to disable this second source and
-    recover the old lost_table-only behavior. transmitted/backward exclude both lost sources by
-    construction.
+    counted as "transmitted"). Pass `max_kinetic_energy_mev=None` to use only `lost_table`.
+    transmitted/backward exclude both lost sources by construction.
     """
     initial = np.asarray(initial)
     final = np.asarray(final)
@@ -288,14 +287,37 @@ def classify_particle_outcomes(
             np.isfinite(zf_full) & np.isfinite(pzf_full) & ((zf_full <= 0.0) | (pzf_full < 0.0)) & ~unphysical_mask
         )
 
-    n_match = min(int(initial.shape[0]) if initial.ndim == 2 else 0, int(final.shape[0]) if final.ndim == 2 else 0)
-    pz0 = np.asarray(initial[:n_match, 5], dtype=float) if initial.ndim == 2 and initial.shape[1] > 5 and n_match > 0 else None
-    pzf = np.asarray(final[:n_match, 5], dtype=float) if final.ndim == 2 and final.shape[1] > 5 and n_match > 0 else None
-    zf = np.asarray(final[:n_match, 4], dtype=float) if final.ndim == 2 and final.shape[1] > 4 and n_match > 0 else None
-    t0 = np.asarray(t0_mm_c, dtype=float).reshape(-1)[:n_match] if t0_mm_c is not None and n_match > 0 else None
-    transmitted_mask_match = transmitted_mask[:n_match] if transmitted_mask.size >= n_match else transmitted_mask
-    backward_mask_match = backward_mask[:n_match] if backward_mask.size >= n_match else backward_mask
-    unphysical_mask_match = unphysical_mask[:n_match] if unphysical_mask.size >= n_match else unphysical_mask
+    # Pair each `final` row with its originating `initial` row by `%id`, not by position: once the
+    # dynamic aperture removes any particle mid-tracking, `final`'s row order no longer lines up
+    # positionally with `initial`'s (see `rf_gun.particle_tags`'s module docstring) -- a positional
+    # `initial[:n_match]`/`final[:n_match]` truncation would silently pair the wrong particles'
+    # initial/final state for every row from the first removal onward. `np.searchsorted` keeps
+    # this vectorized (this runs at full macroparticle count, e.g. 1e5, every call).
+    if (
+        initial.ndim == 2 and final.ndim == 2
+        and initial.shape[1] > id_col and final.shape[1] > id_col
+        and initial.shape[0] > 0 and final.shape[0] > 0
+    ):
+        init_ids_full = initial[:, id_col].astype(np.int64)
+        final_ids_full = final[:, id_col].astype(np.int64)
+        order = np.argsort(init_ids_full)
+        sorted_init_ids = init_ids_full[order]
+        pos = np.searchsorted(sorted_init_ids, final_ids_full)
+        pos = np.clip(pos, 0, sorted_init_ids.size - 1)
+        found = sorted_init_ids[pos] == final_ids_full
+        final_rows = np.nonzero(found)[0]
+        init_rows = order[pos[final_rows]]
+    else:
+        final_rows = np.zeros((0,), dtype=np.int64)
+        init_rows = np.zeros((0,), dtype=np.int64)
+
+    pz0 = np.asarray(initial[init_rows, 5], dtype=float) if initial.ndim == 2 and initial.shape[1] > 5 and init_rows.size else None
+    pzf = np.asarray(final[final_rows, 5], dtype=float) if final.ndim == 2 and final.shape[1] > 5 and final_rows.size else None
+    zf = np.asarray(final[final_rows, 4], dtype=float) if final.ndim == 2 and final.shape[1] > 4 and final_rows.size else None
+    t0 = np.asarray(t0_mm_c, dtype=float).reshape(-1)[init_rows] if t0_mm_c is not None and init_rows.size else None
+    transmitted_mask_match = transmitted_mask[final_rows]
+    backward_mask_match = backward_mask[final_rows]
+    unphysical_mask_match = unphysical_mask[final_rows]
 
     n_trans = int(np.sum(transmitted_mask))
     n_back = int(np.sum(backward_mask))

@@ -1,7 +1,7 @@
 """Simulation pipeline helpers."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field, replace as dataclass_replace
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Literal
 import time
 import os
@@ -15,13 +15,13 @@ from scipy.optimize import minimize_scalar
 from .constants import ME_MEV, c, q_e
 from .helpers import sample_disk
 from .emission_models import (
-    J_rld_schottky,
-    J_unified,
     delta_phi_schottky_eV,
-    richardson_J_Apm2,
-    schottky_delta_phi_eV,
+    evaluate_emission_model,
 )
+from .work_function_models import evaluate_work_function_eV
+from .cathode_fields import sample_rf_field_on_cathode, extraction_field
 from .emission_sampling import apply_roughness, sample_thermionic_momenta
+from .emission_iteration import TemperatureField
 from .rftrack_volume import (
     build_volume,
     track_volume_with_screens,
@@ -51,10 +51,16 @@ class EmissionParams:
     emission_phase_range_deg: float
     pz0_MeV_c: float
     pz_model: Literal["constant", "flux"] = "flux"
-    emission_law: Literal["RD_schottky", "unified"] = "RD_schottky"
+    emission_law: str = "RD_schottky"
     beta_enh: float = 1.0
     roughness: RoughnessParams = RoughnessParams()
     time_dependent: bool = True
+    #: Optional phi_eff(T) model (rf_gun.work_function_models.WORK_FUNCTION_MODEL_NAMES). None
+    #: (default) keeps work_function_eV fixed at the value above. When set, it *overrides*
+    #: work_function_eV at the cathode temperature cathode_T_K (resolved once in
+    #: build_bunch_thermionic(), guide Sec. 2.3).
+    work_function_temperature_model: Optional[str] = None
+    work_function_model_params: Dict[str, Any] = dataclass_field(default_factory=dict)
 
 
 #: The project's core 6-column phase-space convention (X, Px, Y, Py, Z, Pz), all in RF-Track's
@@ -69,27 +75,33 @@ EXTENDED_PHASE_FMT = "%X %Px %Y %Py %Z %Pz %id %t %E %K"
 #: `thermo_info` entries that are per-emission-time-sample arrays (one value per `t_s` sample,
 #: typically hundreds), not per-run scalars -- must be excluded from any run summary/config JSON.
 THERMO_INFO_TIME_ARRAY_KEYS = frozenset({
-    "t_s", "Ez_t", "F_t", "dphi_eV_t", "phi_eff_eV_t", "J_Apm2_t", "J_th_Apm2_t",
-    "J_fe_Apm2_t", "R_t", "n_t", "I_A_t", "Q_cum_C", "t_emit_s",
+    "t_s", "Ez_t", "Ez_corrected_t", "F_t", "dphi_eV_t", "phi_eff_eV_t", "J_Apm2_t",
+    "J_th_Apm2_t", "J_fe_Apm2_t", "R_t", "n_t", "I_A_t", "Q_cum_C", "t_emit_s",
 })
 #: `thermo_info` entries that are per-particle arrays (one value per macroparticle, set at the end
-#: of `build_bunch_thermionic`) -- also excluded from any run summary/config JSON. Forgetting
-#: these here inflated run_summary.json/run_metadata.json to tens of MB (the full initial
-#: phase-space matrix, dumped as JSON text) for every scan run before this was centralized.
+#: of `build_bunch_thermionic`) -- also excluded from any run summary/config JSON, since dumping
+#: the full initial phase-space matrix as JSON text would inflate run_summary.json to tens of MB.
 THERMO_INFO_PER_PARTICLE_KEYS = frozenset({
     "initial_phase_space", "initial_pz_MeV_c", "initial_t0_mm_c",
+})
+#: `thermo_info` entries set only by `build_bunch_thermionic_spatial` (the spatial-sampling path,
+#: used whenever a converged Emission Fields Iteration source is supplied) -- full (n_x,n_y,n_t)
+#: grids, not per-run scalars, so likewise excluded from any run summary/config JSON. Added
+#: alongside THERMO_INFO_TIME_ARRAY_KEYS/THERMO_INFO_PER_PARTICLE_KEYS above rather than folded
+#: into either: these are neither a single per-time-sample 1D array nor a per-particle array, but
+#: a distinct (x,y,t)-resolved shape.
+THERMO_INFO_SPATIAL_GRID_KEYS = frozenset({
+    "x_grid_m", "y_grid_m", "t_grid_s", "J_xyt_Apm2", "temperature_field_K",
 })
 
 
 def thermo_info_summary(thermo_info: Dict[str, Any]) -> Dict[str, Any]:
     """`thermo_info` with every per-time-sample and per-particle array stripped out.
 
-    The one place both `run_thermionic_tm010.py` and the notebook should build their JSON-safe
-    thermo_info payload from, so the exclusion list can't drift out of sync between the two (it
-    did before this helper existed: the script's own hand-rolled exclusion set omitted the
-    per-particle keys entirely, and the notebook's omitted two of the three).
+    The one place both `run_thermionic_tm010.py` and the notebook build their JSON-safe
+    thermo_info payload from, so the exclusion list stays in sync between the two.
     """
-    exclude = THERMO_INFO_TIME_ARRAY_KEYS | THERMO_INFO_PER_PARTICLE_KEYS
+    exclude = THERMO_INFO_TIME_ARRAY_KEYS | THERMO_INFO_PER_PARTICLE_KEYS | THERMO_INFO_SPATIAL_GRID_KEYS
     return {k: v for k, v in dict(thermo_info).items() if k not in exclude}
 
 
@@ -195,6 +207,14 @@ def _runtime_key_payload(vol_params_eff: VolumeBuildParams, tracking: TrackingPa
         # deflection-on run silently reuse a time estimate cached from a deflection-off (multi-
         # threaded) run, understating the real runtime by 10x or more.
         "deflection_enabled": bool(getattr(vol_params_eff, "deflection_enabled", False)),
+        # Mesh size and mirror state change per-kick PIC solve cost materially (guide Sec. 15.4:
+        # "mirror-on and mirror-off runs, different PIC meshes... must never share the same
+        # runtime-cache key") -- omitting these let a mirror-on or finer-mesh run silently reuse a
+        # cheaper run's cached estimate.
+        "sc_nx": int(getattr(vol_params_eff, "sc_nx", 0)),
+        "sc_ny": int(getattr(vol_params_eff, "sc_ny", 0)),
+        "sc_nz": int(getattr(vol_params_eff, "sc_nz", 0)),
+        "mirror_charge_enabled": bool(getattr(vol_params_eff, "mirror_charge_enabled", False)),
     }
 
 
@@ -289,7 +309,15 @@ def _extract_lost_particles(V):
         return None
     try:
         return to_lost_table_array(get_lost())
-    except Exception:
+    except Exception as exc:
+        # Only the binding-not-present case above is silently expected; a raised exception here
+        # is either RF-Track's own call failing at runtime or a real bug in
+        # `to_lost_table_array` -- swallowing it entirely would silently read downstream as
+        # "no lost particles" for the rest of this run. Print loudly and continue (this
+        # diagnostic is opt-in via `diagnostics.save_lost_particles`, not worth crashing an
+        # otherwise-complete production run over).
+        print(f"Warning: failed to extract lost-particle table ({type(exc).__name__}: {exc}); "
+              "treating as no lost particles for this run.", flush=True)
         return None
 
 
@@ -404,6 +432,23 @@ def build_bunch_simple(
     return B0
 
 
+def _resolve_work_function(params: EmissionParams) -> EmissionParams:
+    """Resolve phi_eff(T) once at `params.cathode_T_K` (guide Sec. 2.3) and return `params` with
+    `work_function_eV` replaced by it, when a `work_function_temperature_model` is set -- `params`
+    is returned unchanged otherwise. Every downstream computation in each of this module's three
+    bunch/source builders (`build_bunch_thermionic`, `build_bunch_thermionic_spatial`,
+    `build_cathode_rf_source`) reads `params.work_function_eV`, so replacing it here once is the
+    single injection point rather than threading a second work-function value through each
+    pipeline separately.
+    """
+    if params.work_function_temperature_model is None:
+        return params
+    resolved_phi_eV = evaluate_work_function_eV(
+        params.work_function_temperature_model, params.cathode_T_K, **params.work_function_model_params
+    )
+    return dataclass_replace(params, work_function_eV=resolved_phi_eV)
+
+
 def build_bunch_thermionic(
     rft,
     n: int,
@@ -418,9 +463,16 @@ def build_bunch_thermionic(
     rng = np.random.default_rng() if rng is None else rng
     phi_rad = np.deg2rad(phi_deg)
 
+    params = _resolve_work_function(params)
+
     Ez0 = float(np.real(Ez0_phasor_axis * np.exp(1j * phi_rad)))
     beta_enh = float(params.beta_enh) if params.beta_enh is not None else float(params.beta_field)
-    dphi = schottky_delta_phi_eV(Ez0, beta=beta_enh)
+    # Signed extraction field (see the F_ext=max(0,-Ez) note in
+    # _compute_emission_waveform_and_current_history): this reference-phase dphi/phi_eff feed
+    # only the diagnostics dict below, but should still report 0 lowering, not a spurious nonzero
+    # value, if phi_deg happens to fall in the retarding half-cycle.
+    F0_ref = beta_enh * max(0.0, -Ez0)
+    dphi = delta_phi_schottky_eV(np.array([F0_ref]))[0]
     phi_eff = max(params.work_function_eV - dphi, 0.0)
 
     area_m2 = np.pi * (params.cathode_radius_mm * 1e-3) ** 2
@@ -512,8 +564,261 @@ def build_bunch_thermionic(
     info["initial_pz_MeV_c"] = np.asarray(M[:, 5], dtype=float)
     info["initial_t0_mm_c"] = np.asarray(t0_mm_c, dtype=float)
     info["t0_span_mm_c"] = float(np.max(t0_mm_c) - np.min(t0_mm_c)) if t0_mm_c.size else 0.0
+    info["work_function_temperature_model"] = params.work_function_temperature_model
 
     return B0, info
+
+
+def build_bunch_thermionic_spatial(
+    rft,
+    n: int,
+    prescribed_source: Dict[str, np.ndarray],
+    *,
+    params: EmissionParams,
+    rng: Optional[np.random.Generator] = None,
+) -> Tuple[Any, Dict[str, Any]]:
+    """Thermionic emission with spatially-resolved (x,y,t) RF field and (optionally) cathode
+    temperature, an opt-in alternative to build_bunch_thermionic()'s on-axis-only, radially-
+    uniform F(t) model (which stays the untouched default -- this is a separate function, not a
+    modification of it).
+
+    build_bunch_thermionic() samples position and emission time *independently* (uniform over the
+    disk area, time from a single position-independent J(t) waveform derived from the on-axis
+    field alone). That assumes both the field and the cathode temperature are uniform across the
+    emitting surface. Neither needs to be true: backbombardment and laser heating can produce a
+    genuinely asymmetric steady-state temperature profile T(x,y), and this function samples n
+    macroparticles *jointly* in (x,y,t) from a real 2D-in-space J(x,y,t) surface supplied via
+    `prescribed_source`, built one of two ways by the caller:
+
+    - `build_cathode_rf_source(...)` (below): RF field alone (optionally with a T(x,y) profile
+      passed through), sampled on a chosen (n_x, n_y, n_t) grid via the *actual configured
+      RF-Track field-map element* (cathode_fields.sample_rf_field_on_cathode, guide Sec. 6.4's own
+      preference over re-deriving a second field representation) -- space charge and mirror
+      feedback are not included; this is the P1 (signed, spatially-resolved field) upgrade on
+      its own.
+    - a converged rf_gun.emission_iteration.EmissionFieldIterationResult:
+      `{"x_grid_m": result.x_grid_m, "y_grid_m": result.y_grid_m, "t_grid_s": result.t_grid_s,
+      "J_Apm2": result.J_history_Apm2[-1], "temperature_K": result.temperature_K}`, which already
+      reflects RF+SC+mirror feedback -- the guide Sec. 13.6 "accept a precomputed converged
+      source" requirement. Both needs share the same underlying object (a 3D J(x,y,t) surface to
+      sample from, plus an optional temperature map), so one function serves both; there is
+      deliberately no "compute it myself" branch here, since doing so would need the caller's
+      Er_grid/Ez_grid/volume_params anyway -- call build_cathode_rf_source() explicitly instead.
+
+    `prescribed_source["temperature_K"]` (shape (n_x, n_y), optional) gives each sampled
+    macroparticle its own local launch-momentum temperature instead of the uniform
+    `params.cathode_T_K` -- this is the T(x,y) path guide Sec. 2.3 asks for. Omit it (or pass a
+    uniform array) to keep the original uniform-temperature behavior.
+
+    Sampling: standard weighted Monte Carlo -- each of the n macroparticles gets an independently
+    drawn (x,y,t) cell (weighted by charge J*area*dt in that cell), a uniform sub-position within
+    the cell, and equal per-particle weight N_real/n. This is the guide's own documented fallback
+    when a fixed-stratified-sample construction (as in emission_iteration.py, which needs a
+    *persistent* sample across outer iterations) is not required -- a one-shot production draw has
+    no such persistence constraint.
+    """
+    rng = np.random.default_rng() if rng is None else rng
+    params = _resolve_work_function(params)
+
+    x_grid_m = np.asarray(prescribed_source["x_grid_m"], dtype=float)
+    y_grid_m = np.asarray(prescribed_source["y_grid_m"], dtype=float)
+    t_centers_s = np.asarray(prescribed_source["t_grid_s"], dtype=float)
+    J_xyt = np.asarray(prescribed_source["J_Apm2"], dtype=float)
+    n_x, n_y, n_t = x_grid_m.size, y_grid_m.size, t_centers_s.size
+    if J_xyt.shape != (n_x, n_y, n_t):
+        raise ValueError(f"prescribed_source J_Apm2 shape {J_xyt.shape} does not match (n_x,n_y,n_t)=({n_x},{n_y},{n_t})")
+
+    temperature_field_K = prescribed_source.get("temperature_K")
+    if temperature_field_K is not None:
+        temperature_field_K = np.asarray(temperature_field_K, dtype=float)
+        if temperature_field_K.shape != (n_x, n_y):
+            raise ValueError(f"prescribed_source temperature_K shape {temperature_field_K.shape} does not match (n_x,n_y)=({n_x},{n_y})")
+
+    def _edges_from_centers_mm(centers_mm: np.ndarray) -> np.ndarray:
+        if centers_mm.size <= 1:
+            half = float(params.cathode_radius_mm)
+            return np.array([-half, half])
+        mid = 0.5 * (centers_mm[:-1] + centers_mm[1:])
+        return np.concatenate([[centers_mm[0] - (mid[0] - centers_mm[0])], mid, [centers_mm[-1] + (centers_mm[-1] - mid[-1])]])
+
+    x_centers_mm = x_grid_m * 1e3
+    y_centers_mm = y_grid_m * 1e3
+    x_edges_mm = _edges_from_centers_mm(x_centers_mm)
+    y_edges_mm = _edges_from_centers_mm(y_centers_mm)
+    dx_mm = x_edges_mm[1] - x_edges_mm[0] if x_centers_mm.size > 1 else 2.0 * params.cathode_radius_mm
+    dy_mm = y_edges_mm[1] - y_edges_mm[0] if y_centers_mm.size > 1 else 2.0 * params.cathode_radius_mm
+    cell_area_m2 = (dx_mm * 1e-3) * (dy_mm * 1e-3)
+
+    dt_s = float(t_centers_s[1] - t_centers_s[0]) if t_centers_s.size > 1 else 0.0
+    tau_s = float(t_centers_s[-1] - t_centers_s[0] + dt_s) if t_centers_s.size else 0.0
+
+    # x_grid_m/y_grid_m cover the cathode's bounding square, not the disk (same convention as
+    # rf_gun.emission_iteration._cathode_xy_grid) -- corner cells outside cathode_radius_mm carry a
+    # physically meaningless J_xyt (the iteration zeroes their *area*, not J itself, see
+    # _cathode_xy_grid's dA_mm2). Re-masking here keeps charge/sampling consistent with the
+    # iteration's own; without it, Q_total_C inflates by ~(4-pi)/pi (~27%) from those corner cells.
+    X_mm, Y_mm = np.meshgrid(x_centers_mm, y_centers_mm, indexing="ij")
+    inside_disk = (X_mm ** 2 + Y_mm ** 2) <= float(params.cathode_radius_mm) ** 2
+
+    weights_xyt = J_xyt * cell_area_m2 * dt_s  # Coulombs per (x,y,t) cell
+    weights_xyt = weights_xyt * inside_disk[:, :, None]
+    total_weight = float(np.sum(weights_xyt))
+    if total_weight <= 0.0:
+        raise RuntimeError("build_bunch_thermionic_spatial: zero total emitted charge over the (x,y,t) grid")
+    p_flat = (weights_xyt / total_weight).ravel()
+
+    cell_idx = rng.choice(n_x * n_y * n_t, size=n, p=p_flat)
+    ix, iy, it = np.unravel_index(cell_idx, (n_x, n_y, n_t))
+
+    ux, uy = rng.uniform(0.0, 1.0, n), rng.uniform(0.0, 1.0, n)
+    x_mm = x_edges_mm[ix] + ux * (x_edges_mm[ix + 1] - x_edges_mm[ix])
+    y_mm = y_edges_mm[iy] + uy * (y_edges_mm[iy + 1] - y_edges_mm[iy])
+
+    t_edges_local = np.concatenate([[t_centers_s[0] - 0.5 * dt_s], t_centers_s + 0.5 * dt_s]) if t_centers_s.size > 1 else np.array([0.0, dt_s])
+    t_emit_s = rng.uniform(t_edges_local[it], t_edges_local[it + 1])
+
+    T_K_per_particle = temperature_field_K[ix, iy] if temperature_field_K is not None else float(params.cathode_T_K)
+    px, py, pz, mean_eps_eV, exp_eps_eV = sample_thermionic_momenta(
+        n, T_K_per_particle, params.pz0_MeV_c, pz_model=params.pz_model, rng=rng,
+    )
+    px, py, sigma_theta = apply_roughness(px, py, pz, params.roughness.Ra_um, params.roughness.Re_um, rng=rng)
+    if params.pz_model == "flux":
+        mean_exp_eps_eV = float(np.mean(exp_eps_eV)) if np.ndim(exp_eps_eV) else float(exp_eps_eV)
+        print(f"Normal energy: <eps_z>={mean_eps_eV:.4f} eV (expected {mean_exp_eps_eV:.4f} eV)", flush=True)
+
+    Q_total_C = total_weight
+    N_real = Q_total_C / q_e
+    t0_mm_c = t_emit_s * c * 1e3
+    z = np.zeros(n, dtype=float)
+
+    Mext = np.column_stack([
+        x_mm, px, y_mm, py, z, pz,
+        np.full(n, ME_MEV), np.full(n, -1.0), np.full(n, N_real / n if n > 0 else 0.0), t0_mm_c,
+    ])
+    B0 = rft.Bunch6dT(Mext)
+
+    J_t_marginal = np.sum(weights_xyt, axis=(0, 1)) / (n_x * n_y * cell_area_m2 * dt_s) if dt_s > 0 else np.zeros(n_t)
+    beta_enh_report = float(params.beta_enh) if params.beta_enh is not None else float(params.beta_field)
+
+    # Disk-averaged field driving emission, preferring the self-consistent RF+SC+mirror-corrected
+    # waveform when available (see the "F_t" entry below).
+    _Ez_for_F_t = prescribed_source.get("Ez_corrected_t", prescribed_source.get("Ez_ext_t"))
+    F_t = (
+        beta_enh_report * np.maximum(-np.asarray(_Ez_for_F_t, dtype=float), 0.0)
+        if _Ez_for_F_t is not None else None
+    )
+
+    info: Dict[str, Any] = {
+        "emission_law": str(params.emission_law),
+        "work_function_eV": float(params.work_function_eV),
+        "work_function_temperature_model": params.work_function_temperature_model,
+        "cathode_T_K": float(params.cathode_T_K),
+        "beta_enh": beta_enh_report,
+        "spatial_sampling": True,
+        "x_grid_m": x_grid_m,
+        "y_grid_m": y_grid_m,
+        "t_grid_s": t_centers_s,
+        "J_xyt_Apm2": J_xyt,
+        "temperature_field_K": temperature_field_K,
+        "t_s": t_centers_s,
+        "J_Apm2_t": J_t_marginal,
+        # Disk-averaged external (RF-only)/corrected (RF+SC+mirror) waveforms, when the caller
+        # supplied them (see spatial_source_from_iteration_result) -- else None, as on-axis does.
+        "Ez_t": np.asarray(prescribed_source["Ez_ext_t"], dtype=float) if "Ez_ext_t" in prescribed_source else None,
+        "Ez_corrected_t": np.asarray(prescribed_source["Ez_corrected_t"], dtype=float) if "Ez_corrected_t" in prescribed_source else None,
+        # Beta-enhanced extraction field (same F_ext=max(0,-Ez) convention as the on-axis path) --
+        # without this, thermo_info["F_t"] stayed absent here, silently skipping the downstream
+        # emission-model comparison (it treats an empty F_t history as "nothing to compare").
+        "F_t": F_t,
+        "Q_total_C": float(Q_total_C),
+        "I_avg_A": float(Q_total_C / tau_s) if tau_s > 0 else 0.0,
+        "I_peak_A": float(np.max(J_t_marginal) * n_x * n_y * cell_area_m2) if J_t_marginal.size else 0.0,
+        "mean_eps_z_eV": float(mean_eps_eV),
+        "mean_eps_z_eV_expected": float(np.mean(exp_eps_eV)) if np.ndim(exp_eps_eV) else float(exp_eps_eV),
+        "sigma_theta_rad": float(sigma_theta),
+        "t_emit_s": t_emit_s,
+        "initial_phase_space": np.column_stack([x_mm, px, y_mm, py, z, pz]),
+        "initial_pz_MeV_c": pz,
+        "initial_t0_mm_c": t0_mm_c,
+        "t0_span_mm_c": float(np.max(t0_mm_c) - np.min(t0_mm_c)) if n else 0.0,
+    }
+    return B0, info
+
+
+def build_cathode_rf_source(
+    rft,
+    Er_grid: np.ndarray,
+    Ez_grid: np.ndarray,
+    phi_deg: float,
+    volume_params: "VolumeBuildParams",
+    params: EmissionParams,
+    n_x_bins: int = 20,
+    n_y_bins: int = 20,
+    n_time_bins: int = 60,
+    z_probe_m: Optional[float] = None,
+    temperature_field_K: Optional[TemperatureField] = None,
+) -> Dict[str, np.ndarray]:
+    """RF-only J(x,y,t) [A/m^2] (guide Sec. 6.4), for build_bunch_thermionic_spatial()'s
+    `prescribed_source` argument -- sampled from the *actual configured RF-Track field-map
+    element* (not a second, independently reconstructed field), space-charge/mirror-free (that
+    feedback is rf_gun.emission_iteration's job, not this function's), on a regular Cartesian grid
+    clipped to the cathode disk (see rf_gun.emission_iteration's module docstring for why not a
+    radial-only grid: an asymmetric temperature profile needs genuine 2D spatial resolution).
+
+    `temperature_field_K` (optional): a uniform scalar or a callable T_K(x_mm, y_mm) giving each
+    grid cell's own local temperature (e.g. fit to a steady-state heater simulation or a measured
+    backbombardment power map) -- defaults to params.cathode_T_K everywhere, exactly reproducing
+    the single-temperature behavior of every prior version of this function. The resulting map is
+    included in the returned dict so build_bunch_thermionic_spatial can also use it for each
+    sampled particle's own launch-momentum temperature.
+    """
+    params = _resolve_work_function(params)
+
+    T_rf = 1.0 / float(volume_params.f_hz)
+    tau_s = (max(float(params.emission_phase_range_deg), 0.0) / 360.0) * T_rf
+    beta_enh = float(params.beta_enh) if params.beta_enh is not None else float(params.beta_field)
+    cathode_radius_mm = float(params.cathode_radius_mm)
+
+    x_edges_mm = np.linspace(-cathode_radius_mm, cathode_radius_mm, n_x_bins + 1)
+    y_edges_mm = np.linspace(-cathode_radius_mm, cathode_radius_mm, n_y_bins + 1)
+    x_centers_mm = 0.5 * (x_edges_mm[:-1] + x_edges_mm[1:])
+    y_centers_mm = 0.5 * (y_edges_mm[:-1] + y_edges_mm[1:])
+    X_mm, Y_mm = np.meshgrid(x_centers_mm, y_centers_mm, indexing="ij")
+    inside_disk = (X_mm ** 2 + Y_mm ** 2) <= cathode_radius_mm ** 2
+    t_centers_s = 0.5 * (np.linspace(0.0, tau_s, n_time_bins + 1)[:-1] + np.linspace(0.0, tau_s, n_time_bins + 1)[1:])
+
+    near_cathode_params = volume_params.replace(
+        z_min_m=0.0, z_max_m=max(float(volume_params.z_max_m) * 0.05, 5.0e-3),
+        sc_enabled=False, beam_loading_enabled=False, deflection_enabled=False,
+    )
+    z_probe = float(z_probe_m) if z_probe_m is not None else float(near_cathode_params.z_max_m) / 4.0
+    V_field = build_volume(rft, Er_grid, Ez_grid, float(phi_deg), near_cathode_params)
+
+    x_points_m = X_mm.ravel() * 1e-3
+    y_points_m = Y_mm.ravel() * 1e-3
+    Ez_flat = sample_rf_field_on_cathode(rft, V_field, x_points_m, y_points_m, t_centers_s, z_probe_m=z_probe)
+    F_flat = extraction_field(Ez_flat, beta_enh=beta_enh)
+
+    if temperature_field_K is None:
+        T_grid_flat = np.full(X_mm.size, float(params.cathode_T_K))
+    elif callable(temperature_field_K):
+        T_grid_flat = np.asarray(temperature_field_K(X_mm.ravel(), Y_mm.ravel()), dtype=float)
+    else:
+        T_grid_flat = np.full(X_mm.size, float(temperature_field_K))
+    T_broadcast_flat = np.broadcast_to(T_grid_flat[:, None], F_flat.shape)
+
+    J_flat = evaluate_emission_model(
+        params.emission_law, F_flat.ravel(), T_broadcast_flat.ravel(), params.work_function_eV
+    ).J_Apm2.reshape(F_flat.shape)
+
+    n_x, n_y, n_t = n_x_bins, n_y_bins, t_centers_s.size
+    J_xyt = J_flat.reshape(n_x, n_y, n_t) * inside_disk[:, :, None]
+    T_grid = T_grid_flat.reshape(n_x, n_y)
+
+    return {
+        "x_grid_m": x_centers_mm * 1e-3, "y_grid_m": y_centers_mm * 1e-3, "t_grid_s": t_centers_s,
+        "J_Apm2": J_xyt, "temperature_K": T_grid,
+    }
 
 
 def _compute_emission_waveform_and_current_history(
@@ -532,17 +837,20 @@ def _compute_emission_waveform_and_current_history(
     tau_s = (phase_range_deg / 360.0) * T
 
     if not params.time_dependent:
-        F0 = beta_enh * abs(float(np.real(Ez0_phasor_axis * np.exp(1j * phi_rad))))
-        if params.emission_law == "unified":
-            J0_u, n_t, J_th_t, J_fe_t = J_unified(np.array([F0]), params.cathode_T_K, params.work_function_eV)
-            J0 = float(J0_u[0])
-        elif params.emission_law == "RD_schottky":
-            J0 = float(J_rld_schottky(np.array([F0]), params.cathode_T_K, params.work_function_eV)[0])
-            n_t = None
-            J_th_t = None
-            J_fe_t = None
-        else:
-            raise ValueError(f"Unknown emission_law: {params.emission_law}")
+        # Signed extraction field: F_ext = max(0, -Ez), confirmed against this repository's own
+        # field-map/phasor convention by tests/test_field_sign_convention.py (an electron is
+        # pushed toward +z, into the cavity, when Ez<0 -- verified via a real single-electron
+        # RF-Track push at the phase run_phase_scan finds to maximize forward pz). During the
+        # retarding half-cycle (Ez>0) this correctly zeroes the Schottky lowering term without
+        # zeroing thermionic supply itself: J_rld_schottky(F=0, ...) reduces to plain
+        # unenhanced Richardson-Dushman, not zero, matching the implementation guide Sec. 6.2.
+        Ez0 = float(np.real(Ez0_phasor_axis * np.exp(1j * phi_rad)))
+        F0 = beta_enh * max(0.0, -Ez0)
+        res0 = evaluate_emission_model(params.emission_law, np.array([F0]), params.cathode_T_K, params.work_function_eV)
+        J0 = float(res0.J_Apm2[0])
+        n_t = res0.regime_n
+        J_th_t = res0.J_thermionic_Apm2
+        J_fe_t = res0.J_field_Apm2
 
         I_avg = J0 * area_m2
         Q_total_C = float(I_avg * tau_s) if np.isfinite(tau_s) else 0.0
@@ -577,17 +885,14 @@ def _compute_emission_waveform_and_current_history(
     n_samples = max(int(samples_per_period * phase_range_deg / 360.0) + 1, 2)
     t_s = np.linspace(0.0, tau_s, n_samples)
     Ez_t = np.real(Ez0_phasor_axis * np.exp(1j * (omega * t_s + phi_rad)))
-    F_t = beta_enh * np.abs(Ez_t)
+    # See the identical F_ext=max(0,-Ez) note in the `not time_dependent` branch above.
+    F_t = beta_enh * np.maximum(-Ez_t, 0.0)
 
-    if params.emission_law == "unified":
-        J_t, n_t, J_th_t, J_fe_t = J_unified(F_t, params.cathode_T_K, params.work_function_eV)
-    elif params.emission_law == "RD_schottky":
-        J_t = J_rld_schottky(F_t, params.cathode_T_K, params.work_function_eV)
-        n_t = None
-        J_th_t = None
-        J_fe_t = None
-    else:
-        raise ValueError(f"Unknown emission_law: {params.emission_law}")
+    res_t = evaluate_emission_model(params.emission_law, F_t, params.cathode_T_K, params.work_function_eV)
+    J_t = res_t.J_Apm2
+    n_t = res_t.regime_n
+    J_th_t = res_t.J_thermionic_Apm2
+    J_fe_t = res_t.J_field_Apm2
 
     dphi_t = delta_phi_schottky_eV(F_t)
     phi_eff_t = np.maximum(params.work_function_eV - dphi_t, 0.0)
@@ -687,6 +992,8 @@ def _assemble_thermionic_diagnostics(
         "py_rms": float(py_rms),
         "emission_law": str(params.emission_law),
         "beta_enh": float(beta_enh),
+        "cathode_T_K": float(params.cathode_T_K),
+        "work_function_eV": float(params.work_function_eV),
         "t_s": wf.get("t_s", None),
         "Ez_t": wf.get("Ez_t", None),
         "F_t": wf.get("F_t", None),
@@ -806,18 +1113,23 @@ def run_transport_with_progress(
     slow_step_warn_s: float = 20.0,
     rng: Optional[np.random.Generator] = None,
     on_screen: Optional[Callable[[int, float, Dict[str, float]], None]] = None,
+    spatial_source: Optional[Dict[str, np.ndarray]] = None,
 ):
     """Run transport with staged progress text.
 
+    `spatial_source` (guide Sec. 6.4/13.6): when given (a `{"x_grid_m","y_grid_m","t_grid_s",
+    "J_Apm2"}` dict, e.g. from `build_cathode_rf_source(...)` or a converged
+    `rf_gun.emission_iteration.EmissionFieldIterationResult`), the bunch is built via
+    `build_bunch_thermionic_spatial` instead of the default on-axis-only `build_bunch_thermionic` --
+    opt-in, so every existing call site's behavior is unchanged unless it explicitly passes this.
+
     There is no live progress bar during tracking: RF-Track's Python bindings expose no
-    per-step callback, so any in-run percentage is a wall-clock guess, not real progress. A
-    background thread previously rendered such a guess (via tqdm) but, at least with the
-    deflection magnet on (which forces single-threaded tracking, and periodically calls back
-    into Python from the tracking thread via `DeflectionField.get_field`), that thread printing
-    or refreshing a widget concurrently with the main thread was found to hang the kernel
-    intermittently -- so it was removed. The `_set_stage` prints below (`1/5` .. `5/5`) are the
-    only progress feedback during a run; see `track_elapsed_s`/`track_estimate_s` in the
-    returned stats for timing after the fact.
+    per-step callback, so any in-run percentage would be a wall-clock guess, not real progress.
+    With the deflection magnet on, tracking is additionally forced single-threaded (it calls back
+    into Python from the tracking thread via `DeflectionField.get_field`), so a concurrent
+    background thread printing or refreshing a widget is unsafe here. The `_set_stage` prints
+    below (`1/5` .. `5/5`) are the only progress feedback during a run; see
+    `track_elapsed_s`/`track_estimate_s` in the returned stats for timing after the fact.
 
     Returns:
         (SimulationResult, stats_dict)
@@ -853,15 +1165,20 @@ def run_transport_with_progress(
 
     print("---- Simulation Start ----", flush=True)
     _set_stage(1)
-    B0, thermo_info = build_bunch_thermionic(
-        rft,
-        tracking.n_particles,
-        tracking.phi_deg,
-        f_hz=vol_params.f_hz,
-        params=emission,
-        Ez0_phasor_axis=Ez0_phasor_axis,
-        rng=rng,
-    )
+    if spatial_source is not None:
+        B0, thermo_info = build_bunch_thermionic_spatial(
+            rft, tracking.n_particles, spatial_source, params=emission, rng=rng,
+        )
+    else:
+        B0, thermo_info = build_bunch_thermionic(
+            rft,
+            tracking.n_particles,
+            tracking.phi_deg,
+            f_hz=vol_params.f_hz,
+            params=emission,
+            Ez0_phasor_axis=Ez0_phasor_axis,
+            rng=rng,
+        )
     vol_params_eff = _resolve_beam_loading_tinj(vol_params, B0, thermo_info)
 
     if bool(getattr(vol_params_eff, "beam_loading_enabled", False)):
@@ -878,6 +1195,7 @@ def run_transport_with_progress(
     z_snaps = _sanitize_screen_positions(z_snaps_in)
 
     runtime_payload = _runtime_key_payload(vol_params_eff, tracking, len(z_snaps))
+    runtime_payload["spatial_emission_sampling"] = spatial_source is not None
     runtime_key = _runtime_key_string(runtime_payload)
     runtime_key_hash = _runtime_key_hash(runtime_key)
     est_s = _TRANSPORT_RUNTIME_HISTORY.get(runtime_key, None)

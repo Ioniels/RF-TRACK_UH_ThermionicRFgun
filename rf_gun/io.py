@@ -19,6 +19,13 @@ LOST_COLUMNS = ["x", "px", "y", "py", "z", "pz", "t", "mass", "q", "N", "id"]
 # Q [e+], N [# real particles per macro-particle], t0 [mm/c], id [#].
 OPENPMD_PHASE_FMT = "%X %Px %Y %Py %Z %Pz %m %Q %N %t0 %id"
 
+#: Bump when a field is added, removed, or its meaning changes in a way that would break a
+#: reader written against an earlier version (implementation guide Sec. 15.3: "include a schema
+#: version so later changes remain readable"). Independent of each other since the two files can
+#: evolve separately (e.g. a new hardcoded_parameters key doesn't touch run_results.json's shape).
+RUN_CONFIG_SCHEMA_VERSION = 1
+RUN_RESULTS_SCHEMA_VERSION = 1
+
 
 def to_json_safe(value: Any) -> Any:
     """Recursively sanitize objects for strict JSON (no NaN/Inf)."""
@@ -467,6 +474,7 @@ def save_run_config(
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     payload = {
+        "schema_version": RUN_CONFIG_SCHEMA_VERSION,
         "run_name": run_name,
         "run_dir": str(run_dir.resolve()),
         "timestamp_local": datetime.now().isoformat(),
@@ -509,6 +517,7 @@ def save_run_results(
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     payload = {
+        "schema_version": RUN_RESULTS_SCHEMA_VERSION,
         "run_name": run_name,
         "run_dir": str(run_dir.resolve()),
         "timestamp_local": datetime.now().isoformat(),
@@ -551,4 +560,74 @@ def save_back_bombardment_energy_map(
         density_J_per_mm2=np.asarray(energy_map["density_J_per_mm2"], dtype=float),
         total_J=np.asarray(float(energy_map["total_J"])),
     )
+    return out_path
+
+
+def save_back_bombardment_events_hdf5(
+    run_dir: Path,
+    data: "BackBombardmentData",
+    *,
+    filename: str = "back_bombardment_events.h5",
+    extra_attrs: dict[str, Any] | None = None,
+) -> Path | None:
+    """Write one row per cathode-heating-relevant back-bombardment impact --
+    {x, y, t, E, K, px, py, pz, weight (real electrons), surface_id} -- for COMSOL/TIO or any
+    downstream tool needing the event list itself, not just a binned 2D map
+    (`save_back_bombardment_energy_map`).
+
+    Only `data.heating_relevant` rows are written (face + chamfer, see `classify_impact_surface`);
+    holder/cavity-wall impacts are excluded, matching `rf_gun.plotting.back_bombardment`'s heating
+    figures. Returns `None` if there are no heating-relevant rows.
+    """
+    try:
+        import h5py
+    except ImportError as exc:  # pragma: no cover - depends on environment
+        raise ImportError(
+            "h5py is required to save back-bombardment events in HDF5 format. "
+            "Install it with 'pip install h5py'."
+        ) from exc
+
+    from .back_bombardment import kinetic_energy_joules
+
+    v = np.asarray(data.heating_relevant, dtype=bool)
+    n = int(np.sum(v))
+    if n == 0:
+        return None
+
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    out_path = run_dir / filename
+
+    weight_electrons = np.full(n, float(data.weight_per_macroparticle))
+
+    with h5py.File(str(out_path), "w") as h5f:
+        h5f.create_dataset("x_mm", data=data.x_hit_mm[v])
+        h5f.create_dataset("y_mm", data=data.y_hit_mm[v])
+        h5f.create_dataset("t_s", data=data.t_hit_s[v])
+        h5f.create_dataset("E_total_MeV", data=data.E_total_MeV[v])
+        h5f.create_dataset("K_MeV", data=data.K_MeV[v])
+        h5f.create_dataset("px_MeV_c", data=data.px_MeVc[v])
+        h5f.create_dataset("py_MeV_c", data=data.py_MeVc[v])
+        h5f.create_dataset("pz_MeV_c", data=data.pz_MeVc[v])
+        h5f.create_dataset("weight_electrons", data=weight_electrons)
+        h5f.create_dataset("K_joules_weighted", data=kinetic_energy_joules(data)[v])
+        h5f.create_dataset(
+            "surface_id", data=np.asarray(data.surface_id[v], dtype=object),
+            dtype=h5py.string_dtype(encoding="utf-8"),
+        )
+        h5f.attrs["n_events"] = n
+        h5f.attrs["n_cathode_face"] = int(data.n_cathode_face)
+        h5f.attrs["n_cathode_chamfer"] = int(data.n_cathode_chamfer)
+        h5f.attrs["n_excluded_geometry"] = int(data.n_excluded_geometry)
+        h5f.attrs["weight_per_macroparticle_electrons"] = float(data.weight_per_macroparticle)
+        h5f.attrs["columns"] = "x_mm, y_mm, t_s, E_total_MeV, K_MeV, px_MeV_c, py_MeV_c, pz_MeV_c, weight_electrons, surface_id"
+        if extra_attrs:
+            for key, value in extra_attrs.items():
+                if value is None:
+                    continue
+                try:
+                    h5f.attrs[str(key)] = value
+                except (TypeError, ValueError):
+                    h5f.attrs[str(key)] = str(value)
+
     return out_path

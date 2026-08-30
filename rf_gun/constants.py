@@ -4,10 +4,17 @@ from scipy.constants import c, e as q_e, epsilon_0, k as KB, eV as EV, physical_
 from scipy.constants import h, m_e
 
 ME_MEV = physical_constants["electron mass energy equivalent in MeV"][0]
+ME_KG = m_e
+
+#: Boltzmann constant, derived from scipy's own CODATA values rather than an independently
+#: hardcoded literal -- several emission-physics modules (emission_models.py,
+#: emission_sensitivity.py, emission_sampling.py) each used to carry their own copy of this same
+#: constant in one unit or the other; this is the single shared source now.
+KB_J_PER_K = KB
+KB_EV_PER_K = KB / EV
 
 #: mm/c -> ns: (mm/c) * 1e-3 [m/mm] / c [m/s] * 1e9 [ns/s] -- shared conversion for every `%t`
-#: (arrival time) column throughout the project (previously duplicated in `beam_properties.py`
-#: and `plotting/phase_space.py`, each with its own literal speed-of-light value).
+#: (arrival time) column throughout the project.
 MM_C_TO_NS = 1e-3 / c * 1e9
 
 # Richardson constant [A/m^2/K^2]

@@ -47,19 +47,30 @@ def build_iq_phasor(
     env_90: float,
     scale: float = 1.0,
 ) -> np.ndarray:
-    """Complex phasor from two snapshots at 0 deg and 90 deg."""
-    e0 = field_0 / (env_0 if env_0 != 0 else 1.0)
-    e90 = field_90 / (env_90 if env_90 != 0 else 1.0)
+    """Complex phasor from two snapshots at 0 deg and 90 deg.
+
+    `env_0`/`env_90` are each expected strictly positive (the field-map snapshots' own peak
+    instantaneous amplitude) -- an exactly-zero envelope means the snapshot at that time is
+    degenerate (all-zero field), which should never happen for a real field-map snapshot. Raising
+    here surfaces that immediately rather than silently normalizing by 1.0, which would otherwise
+    produce a phasor with the wrong amplitude with no indication anything was wrong.
+    """
+    if env_0 == 0.0 or env_90 == 0.0:
+        raise ValueError(f"build_iq_phasor: degenerate (zero) envelope, env_0={env_0!r}, env_90={env_90!r}")
+    e0 = field_0 / env_0
+    e90 = field_90 / env_90
     return (e0 - 1j * e90) * float(scale)
 
 
 def build_crest_phasor(field_crest: np.ndarray, scale: Optional[float] = None) -> np.ndarray:
-    """Simplified phasor using a crest snapshot (real-only)."""
+    """Simplified phasor using a crest snapshot (real-only). See `build_iq_phasor`'s docstring for
+    why a zero envelope raises rather than silently normalizing by 1.0."""
     field_crest = np.asarray(field_crest, dtype=float)
     if scale is None:
         return field_crest.astype(np.complex128)
-    env = float(np.max(np.abs(field_crest))) if field_crest.size else 1.0
-    env = env if env != 0.0 else 1.0
+    env = float(np.max(np.abs(field_crest))) if field_crest.size else 0.0
+    if env == 0.0:
+        raise ValueError("build_crest_phasor: degenerate (all-zero) crest snapshot")
     return (field_crest / env) * float(scale)
 
 

@@ -13,7 +13,7 @@ from ..back_bombardment import BackBombardmentData
 from ..constants import c, ME_MEV
 from ..particle_tags import ParticleTags, build_particle_tags, ID_COL, lost_ids_from_lost_table
 from ..beam_properties import compute_beam_properties, transmission_curves
-from .style import COLOR_LOST, COLOR_PRIMARY, COLOR_SECONDARY
+from .style import COLOR_LOST, COLOR_NEUTRAL, COLOR_PRIMARY, COLOR_SECONDARY
 from .back_bombardment import (
     plot_back_bombardment_energy_density,
     plot_back_bombardment_phase_space,
@@ -217,32 +217,30 @@ def plot_class_conditioned_histograms(
     if t0_mm_c is not None:
         t0_arr = np.asarray(t0_mm_c, dtype=float).reshape(-1)
         if t0_arr.size >= n:
-            from ..constants import c
-
             t0_ns = (t0_arr[:n] * 1e-3 / c) * 1e9
 
     fig, axes = plt.subplots(1, 3, figsize=(13, 4))
 
     bins_pz = np.histogram_bin_edges(1e3 * pz0[np.isfinite(pz0)], bins=60)
-    axes[0].hist(1e3 * pz0, bins=bins_pz, alpha=0.4, label="all", color="tab:blue")
+    axes[0].hist(1e3 * pz0, bins=bins_pz, alpha=0.4, label="all", color=COLOR_NEUTRAL)
     axes[0].hist(1e3 * pz0[transmitted], bins=bins_pz, alpha=0.6, label="transmitted", color=COLOR_PRIMARY)
     axes[0].hist(1e3 * pz0[backward], bins=bins_pz, alpha=0.6, label="backward/returned", color=COLOR_SECONDARY)
     if np.any(lost):
         axes[0].hist(1e3 * pz0[lost], bins=bins_pz, alpha=0.6, label="lost", color=COLOR_LOST)
     elif n_lost_total > 0:
         axes[0].text(0.98, 0.95, f"lost={n_lost_total}", transform=axes[0].transAxes, ha="right", va="top")
-    axes[0].set_xlabel("initial pz [keV/c]")
+    axes[0].set_xlabel(r"initial $p_z$ (keV/c)")
     axes[0].set_ylabel("counts")
     axes[0].grid(alpha=0.3)
 
     if t0_ns is not None:
         bins_t0 = np.histogram_bin_edges(t0_ns[np.isfinite(t0_ns)], bins=60)
-        axes[1].hist(t0_ns, bins=bins_t0, alpha=0.4, label="all", color="tab:blue")
+        axes[1].hist(t0_ns, bins=bins_t0, alpha=0.4, label="all", color=COLOR_NEUTRAL)
         axes[1].hist(t0_ns[transmitted], bins=bins_t0, alpha=0.6, label="transmitted", color=COLOR_PRIMARY)
         axes[1].hist(t0_ns[backward], bins=bins_t0, alpha=0.6, label="backward/returned", color=COLOR_SECONDARY)
         if np.any(lost):
             axes[1].hist(t0_ns[lost], bins=bins_t0, alpha=0.6, label="lost", color=COLOR_LOST)
-        axes[1].set_xlabel("initial t0 [ns]")
+        axes[1].set_xlabel(r"initial $t_0$ (ns)")
         axes[1].set_ylabel("counts")
         axes[1].grid(alpha=0.3)
     else:
@@ -250,12 +248,12 @@ def plot_class_conditioned_histograms(
         axes[1].text(0.5, 0.5, "t0 unavailable", ha="center", va="center")
 
     bins_r = np.histogram_bin_edges(r0[np.isfinite(r0)], bins=60)
-    axes[2].hist(r0, bins=bins_r, alpha=0.4, label="all", color="tab:blue")
+    axes[2].hist(r0, bins=bins_r, alpha=0.4, label="all", color=COLOR_NEUTRAL)
     axes[2].hist(r0[transmitted], bins=bins_r, alpha=0.6, label="transmitted", color=COLOR_PRIMARY)
     axes[2].hist(r0[backward], bins=bins_r, alpha=0.6, label="backward/returned", color=COLOR_SECONDARY)
     if np.any(lost):
         axes[2].hist(r0[lost], bins=bins_r, alpha=0.6, label="lost", color=COLOR_LOST)
-    axes[2].set_xlabel("initial radius [mm]")
+    axes[2].set_xlabel(r"initial radius (mm)")
     axes[2].set_ylabel("counts")
     axes[2].grid(alpha=0.3)
 
@@ -495,8 +493,9 @@ def save_run_figures(
     `back_bombardment_data` (from `rf_gun.compute_back_bombardment`), when given, adds the 4
     back-bombardment figures (phase space, screen reach, cathode energy-density map, power
     density vs time -- matching the notebook's back-bombardment cell) to the bundle;
-    `back_bombardment_cathode_radius_mm` is required alongside it (only the power-density figure
-    needs it, to normalize deposited energy by the cathode's nominal area).
+    `back_bombardment_cathode_radius_mm` is required alongside it: the power-density figure uses
+    it to normalize deposited energy by the cathode's nominal area, and the energy-density map
+    uses it to fix the map's (x, y) range to the cathode's own footprint and draw its boundary.
 
     Returns `{"saved_figures": [...], "back_bombardment_energy_map": {...} | None}` -- the energy
     map is the exact dict `plot_back_bombardment_energy_density` returned (`xedges`, `yedges`,
@@ -546,9 +545,8 @@ def save_run_figures(
         # bunch (no per-particle weight column anywhere in the phase-space format), so a
         # macroparticle-count ratio already *is* the real transmission fraction. `Q_total_C /
         # q_e` (the *real*, charge-weighted electron count) is many orders of magnitude larger
-        # than the macroparticle count and must never be used as this denominator -- confirmed
-        # empirically to silently produce a "transmission" far too small (e.g. 1e-5% instead of
-        # ~40%) when it was used here previously.
+        # than the macroparticle count and must never be used as this denominator -- it would
+        # silently produce a "transmission" far too small by that same many orders of magnitude.
         if n_macroparticles is not None and int(n_macroparticles) > 0:
             n_initial = int(n_macroparticles)
         else:
@@ -586,7 +584,9 @@ def save_run_figures(
         plot_back_bombardment_screen_reach(back_bombardment_data, M_snaps, z_snaps)
         saved += _capture_current_figure("back_bombardment_screen_reach", output_dir)
 
-        back_bombardment_energy_map = plot_back_bombardment_energy_density(back_bombardment_data)
+        back_bombardment_energy_map = plot_back_bombardment_energy_density(
+            back_bombardment_data, cathode_radius_mm=float(back_bombardment_cathode_radius_mm),
+        )
         saved += _capture_current_figure("back_bombardment_energy_density", output_dir)
 
         plot_back_bombardment_power_density_vs_time(

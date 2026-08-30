@@ -1,8 +1,8 @@
 """Where the dynamic aperture (`rf_gun.aperture`) actually removed particles during tracking.
 
 Reads directly from RF-Track's own lost-particle table (`SimulationResult.lost_table`) -- a real,
-physically meaningful loss location, unlike the project's former post-hoc entrance/exit-pair
-radius cut.
+physically meaningful loss location, since a particle is removed the instant it crosses the
+channel R(z) during tracking.
 """
 from __future__ import annotations
 
