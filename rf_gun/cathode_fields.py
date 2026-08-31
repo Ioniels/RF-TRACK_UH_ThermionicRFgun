@@ -25,13 +25,19 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .constants import ME_MEV, c, q_e
+from .constants import ME_MEV, c, epsilon_0, q_e
 
 
 #: compute_force's convention: for a Q=-1 (electron) probe, F[N] = Q*q_e*E[V/m] = -q_e*E, so
 #: E[V/m] = -F[N]/q_e = -F[MeV/m]*1e6. Verified analytically in tests/test_cathode_fields.py
 #: against the same explicit reflected-image-distribution cross-check used for mirror validation.
 _PROBE_FORCE_MEVPM_TO_EZ_VPM = -1.0e6
+
+#: horizontal-separation tolerance [m] for treating a (probe, source) pair as "the same cathode
+#: grid cell" in analytic_sc_and_mirror_surface_field -- 1 nm is many orders of magnitude below any
+#: realistic cathode grid pitch (mm-to-um scale), so this only ever matches a genuine same-cell
+#: pair (rho=0 by construction), never two distinct, merely-close grid cells.
+_SAME_CELL_RHO_TOL_M = 1.0e-9
 
 
 def signed_normal_field(Ez_Vpm: np.ndarray) -> np.ndarray:
@@ -210,6 +216,149 @@ def extract_sc_and_mirror_from_snapshot(
     if mirror_charge_tolerance is not None:
         sc_mirror.set_mirror_charge_tolerance(float(mirror_charge_tolerance))
     E_sc_plus_mirror = extract_sc_field_with_probes(rft, sc_mirror, active_bunch_matrix, probe_x_m, probe_y_m, probe_z_m)
+    return E_sc_free, E_sc_plus_mirror
+
+
+def analytic_sc_and_mirror_surface_field(
+    probe_x_m: np.ndarray,
+    probe_y_m: np.ndarray,
+    source_x_m: np.ndarray,
+    source_y_m: np.ndarray,
+    source_z_m: np.ndarray,
+    source_q_C: np.ndarray,
+    source_softening_m: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Closed-form signed E_z(x,y,0) [V/m] at a cloud of cathode-surface probe points, evaluated
+    exactly *at* the true cathode plane z=0 (no probe-distance parameter, unlike
+    extract_sc_field_with_probes' `probe_z_m`), from a set of point-charge macroparticles at
+    (source_x_m, source_y_m, source_z_m) [m] with charges source_q_C [C].
+
+    Physics: for a point charge q at height z above an infinite grounded conducting plane, the
+    field at a surface point a horizontal distance rho away is exactly that of q itself plus its
+    z=0-plane image charge -q at -z (elementary method of images). At the plane (not at the
+    charge's own location -- a different, unrelated result), the two contributions are equal:
+
+        E_z,direct(rho,0)      = -q*z / (4*pi*eps0*(rho^2+z^2)^1.5)
+        E_z,image(rho,0)       = -q*z / (4*pi*eps0*(rho^2+z^2)^1.5)   (identical to the direct term)
+        E_z,direct+image(rho,0) = 2 * E_z,direct(rho,0)
+
+    so E_sc_plus_mirror is always exactly double E_sc_free here -- not an approximation, an exact
+    identity of the image-charge method at the conductor surface. Verified against the standard
+    induced-surface-charge-density result sigma(rho) = eps0*E_z(rho,0) = -q*z/(2*pi*(rho^2+z^2)^1.5)
+    by numerical integration (integral of sigma*2*pi*rho drho over all rho recovers exactly -q).
+
+    This is the recommended replacement for extract_sc_field_with_probes/
+    extract_sc_and_mirror_from_snapshot's zero-weight-probe-particle mechanism within
+    rf_gun.emission_iteration's near-cathode self-consistency loop: it needs no RF-Track call at
+    all (pure closed-form electrostatics, so no PIC mesh resolution error and no arbitrary
+    z_probe_m choice -- see the module docstring in rf_gun.emission_iteration and UPGRADE_PLAN.md
+    for why the previous z_probe_m=z_max_m/4~0.5mm probe distance was flagged as a real accuracy
+    concern), and it naturally excludes a charge's own self-field: a source with source_z_m=0
+    (not yet drifted from the cathode -- e.g. charge from the *current* emission time bin, whose
+    creation this field evaluation is meant to inform, not include) contributes exactly zero,
+    since the numerator is proportional to z. Only pass `source_*` arrays for already-emitted
+    macroparticles (source time strictly before the probe time), matching
+    rf_gun.emission_iteration's existing "only previously emitted sheets contribute" convention.
+
+    A point-charge treatment is itself an approximation relative to the true continuous charge/
+    current distribution (as is the existing PIC-mesh approach); it is exact for the *point-charge
+    macroparticle* model, which is what both approaches ultimately represent RF-Track's bunch as.
+
+    **Same-cell (self-)term: exact on-axis finite-disk field, not softening.** Each macroparticle
+    here actually represents all the charge emitted from one finite-area cathode grid cell during
+    one finite time bin, not a literal point charge -- and a *probe* point is always one of that
+    same cathode grid's own cell centers (rf_gun.emission_iteration evaluates the field back at
+    the same (x,y) grid it samples from). So a source that was created in an earlier time bin *at
+    the same (x,y) cell a probe is also evaluating* (rho=0 relative to that source) has a small
+    but nonzero drift height z, and the unsoftened point-charge kernel diverges as z -> 0 there
+    (confirmed: running this at realistic parameters gave peak fields ~2500x too large and a
+    non-converging iteration, entirely traced to this term). A finite PIC mesh has no equivalent
+    singularity -- it inherently spreads each macroparticle's charge over a mesh cell -- so this
+    divergence is an artifact of the point-charge idealization, not real physics.
+
+    Rather than regularize this with generic Plummer softening (`D = rho^2+z^2+a^2`, an
+    approximation with no direct physical meaning), this same-cell term is instead evaluated with
+    the *exact* closed-form on-axis field of a uniformly-charged disk of radius
+    `a = sqrt(cell_area/pi)` (the source's own cell-equivalent disk radius -- see
+    rf_gun.emission_iteration's call site) centered under the probe:
+
+        E_z,disk(z) = -q / (2*pi*eps0*a^2) * (1 - z/sqrt(z^2+a^2))    (on-axis, rho=0, z>0)
+
+    This is the textbook uniformly-charged-disk on-axis result (matching the finite-disk surface-
+    field reference this project's beam-loading/cathode-field review cited, e.g. Omoumi et al.),
+    not an ad hoc regularization: it reduces to the ordinary on-axis point-charge field
+    `-q/(4*pi*eps0*z^2)` in the z>>a limit (verified numerically to 6 significant figures), and to
+    the expected "half infinite-sheet" field `-q/(2*pi*eps0*a^2)` as z -> 0+ (the field exactly at
+    the center of a uniformly charged disk, a standard, independently-checkable result) -- so
+    unlike softening, its z -> 0+ limit is itself a real physical prediction, not a tunable
+    fudge. It is only applied off the singular z=0 case itself: a same-cell source with z exactly
+    0 (the *current* emission time bin, whose creation this field evaluation is meant to inform,
+    not include -- rf_gun.emission_iteration's `active = t_flat_s <= t_j` mask includes t_i=t_j
+    with zero ballistic drift) still contributes exactly zero, preserving the existing
+    self-consistency safeguard against a bin back-reacting on its own just-created charge.
+    This on-axis disk formula is only exact for rho=0 (this source's own cell); different-cell
+    (rho>0) pairs use the plain unsoftened point-charge kernel instead, which needs no
+    regularization at all since rho>0 already keeps D=rho^2+z^2>0 -- softening was only ever
+    needed for the rho=0 case this disk formula now handles exactly.
+
+    `source_softening_m` (still accepted for signature compatibility) is used only as this disk
+    radius `a` for the same-cell term; if omitted (a=0), the same-cell term instead falls back to
+    the plain point-charge kernel (matching this function's pre-disk-formula behavior).
+
+    Returns (E_sc_free_Vpm, E_sc_plus_mirror_Vpm), each shaped like `probe_x_m`/`probe_y_m` --
+    the same two-array contract as extract_sc_and_mirror_from_snapshot, so this is a drop-in
+    alternative.
+    """
+    probe_x = np.asarray(probe_x_m, dtype=float)
+    probe_y = np.asarray(probe_y_m, dtype=float)
+    if probe_x.shape != probe_y.shape:
+        raise ValueError(f"probe_x_m shape {probe_x.shape} != probe_y_m shape {probe_y.shape}")
+    out_shape = probe_x.shape
+    probe_x_flat = probe_x.reshape(-1)
+    probe_y_flat = probe_y.reshape(-1)
+
+    src_x = np.asarray(source_x_m, dtype=float).reshape(-1)
+    src_y = np.asarray(source_y_m, dtype=float).reshape(-1)
+    src_z = np.asarray(source_z_m, dtype=float).reshape(-1)
+    src_q = np.asarray(source_q_C, dtype=float).reshape(-1)
+    if not (src_x.shape == src_y.shape == src_z.shape == src_q.shape):
+        raise ValueError("source_x_m/source_y_m/source_z_m/source_q_C must all have the same shape")
+
+    if source_softening_m is None:
+        src_a2 = np.zeros_like(src_x)[None, :]
+    else:
+        src_a = np.asarray(source_softening_m, dtype=float)
+        src_a = np.broadcast_to(src_a, src_x.shape).reshape(-1)
+        src_a2 = (src_a ** 2)[None, :]
+
+    if src_x.size == 0:
+        zeros = np.zeros(out_shape)
+        return zeros, zeros.copy()
+
+    dx = probe_x_flat[:, None] - src_x[None, :]  # (n_probe, n_src)
+    dy = probe_y_flat[:, None] - src_y[None, :]
+    rho2 = dx ** 2 + dy ** 2
+    z = src_z[None, :]
+    q = src_q[None, :]
+
+    # Different cell (rho>rho_tol): plain unsoftened point-charge kernel -- no regularization
+    # needed, since rho>0 already keeps D=rho^2+z^2>0.
+    D_point = rho2 + z ** 2
+    D_point_safe = np.where(D_point > 0.0, D_point, np.inf)
+    E_point = -(q * z) / (4.0 * np.pi * epsilon_0 * D_point_safe ** 1.5)
+
+    # Same cell (rho~0), already drifted (z>0): exact on-axis finite-disk field (see docstring).
+    a2_safe = np.where(src_a2 > 0.0, src_a2, np.inf)
+    D_disk = z ** 2 + src_a2
+    D_disk_safe = np.where(D_disk > 0.0, D_disk, np.inf)
+    E_disk = -(q / (2.0 * np.pi * epsilon_0 * a2_safe)) * (1.0 - z / np.sqrt(D_disk_safe))
+
+    same_cell = rho2 <= _SAME_CELL_RHO_TOL_M ** 2
+    use_disk = same_cell & (z > 0.0) & (src_a2 > 0.0)
+    E_direct = np.where(use_disk, E_disk, E_point)
+
+    E_sc_free = np.sum(E_direct, axis=1).reshape(out_shape)
+    E_sc_plus_mirror = 2.0 * E_sc_free
     return E_sc_free, E_sc_plus_mirror
 
 

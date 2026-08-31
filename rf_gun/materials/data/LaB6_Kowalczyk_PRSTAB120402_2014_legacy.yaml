@@ -1,0 +1,43 @@
+dataset_id: LaB6_Kowalczyk_PRSTAB120402_2014_legacy
+material: LaB6
+property: thermal_bundle_closed_form_legacy
+status: benchmark_reproduction_only_never_the_default_production_material_set
+
+rho_kg_m3: 4720.0
+
+equations:
+  k_UH_W_m_K: "418.4 * (116.7 / T_K + 0.0366)"
+  D_UH_m2_s: "12.7675 * (T_K - 273.15) ** (-0.640226) * 1.0e-4"
+  cp_UH_J_kg_K: "k_UH_W_m_K(T_K) / (rho_kg_m3 * D_UH_m2_s(T_K))"
+
+check_value_T_K: 1720.0
+check_values:
+  k_W_m_K: 43.7
+  D_m2_s: 1.21e-5
+  cp_J_kg_K: 765.0
+
+emission_legacy_fit:
+  phi_fit_eV: 2.485
+  A_R_A_cm2_K2: 29.0
+
+reference:
+  key: Kowalczyk_PRSTAB120402_2014
+  title: >
+    Kowalczyk et al., Phys. Rev. ST Accel. Beams 17, 120402 (2014) -- thermionic-cathode
+    back-bombardment heating study for the UH photoinjector; source of the closed-form k_UH(T),
+    D_UH(T), phi_fit, A_R values recorded here.
+  year: 2014
+  url: null
+
+notes: >
+  Retained only to reproduce the historical UH one-dimensional thermal calculation (plan
+  Sec. 5.2), never the default production material set (LaB6_UH_recommended_v1 is). This is a
+  closed-form EQUATION set, not tabulated data, so k_UH(T)/D_UH(T)/cp_UH(T) are implemented as
+  Python closed-form functions in lab6.py (_legacy_k_UH, _legacy_D_UH, _legacy_cp_UH), not routed
+  through base.py's PCHIP ScalarPropertyDataset loader. This YAML exists per the plan's Sec. 5.1
+  file-layout expectation and records the equations as human-readable text plus the citation and
+  the check values used to validate the Python implementation (T=1720 K:
+  k~=43.7 W/m/K, D~=1.21e-5 m2/s, cp~=765 J/kg/K -- see tests/test_materials.py). phi_fit_eV and
+  A_R_A_cm2_K2 are fitted values that reproduce this reduced legacy model only (plan Sec. 5.4);
+  they are never silently substituted for a production run's selected work-function/emission
+  configuration.

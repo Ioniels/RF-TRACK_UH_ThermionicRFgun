@@ -1,11 +1,13 @@
 """Plotting helpers for RF gun simulations."""
 
-from .fields import field_maps, axis_phase
+from .fields import field_maps, axis_phase, plot_deflection_field_profile
 from .emission import plot_emission_history, plot_j_vs_n, plot_emission_model_sensitivities
+from .attribution import plot_frozen_source_attribution
 from .iteration import (
     plot_emission_iteration_convergence,
     plot_emission_iteration_waveforms,
     plot_emission_iteration_near_cathode,
+    plot_emission_iteration_submodel_comparison,
 )
 from .phase_space import plot_phase_space, plot_spectra, plot_screen_phase_space_slider
 from .evolution import (
@@ -18,7 +20,9 @@ from .back_bombardment import (
     plot_back_bombardment_screen_reach,
     plot_back_bombardment_energy_density,
     plot_back_bombardment_power_density_vs_time,
+    plot_back_bombardment_source_qualification,
 )
+from .macropulse import plot_back_bombardment_macropulse
 from .aperture import plot_dynamic_aperture_losses
 from .acceptance_scan import plot_acceptance_scan
 from .save_run import (
@@ -48,12 +52,15 @@ from .style import (
 __all__ = [
     "field_maps",
     "axis_phase",
+    "plot_deflection_field_profile",
     "plot_emission_history",
     "plot_j_vs_n",
     "plot_emission_model_sensitivities",
+    "plot_frozen_source_attribution",
     "plot_emission_iteration_convergence",
     "plot_emission_iteration_waveforms",
     "plot_emission_iteration_near_cathode",
+    "plot_emission_iteration_submodel_comparison",
     "plot_phase_space",
     "plot_spectra",
     "plot_screen_phase_space_slider",
@@ -64,6 +71,8 @@ __all__ = [
     "plot_back_bombardment_screen_reach",
     "plot_back_bombardment_energy_density",
     "plot_back_bombardment_power_density_vs_time",
+    "plot_back_bombardment_source_qualification",
+    "plot_back_bombardment_macropulse",
     "plot_dynamic_aperture_losses",
     "plot_acceptance_scan",
     "save_run_figures",

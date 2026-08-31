@@ -1,0 +1,82 @@
+dataset_id: LaB6_stopping_Bakr_PRSTAB060708_2011
+material: LaB6
+property: electron_range_stopping_TIO
+quantity_symbol: R_tio
+status: discrepancy_resolved_by_reference_table_reproduction_see_notes
+
+Z_eff: 40.447
+A_eff_g_mol: 94.735
+rho0_kg_m3: 4720.0
+
+tabata_b_coefficients:
+  b1: 0.2335
+  b2: 1.209
+  b3: 1.78e-4
+  b4: 0.9891
+  b5: 3.01e-4
+  b6: 1.468
+  b7: 1.180e-2
+  b8: 1.232
+  b9: 0.109
+
+a1_coefficient_used: b1   # a1 = b1 * A_eff / Z_eff^b2, i.e. Tabata's original 0.2335 convention,
+                          # NOT Bakr's Eq.(3) printed 2.335*A/Z^1.209 -- see notes below.
+
+reference:
+  key: Bakr_PRSTAB060708_2011
+  title: >
+    Bakr et al., Phys. Rev. ST Accel. Beams 14, 060708 (2011) -- back-bombardment /
+    thermionic-cathode heating study; Table I is the exact-match source (journal version) of
+    Z_eff=40.447, A_eff=94.735 g/mol, rho0=4720 kg/m3 for LaB6.
+  year: 2011
+  url: null
+
+uncertainty:
+  type: model
+  value: 0.10
+
+reference_range_table_um:
+  impact_energy_keV: [1, 10, 100, 300, 500, 1000]
+  range_um: [0.030, 0.623, 23.35, 126.2, 262.3, 663.5]
+  entrance_stopping_power_keV_per_um: [28.6, 10.8, 2.70, 1.62, 1.37, 1.17]
+
+notes: |
+  DISCREPANCY (plan Sec. 19.3), verified numerically while implementing rf_gun/materials/
+  electron_range.py -- read that module's docstring for the full derivation before touching a1.
+
+  Tabata, Ito, Okabe (Nucl. Instrum. Methods 103, 85 (1972), p.86 Eq.6a-6e / Table 2 p.87) define
+  a1 = b1 * A / Z^b2 with b1 = 0.2335. Bakr's own Eq. (3) (p.060708-3) restates this as
+  a1 = 2.335 * A/Z^1.209 -- a factor of 10 above Tabata's printed b1=0.2335.
+
+  Plan Sec. 19.3 asserts that Bakr's printed coefficient (a1 ~= 2.524 for this file's Z_eff/A_eff)
+  "matches the plan's already-stated reference range table exactly" (the range_um values above).
+  Direct evaluation of
+    R(tau) = (a1/rho_g_cm3) * [ln(1+a2*tau)/a2 - a3*tau/(1+a4*tau^a5)],  tau = E_keV/511
+  with a1=2.524 instead gives values ~10x LARGER than range_um above at every tabulated energy
+  (e.g. 6634 um, not 663.5 um, at 1000 keV; 0.300 um, not 0.030 um, at 1 keV). Using Tabata's
+  original b1=0.2335 (a1 ~= 0.2524 for this Z_eff/A_eff) reproduces range_um above to better than
+  1% at all six tabulated energies. Plan Sec. 19.3's prose is self-contradictory here: it
+  correctly notes Tabata's b1 gives "an order of magnitude smaller range" than Bakr's a1, but
+  then incorrectly identifies the LARGER (Bakr) range as the match for the SMALLER tabulated
+  values -- this looks like an arithmetic slip made during that verification pass, not a settled
+  resolution.
+
+  WORKING DECISION recorded here and in electron_range.py: use a1 = b1*A_eff/Z_eff^b2 with
+  b1=0.2335 (Tabata's original), NOT Bakr's printed a1=2.335*A/Z^1.209, because it is the only
+  convention that reproduces this file's own reference_range_table_um and the prior LaB6_heating
+  note. Flag this to a human before any final production physics claim; a recommended (not
+  blocking) follow-up is an independent CSDA range cross-check (e.g. NIST ESTAR for a comparable
+  effective-Z absorber), per plan Sec. 19.3.
+
+  Units hazard (plan Sec. 19.3): rho0_kg_m3 above is in kg/m3 (Bakr's own convention), but
+  Tabata's Rex is a mass range in g/cm2, recovered as a linear thickness only via R=Rex/rho with
+  rho in g/cm3 -- electron_range.py divides rho0_kg_m3 by 1000 explicitly before use; skipping
+  that conversion is a second, independent way to get a 1000x range error (on top of the 10x a1
+  ambiguity above), and is exactly what tests/test_materials.py's unit-conversion regression test
+  is meant to catch.
+
+  No analytic dE/dR (stopping-power) formula exists in either source. Bakr's Fig. 4(b) "deposited
+  heat power" curves come from a separate PARMELA particle-transport simulation, not from
+  differentiating the TIO range law -- entrance_stopping_power_keV_per_um above is reproduced by
+  electron_range.tio_entrance_stopping_power_kev_per_um()'s own numerical differentiation of
+  R(tau), not a value taken from Tabata or Bakr.

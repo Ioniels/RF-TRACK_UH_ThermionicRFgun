@@ -6,8 +6,9 @@ one selectable tier. Machine parameters (particle count, screen count, cathode
 temperature/roughness, cavity R/Q, deflection current, SC/BL/deflection/aperture on-off switches)
 are untouched by this module and stay directly user-controlled.
 
-`fine` matches `run_thermionic_tm010_scanT_1400_1700.slurm`; `coarse` matches
-`UH_gun_tracking_demo.ipynb`'s defaults.
+`fine` matches `KOA_slurm_scripts/study_i_bis_fine_field_grid.slurm`/`study_iii_temperature.slurm`/
+`study_iv_deflection_macropulse.slurm`; `medium` matches `study_i_medium_field_grid.slurm`;
+`coarse` matches `UH_gun_tracking_demo.ipynb`'s defaults.
 
 Not tiered: `r_max_m`/`ext_zmax`/`z_min` (physical domain size, not a step size) and `bl_ncells`
 (a physical cell count). The field-map grid step `dr_um`/`dz_um` is also fixed across every tier
@@ -92,15 +93,23 @@ FINESSE_TIERS = tuple(FINESSE_PRESETS.keys())
 
 
 def finesse_preset_dict(tier: str) -> Dict[str, Any]:
-    """Plain `{flag_name: value}` dict for `tier`, including the fixed `dr_um`/`dz_um`."""
+    """Plain `{flag_name: value}` dict of tier's *numerical-integration* settings.
+
+    Deliberately excludes `dr_um`/`dz_um`: field-grid resolution is a physical-domain setting, not
+    a finesse knob, and must never be overwritten by tier selection (see module docstring and
+    `FIXED_DR_UM`/`FIXED_DZ_UM`, which are exposed only as the CLI's own default, applied once at
+    argument-definition time -- not injected here).
+    """
     if tier not in FINESSE_PRESETS:
         raise ValueError(f"Unknown finesse tier {tier!r}; expected one of {FINESSE_TIERS}")
-    return {"dr_um": FIXED_DR_UM, "dz_um": FIXED_DZ_UM, **FINESSE_PRESETS[tier]}
+    return dict(FINESSE_PRESETS[tier])
 
 
 def apply_finesse_preset_to_args(args: argparse.Namespace, tier: str | None) -> None:
-    """Mutate `args` in place with tier's values. Applied after `--preset`, so `--finesse` wins
-    over `--preset quick` when both are given. `tier=None` is a no-op."""
+    """Mutate `args` in place with tier's integration-finesse values only. Applied after
+    `--preset`, so `--finesse` wins over `--preset quick` when both are given. `tier=None` is a
+    no-op. Never touches `args.dr_um`/`args.dz_um` -- field-grid resolution is set once from the
+    CLI's own default/explicit value and is independent of the finesse tier."""
     if tier is None:
         return
     preset = finesse_preset_dict(tier)

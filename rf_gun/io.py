@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
@@ -11,7 +12,6 @@ import numpy as np
 from .constants import c, q_e
 from .diagnostics import build_screen_summary_from_phase_space, info_get_first
 
-SCREEN_COLUMNS = ["x_mm", "px_MeV_c", "y_mm", "py_MeV_c", "z_mm", "pz_MeV_c"]
 LOST_COLUMNS = ["x", "px", "y", "py", "z", "pz", "t", "mass", "q", "N", "id"]
 
 # Full Bunch6dT identifier string: X Px Y Py Z Pz then mass, charge, N, t0, id.
@@ -25,6 +25,19 @@ OPENPMD_PHASE_FMT = "%X %Px %Y %Py %Z %Pz %m %Q %N %t0 %id"
 #: evolve separately (e.g. a new hardcoded_parameters key doesn't touch run_results.json's shape).
 RUN_CONFIG_SCHEMA_VERSION = 1
 RUN_RESULTS_SCHEMA_VERSION = 1
+
+
+def atomic_write_json(path: Path, payload: Any, *, indent: int = 2, sort_keys: bool = True) -> Path:
+    """Write JSON atomically: serialize to a temporary file in the same directory, then
+    `os.replace()` it onto `path`. A reader (or a concurrent run/process) can never observe a
+    partially written file -- either the old content or the fully new content, never a truncated
+    write from a crash/kill mid-`json.dump`."""
+    path = Path(path)
+    tmp_path = path.with_name(path.name + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        json.dump(to_json_safe(payload), f, indent=indent, sort_keys=sort_keys)
+    os.replace(tmp_path, path)
+    return path
 
 
 def to_json_safe(value: Any) -> Any:
@@ -46,80 +59,6 @@ def to_json_safe(value: Any) -> Any:
     return str(value)
 
 
-def save_screen_distributions_json(
-    output_dir: Path,
-    z_snaps: Sequence[float],
-    M_snaps: Sequence[np.ndarray] | None,
-    I_snaps: Sequence[Any] | None,
-    *,
-    mode: str = "summary",
-    n_initial: int | None = None,
-    robust_summaries: Sequence[dict[str, Any]] | None = None,
-) -> int:
-    """Save per-screen JSON in summary or full mode."""
-    if not z_snaps:
-        return 0
-    mode_norm = str(mode).strip().lower()
-    if mode_norm not in ("summary", "full"):
-        raise ValueError(f"Unknown screen JSON mode: {mode}")
-
-    out_dir = Path(output_dir) / "screen_distributions_json"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    precomputed = [dict(x) for x in robust_summaries] if robust_summaries is not None else []
-
-    n0 = int(n_initial) if n_initial is not None else 0
-    if n0 <= 0 and M_snaps is not None and len(M_snaps) > 0:
-        first = np.asarray(M_snaps[0])
-        if first.ndim == 2:
-            n0 = int(first.shape[0])
-
-    saved = 0
-    n_prev = n0
-    for i, z_m in enumerate(z_snaps):
-        M_i = None
-        if M_snaps is not None and i < len(M_snaps):
-            M_i = np.asarray(M_snaps[i], dtype=float)
-
-        if i < len(precomputed):
-            summary = dict(precomputed[i])
-        else:
-            summary = build_screen_summary_from_phase_space(
-                M_i,
-                screen_index=i,
-                z_m=float(z_m),
-                n_initial=n0,
-                n_previous=n_prev,
-            )
-        n_prev = int(summary["N"])
-
-        info_i = I_snaps[i] if (I_snaps is not None and i < len(I_snaps)) else None
-        raw_info = {
-            "transmission": info_get_first(info_i, ["transmission", "Transmission"]),
-            "mean_pz": info_get_first(info_i, ["mean_Pz", "mean_P", "mean_pz"]),
-            "sigma_pz": info_get_first(info_i, ["sigma_Pz", "sigma_P", "sigma_pz"]),
-        }
-
-        payload: dict[str, Any] = {
-            "screen_index": int(i),
-            "z_m": float(z_m),
-            "mode": mode_norm,
-            "summary": summary,
-            "rftrack_raw_info": raw_info,
-        }
-
-        if mode_norm == "full" and M_snaps is not None and i < len(M_snaps):
-            arr = np.asarray(M_snaps[i])
-            payload["columns"] = SCREEN_COLUMNS
-            payload["n_particles"] = int(arr.shape[0]) if arr.ndim == 2 else 0
-            payload["phase_space"] = arr.tolist() if arr.ndim == 2 and arr.size else []
-
-        file_path = out_dir / f"screen_{i:04d}_z_{float(z_m):.6f}m.json"
-        with file_path.open("w", encoding="utf-8") as f:
-            json.dump(to_json_safe(payload), f, indent=2, sort_keys=True)
-        saved += 1
-
-    return saved
 
 
 #: Column layout of the extended phase-space format used for screen snapshots throughout this
@@ -433,6 +372,39 @@ def save_beam_openpmd(
     return out_path
 
 
+#: Bump when validation.json's schema changes.
+VALIDATION_SCHEMA_VERSION = 1
+
+
+def build_validation_report(checks: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Assemble a `validation.json` payload from a caller-supplied `{check_name: {"passed": bool,
+    ...}}` mapping (Section 9: "Create a machine-readable validation.json per run"). `status` is
+    `"ok"` only if every check's `"passed"` is `True`; otherwise `"failed"`, naming the failing
+    checks. This does not itself decide what to check -- callers assemble `checks` from whatever
+    gates are meaningful at their pipeline stage (phase calibration validity, particle-ID
+    uniqueness, charge/energy closure, convergence, ...); this function only aggregates and
+    standardizes the report shape so every run's validation.json looks the same.
+    """
+    failed = sorted(name for name, result in checks.items() if not bool(result.get("passed", False)))
+    return {
+        "schema_version": VALIDATION_SCHEMA_VERSION,
+        "timestamp_local": datetime.now().isoformat(),
+        "status": "ok" if not failed else "failed",
+        "failed_checks": failed,
+        "checks": checks,
+    }
+
+
+def save_validation_report(run_dir: Path, checks: dict[str, dict[str, Any]], filename: str = "validation.json") -> Path:
+    """Build (`build_validation_report`) and atomically write `validation.json`. Returns the
+    written path regardless of overall status -- callers decide whether a `"failed"` status should
+    also abort the run/skip a completion marker; this function only records the outcome."""
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    report = build_validation_report(checks)
+    return atomic_write_json(run_dir / filename, report)
+
+
 def save_run_config(
     run_dir: Path,
     *,
@@ -476,16 +448,13 @@ def save_run_config(
     payload = {
         "schema_version": RUN_CONFIG_SCHEMA_VERSION,
         "run_name": run_name,
-        "run_dir": str(run_dir.resolve()),
+        "run_dir": str(run_dir),
         "timestamp_local": datetime.now().isoformat(),
         "source": str(source),
         "hardcoded_parameters": hardcoded_parameters,
         "derived_parameters": derived_parameters,
     }
-    out_path = run_dir / filename
-    with out_path.open("w", encoding="utf-8") as f:
-        json.dump(to_json_safe(payload), f, indent=2, sort_keys=True)
-    return out_path
+    return atomic_write_json(run_dir / filename, payload)
 
 
 def save_run_results(
@@ -519,16 +488,13 @@ def save_run_results(
     payload = {
         "schema_version": RUN_RESULTS_SCHEMA_VERSION,
         "run_name": run_name,
-        "run_dir": str(run_dir.resolve()),
+        "run_dir": str(run_dir),
         "timestamp_local": datetime.now().isoformat(),
         "source": str(source),
         "results": results,
         "output_files": output_files,
     }
-    out_path = run_dir / filename
-    with out_path.open("w", encoding="utf-8") as f:
-        json.dump(to_json_safe(payload), f, indent=2, sort_keys=True)
-    return out_path
+    return atomic_write_json(run_dir / filename, payload)
 
 
 def save_back_bombardment_energy_map(

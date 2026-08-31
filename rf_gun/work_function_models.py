@@ -25,8 +25,19 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 #: Liu et al. 2017 (Vacuum 143, 245) single-crystal LaB6(100) thermionic effective work function,
-#: the note's recommended baseline anchor; A_R=120.4 A/cm^2/K^2 is the Richardson constant used to
-#: derive it, and must be paired with phi_eff, not phi_DFT, when using RD_schottky/rld_schottky_plus_mg.
+#: the note's recommended baseline anchor; A_R=120.4 A/cm^2/K^2 is the (material-specific, measured)
+#: Richardson constant used to derive it, and must be paired with phi_eff, not phi_DFT, when using
+#: RDSchottky/jensen2014_RDSchottky_MurphyGood_additive. This is deliberately a separate
+#: constant from rf_gun.constants.A_RICH (the generic theoretical free-electron Richardson
+#: constant, ~120.17 A/cm^2/K^2): the two agree to ~0.2% here, which is coincidental (any real
+#: material's measured A_R can differ from the free-electron value by far more than this), not a
+#: bug to "fix" by merging them -- but evaluate_emission_model()'s A_R_Apm2K2 still defaults to
+#: A_RICH regardless of which work_function_temperature_model is selected. A caller pairing
+#: constant_phi_eff/linear_tcwf/piecewise_surface_evolution (all anchored to this same Liu 2017
+#: point) with a materially different downstream use of A_R should pass A_R_Apm2K2=
+#: LIU_2017_A_R_APM2K2 explicitly for full internal consistency; the 0.2% default mismatch is
+#: negligible next to this model's other uncertainties (e.g. the +/-0.10 eV work-function-model
+#: uncertainty in WORK_FUNCTION_MODEL_UNCERTAINTY_EV, whose effect on J is exponential, not linear).
 LIU_2017_PHI_EFF_EV = 2.66
 LIU_2017_A_R_APM2K2 = 120.4e4  # 120.4 A/cm^2/K^2 -> A/m^2/K^2
 

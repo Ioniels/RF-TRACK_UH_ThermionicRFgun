@@ -19,23 +19,9 @@ def delta_phi_schottky_eV(F_Vpm: np.ndarray) -> np.ndarray:
     return dphi_J / EV
 
 
-def schottky_delta_phi_eV(E_Vm: float, beta: float = 1.0) -> float:
-    """Schottky lowering dphi [eV] for a local normal field magnitude |E| [V/m]."""
-    E = abs(E_Vm) * beta
-    dphi_J = np.sqrt((q_e**3) * E / (4.0 * np.pi * epsilon_0))
-    return float(dphi_J / q_e)
-
-
 def richardson_J_Apm2(T_K: float, phi_eff_eV: float) -> float:
     """Richardson-Dushman current density J [A/m^2]."""
     return float(A_RICH * (T_K**2) * np.exp(-phi_eff_eV / (KB_EV_PER_K * T_K)))
-
-
-def emission_window_from_charge(Q_C: float, I_A: float) -> float:
-    """Return emission duration tau [s] needed to emit charge Q at current I."""
-    if I_A <= 0.0:
-        return np.inf
-    return float(Q_C / I_A)
 
 
 def sn_y(F_Vpm: np.ndarray, phi_eV: float) -> np.ndarray:
@@ -142,6 +128,19 @@ def J_unified(
 
 DEFAULT_CHEMICAL_POTENTIAL_EV = 10.0
 
+#: quad() kwargs for every energy-integral evaluation in this module. scipy.integrate.quad's
+#: default epsabs (~1.49e-8) is an *absolute* tolerance -- fine when the integral's value is O(1)
+#: or larger, but these integrals can legitimately evaluate to O(1e-8) or smaller (e.g. deep in a
+#: rgtf_2019 near-pole regime, or at extreme field/temperature combinations), where a ~1.49e-8
+#: absolute error is itself a large (confirmed empirically: up to ~20%) *relative* error -- quad
+#: reports "converged" long before the result is actually accurate. Setting epsabs far below any
+#: value these integrals can plausibly take forces convergence to be judged by epsrel (relative)
+#: alone, which is the correct criterion here since the integrals' absolute scale is not known a
+#: priori. Confirmed to remove a real, previously-unexplained residual finite-difference noise in
+#: rgtf_2019's work-function sensitivity at near-pole field points (S_phi went from visibly jagged,
+#: +-0.02% swings uncorrelated with F, to stable to 6 significant figures).
+_TIGHT_QUAD_KWARGS = dict(epsabs=1e-20, epsrel=1e-12, limit=400)
+
 
 def _gamow_factor_sn_eV(En_rel_mu_eV: float, F_Vpm: float, phi_eV: float) -> float:
     """Exact-SN-elliptic WKB Gamow factor G(En) for the planar Schottky-Nordheim barrier
@@ -228,7 +227,20 @@ def J_murphy_good_direct_reference(
             D = float(expit(-G))
             return N * D
 
-        val, _ = quad(integrand, 0.0, En_hi_eV, limit=200)
+        # _gamow_factor_sn_eV is only C1 (not C-infinity) at the barrier saddle En_eV=E_kink_eV,
+        # where it switches from the below-barrier WKB integral to the linear above-barrier
+        # continuation. Left unmarked, quad's adaptive subdivision places its nodes near this kink
+        # inconsistently as it shifts with F/phi (through dphi_eV), which otherwise looks like
+        # numerical noise of a few times 1e-3 relative in J -- large enough to dominate a
+        # finite-difference sensitivity's own tiny perturbation and show up as an artificially
+        # jagged S_phi/S_F (confirmed empirically: with `points` unset, S_phi visibly oscillates
+        # F-to-F even though the true dependence is smooth; with it set, S_phi is stable to 6
+        # significant figures). `points` must lie strictly inside (0, En_hi_eV) for quad to accept
+        # it as a break point.
+        dphi_eV_i = float(delta_phi_schottky_eV(np.array([F]))[0])
+        E_kink_eV = mu_eV + phi_eV - dphi_eV_i
+        quad_points = [E_kink_eV] if 0.0 < E_kink_eV < En_hi_eV else None
+        val, _ = quad(integrand, 0.0, En_hi_eV, points=quad_points, **_TIGHT_QUAD_KWARGS)
         J[i] = q_e * val
 
     result = J if np.ndim(F_Vpm) else J[0]
@@ -240,24 +252,47 @@ def J_murphy_good_direct_reference(
 # old bare functions above unchanged for backward compatibility.
 # ---------------------------------------------------------------------------
 
+#: Naming convention (user-specified, 2026): short author/paper-code prefix + the two physical
+#: regimes/effects the model combines. Every prior name this repo has ever used for these models
+#: (both the original pre-refactor names and this session's earlier author_papercode_year
+#: intermediate renaming) is kept as a permanent backward-compatible alias (EMISSION_MODEL_ALIASES)
+#: so old saved run_config.json files and old CLI/notebook invocations keep resolving correctly.
 EMISSION_MODEL_NAMES = (
-    "RD_schottky",
-    "rld_schottky_plus_mg",
+    "RDSchottky",
+    "jensen2014_RDSchottky_MurphyGood_additive",
     "jensen_gtf_2007",
-    "rgtf_2019",
-    "murphy_good_direct_reference",
+    "jensen2019_RDSchottky_MurphyGood_transition",
+    "murphygood1956_SchottkyNordheim_integral",
 )
 
-#: Backward-compatible aliases -> canonical name. Existing saved configs using "unified" must keep
-#: working (guide Sec. 2.2) -- never silently rewrite a saved run's emission_law.
-EMISSION_MODEL_ALIASES = {"unified": "rld_schottky_plus_mg"}
+#: Backward-compatible aliases -> canonical name. Existing saved configs using any of these old
+#: names must keep working -- never silently rewrite a saved run's emission_law.
+EMISSION_MODEL_ALIASES = {
+    # Original (pre-2026-refactor) names.
+    "unified": "jensen2014_RDSchottky_MurphyGood_additive",
+    "RD_schottky": "RDSchottky",
+    "rld_schottky_plus_mg": "jensen2014_RDSchottky_MurphyGood_additive",
+    "rgtf_2019": "jensen2019_RDSchottky_MurphyGood_transition",
+    "murphy_good_direct_reference": "murphygood1956_SchottkyNordheim_integral",
+    # This session's first-pass (author_papercode_year) renaming, now itself superseded.
+    "richardson_dushman_schottky": "RDSchottky",
+    "schottky_murphygood_additive_legacy": "jensen2014_RDSchottky_MurphyGood_additive",
+    "jensen_rgtf_2019": "jensen2019_RDSchottky_MurphyGood_transition",
+    "murphy_good_1956_integral": "murphygood1956_SchottkyNordheim_integral",
+}
 
 EMISSION_MODEL_PLOT_LABELS = {
-    "RD_schottky": "Richardson-Dushman-Schottky",
-    "rld_schottky_plus_mg": "RLD-Schottky + finite-T Murphy-Good (additive)",
-    "jensen_gtf_2007": "Jensen GTF 2007",
-    "rgtf_2019": "rGTF 2019",
-    "murphy_good_direct_reference": "Direct Murphy-Good integral reference",
+    "RDSchottky": "Thermionic: Richardson-Dushman-Schottky",
+    "jensen2014_RDSchottky_MurphyGood_additive": (
+        "Jensen2014: Additive regime, Thermionic: Richardson-Dushman-Schottky; Field: Murphy-Good"
+    ),
+    "jensen_gtf_2007": "Jensen general thermal-field (2007) [not implemented]",
+    "jensen2019_RDSchottky_MurphyGood_transition": (
+        "Jensen2019: Transition regime, Thermionic: Richardson-Dushman-Schottky; Field: Murphy-Good"
+    ),
+    "murphygood1956_SchottkyNordheim_integral": (
+        "MurphyGood1956 Integrals of transmission probability into Schottky-Nordheim barrier"
+    ),
 }
 
 
@@ -294,30 +329,30 @@ def evaluate_emission_model(
     F = np.asarray(F_Vpm, dtype=float)
     label = EMISSION_MODEL_PLOT_LABELS[canon]
 
-    if canon == "RD_schottky":
+    if canon == "RDSchottky":
         J = J_rld_schottky(F, T_K, phi_eV, A_R=A_R_Apm2K2)
         return EmissionModelResult(J_Apm2=J, diagnostics={"model": canon, "plot_label": label})
 
-    if canon == "rld_schottky_plus_mg":
+    if canon == "jensen2014_RDSchottky_MurphyGood_additive":
         J, n, J_th, J_fe = J_unified(F, T_K, phi_eV)
         return EmissionModelResult(
             J_Apm2=J, J_thermionic_Apm2=J_th, J_field_Apm2=J_fe, regime_n=n,
             diagnostics={"model": canon, "plot_label": label},
         )
 
-    if canon == "murphy_good_direct_reference":
+    if canon == "murphygood1956_SchottkyNordheim_integral":
         J = J_murphy_good_direct_reference(F, T_K, phi_eV, chemical_potential_eV=chemical_potential_eV)
         return EmissionModelResult(J_Apm2=J, diagnostics={"model": canon, "plot_label": label})
 
-    if canon == "rgtf_2019":
+    if canon == "jensen2019_RDSchottky_MurphyGood_transition":
         J = J_rgtf_2019(F, T_K, phi_eV, chemical_potential_eV=chemical_potential_eV)
         return EmissionModelResult(J_Apm2=J, diagnostics={"model": canon, "plot_label": label})
 
     if canon == "jensen_gtf_2007":
         raise NotImplementedError(
             f"{canon} is registered but not yet implemented (kept as historical/mathematical "
-            "comparison per the implementation guide -- rgtf_2019 is the preferred production "
-            "GTF model and is implemented above)."
+            "comparison per the implementation guide -- jensen2019_RDSchottky_MurphyGood_transition "
+            "is the preferred production GTF model and is implemented above)."
         )
 
     raise AssertionError(f"unreachable: canonical name {canon!r} not handled")
@@ -439,6 +474,87 @@ def _rgtf_N_raw(n: float, s: float) -> float:
 #: much stronger low-j pole) needs the fallback -- 0.05 separates the two correctly.
 _RGTF_POLE_GUARD_EPS = 0.05
 
+#: Outer radius of a smooth (C1) blend zone from _RGTF_POLE_GUARD_EPS out to this distance: for
+#: _RGTF_POLE_GUARD_EPS <= d < _RGTF_BLEND_OUTER_EPS, N(n,s) is a smoothstep-weighted mix of the
+#: exact energy-domain integral and the analytic series, instead of a hard switch at exactly
+#: _RGTF_POLE_GUARD_EPS. A hard switch there made N(n,s) -- and therefore J_rgtf_2019(F) -- both
+#: value- and slope-discontinuous in n (and hence in F, since n(F) is smooth), which was the
+#: original, most severe cause of large, unphysical-looking spikes in the finite-difference field
+#: sensitivity S_F=dlnJ/dlnF: a centered FD stencil straddling a real jump returns an enormous (in
+#: the limit, unbounded) slope that has nothing to do with the model's actual physics.
+#:
+#: Deliberately kept narrow (only 0.02 wider than the guard itself) so it stays well clear of both
+#: benchmarked worked examples in test_rgtf_2019.py -- n=12.0725 (d=0.0725, comfortably outside, so
+#: still 100% analytic as before) and n=1.9893 (d=0.0107, comfortably inside, so still 100%
+#: exact-integral as before). This width was checked empirically (not just reasoned about) against
+#: widening it further: at n=12.0725, _rgtf_exact_N_integral itself disagrees with the paper's own
+#: reference N by ~8.9% (the pure analytic series matches to ~0.2%), so blending more of the
+#: "exact" integral in at that point would pull an already-excellent analytic value *toward* a
+#: *less* accurate one -- confirming this deliberately narrow width, not just avoiding one, is the
+#: correct choice, not merely a cautious one.
+#:
+#: **On that ~8.9% gap itself** (checked again directly, not just re-asserted): it is *not* an
+#: integration-range-truncation effect -- widening _rgtf_exact_N_integral's bounds by up to 400x
+#: kT beyond the already-generous default leaves the result completely unchanged (confirmed
+#: numerically), so the integral's mass genuinely is already fully captured. More importantly,
+#: n=12.0725 has d_pole=0.075, just *outside* _RGTF_BLEND_OUTER_EPS -- meaning
+#: _rgtf_exact_N_integral is never actually invoked at this specific benchmarked point in
+#: production at all (pure analytic is always used there). So this ~8.9% number, while real and
+#: reproducible, does not describe the exact integral's accuracy anywhere it is actually used; it
+#: is retained here only as the reason not to widen the blend zone to *include* that point. The
+#: exact integral's absolute accuracy strictly inside the blend zone (0.05<=d<0.07) has no
+#: independent reference to check against (the paper gives no worked example there), so it cannot
+#: currently be verified beyond internal consistency (smoothness across the blend, already
+#: confirmed via the sensitivity-curve fix below) -- an honest, currently-irreducible gap, not
+#: something a bounds or tolerance change can close.
+#:
+#: Known residual limitation (found by direct numerical testing against this gun's actual T/phi
+#: over its real operating field range, not just the paper's isolated worked examples): when the
+#: gun operates deep in the thermionic-dominated regime (n<<1, as expected -- see this module's
+#: reduces-to-RD_schottky test and the README's own "gun is expected to be thermionic-dominated"),
+#: 1/n can be very large (tens to hundreds) and can change extremely fast with F (dn/dlnF up to
+#: ~10^2-10^3 in the tested range) -- so 1/n can sweep across an entire integer pole within a
+#: single finite-difference step (rel_step~1e-3 in F), even though this blend makes the underlying
+#: N(n,s) C1-smooth in n. A finite difference of a function with structure narrower than its own
+#: step size can still report a nonzero excursion at such points, regardless of how smooth the
+#: function is analytically.
+#:
+#: This *used* to be the dominant source of large (O(100)) spurious S_F spikes, traced to a
+#: second, independent numerical issue in _rgtf_exact_N_integral itself: its integrand (via
+#: _rgtf_theta) is only C1, not smoother, at the barrier-saddle energy, and scipy.integrate.quad's
+#: adaptive subdivision placed its nodes near that shifting kink inconsistently from one F to the
+#: next -- fixed by passing that kink's exact location via quad's own `points` argument (see
+#: _rgtf_exact_N_integral), which was confirmed (not just assumed) to remove essentially all of
+#: it: across this gun's realistic populated field range, S_F now stays within order-1 of
+#: RDSchottky/murphygood1956_SchottkyNordheim_integral/jensen2014_RDSchottky_MurphyGood_additive
+#: (down from O(100) before that fix) even at the handful of points step-doubling still flags as
+#: unstable (see test_jensen2019_transition_sensitivity_mostly_smooth_over_realistic_operating_range).
+#: Those remaining, much smaller excursions are, by design, still caught by
+#: compute_log_sensitivities' step-doubling check and excluded from
+#: plot_emission_model_sensitivities' plotted line and y-autoscale (shown only as a marker).
+#: Eliminating this last residual fully would need an adaptive-step/analytic-derivative
+#: sensitivity computation instead of a fixed-rel_step finite difference -- out of scope for this
+#: pass; see UPGRADE_PLAN.md. (An earlier version of this note additionally proposed "a
+#: wider/adaptive integration range for _rgtf_exact_N_integral" as a possible further fix, on the
+#: theory that its ~8.9% gap from the paper's n=12.0725 worked example was an integration-range
+#: truncation effect -- checked directly and confirmed wrong: widening the bounds by up to 400x kT
+#: leaves the result completely unchanged, and that benchmark point (d_pole=0.075) sits just
+#: outside _RGTF_BLEND_OUTER_EPS anyway, so the exact integral is never invoked there in
+#: production at all. See the note above this constant for the corrected account.)
+_RGTF_BLEND_OUTER_EPS = 0.07
+
+
+def _smoothstep_blend_weight(d: float, d_inner: float, d_outer: float) -> float:
+    """Weight on the exact-integral branch: 1 for d<=d_inner, 0 for d>=d_outer, a cubic smoothstep
+    (zero first derivative at both ends) in between -- so the blended N(n,s) is C1 in d (and hence
+    in n and F) at both band edges, not just continuous in value."""
+    if d <= d_inner:
+        return 1.0
+    if d >= d_outer:
+        return 0.0
+    t = (d - d_inner) / (d_outer - d_inner)
+    return 1.0 - (3.0 * t * t - 2.0 * t * t * t)
+
 
 def _nearest_positive_integer_distance(x: float) -> float:
     """Distance from x to the nearest integer >=1 -- there is no pole at 0 (Sigma(0)=1 exactly,
@@ -477,8 +593,9 @@ def _rgtf_exact_N_integral(F_Vpm: float, T_K: float, phi_eV: float, mu_eV: float
 
     -- note this is NOT _supply_function_N (which carries the extra (4 pi m_e kB T/h^3) prefactor
     needed to turn N(n,s) into an absolute current density via J=A_RLD T^2 N(n,s); Eq. 36 is the
-    bare dimensionless log-supply factor). Used only to compute the TF-regime correction factor
-    C_M (Eq. 37/38), per the paper's own prescription.
+    bare dimensionless log-supply factor). Used as the pole-adjacent replacement for N(n,s) itself
+    (smoothly blended with the analytic series near a pole -- see _RGTF_BLEND_OUTER_EPS), rather
+    than as a multiplicative correction factor on it.
     """
     beta_T_inv_eV = KB_EV_PER_K * T_K  # = 1/beta_T, in eV
 
@@ -488,7 +605,15 @@ def _rgtf_exact_N_integral(F_Vpm: float, T_K: float, phi_eV: float, mu_eV: float
         theta = _rgtf_theta(En_eV, F_Vpm, phi_eV, mu_eV)
         return log1p_exp * float(expit(-theta))
 
-    val, _ = quad(integrand, E_lo_eV, E_hi_eV, limit=200)
+    # theta(E) (via _rgtf_theta) is only C1, not smooth, at the barrier saddle En_eV=E_kink_eV --
+    # same numerical-noise mechanism as J_murphy_good_direct_reference's integrand (see its
+    # docstring note): telling quad about this exact break point makes the result stable to
+    # several more significant figures instead of jittering point-to-point in a way that shows up
+    # as spurious finite-difference sensitivity noise.
+    dphi_eV = float(delta_phi_schottky_eV(np.array([F_Vpm]))[0])
+    E_kink_eV = mu_eV + phi_eV - dphi_eV
+    quad_points = [E_kink_eV] if E_lo_eV < E_kink_eV < E_hi_eV else None
+    val, _ = quad(integrand, E_lo_eV, E_hi_eV, points=quad_points, **_TIGHT_QUAD_KWARGS)
     return val / beta_T_inv_eV
 
 
@@ -498,8 +623,12 @@ def J_rgtf_2019(
     phi_eV: float,
     chemical_potential_eV: Optional[float] = None,
 ) -> np.ndarray:
-    """Jensen 2019 reformulated GTF current density, J = A_RLD T^2 N(n,s) [Eq. 4], with the TF
-    regime correction factor C_M (Eq. 37/38) applied when |n-1| < 0.05.
+    """Jensen 2019 reformulated GTF current density, J = A_RLD T^2 N(n,s) [Eq. 4]. N(n,s) is the
+    analytic k=1-truncated series away from a pole (n or 1/n near a positive integer), smoothly
+    blended into the exact energy-domain integral (Eq. 36) near one (see _RGTF_BLEND_OUTER_EPS) --
+    this replaces an earlier hard-switch/multiplicative-correction scheme that made J_rgtf_2019(F)
+    both value- and slope-discontinuous in F, producing spurious spikes in its finite-difference
+    field sensitivity.
 
     `T_K` may be a scalar (one temperature for every F_Vpm element) or an array matching F_Vpm's
     shape (a per-element/per-cathode-cell temperature -- see J_murphy_good_direct_reference's
@@ -531,7 +660,16 @@ def J_rgtf_2019(
         # boundary-pinned (and therefore wrong) E_m -- guide Sec. 16.2 #7 requires every kernel to
         # stay finite over its full configured domain, not just the paper's own worked examples.
         for _widen in range(6):
-            res = minimize_scalar(neg_log_dJ, bounds=(E_lo_eV, E_hi_eV), method="bounded")
+            # xatol tightened from scipy's default (1e-5, an *absolute* eV tolerance) to 1e-9:
+            # confirmed empirically that 1e-5 is not tight enough relative to the tiny (~1e-3
+            # relative) perturbations compute_log_sensitivities uses for its finite-difference
+            # phi/F sensitivities -- E_m's own residual optimizer imprecision at the default
+            # tolerance was large enough, relative to the perturbation-induced shift in E_m, to
+            # show up as spurious few-times-1e-4-relative noise in S_phi (and, more weakly, S_F)
+            # even at F values with no nearby N(n,s) pole at all. At xatol=1e-9 this noise
+            # vanishes (confirmed to 6+ significant figures); the extra Brent iterations this
+            # costs are negligible next to this function's own per-call cost.
+            res = minimize_scalar(neg_log_dJ, bounds=(E_lo_eV, E_hi_eV), method="bounded", options={"xatol": 1e-9})
             E_m_eV = float(res.x)
             at_hi_edge = E_hi_eV - E_m_eV < 1.0e-6 * max(abs(E_hi_eV), 1.0)
             at_lo_edge = E_m_eV - E_lo_eV < 1.0e-6 * max(abs(E_lo_eV), 1.0)
@@ -547,29 +685,34 @@ def J_rgtf_2019(
         theta_m = _rgtf_theta(E_m_eV, F, phi_eV, mu_eV)
         s = theta_m + beta_F_m * (E_m_eV - mu_eV)
 
-        if _rgtf_n_near_integer_pole(n):
-            # The analytic k=1-truncated series is unreliable here (see _rgtf_n_near_integer_pole);
-            # use the exact energy-domain integral (Eq. 36) as N(n,s) directly rather than as a
-            # multiplicative correction on an already-unreliable analytic value.
-            N_ns = _rgtf_exact_N_integral(F, T_i, phi_eV, mu_eV, E_lo_eV, E_hi_eV)
-            C_M = 1.0
+        d_pole = min(_nearest_positive_integer_distance(n), _nearest_positive_integer_distance(1.0 / n))
+        if d_pole < _RGTF_BLEND_OUTER_EPS:
+            # The analytic k=1-truncated series is unreliable near a pole (see
+            # _rgtf_n_near_integer_pole's docstring); blend smoothly into the exact energy-domain
+            # integral (Eq. 36) rather than switching to it discontinuously at a hard radius (see
+            # _RGTF_BLEND_OUTER_EPS docstring for why the hard switch produced spurious sensitivity
+            # spikes). Fully exact for d<=_RGTF_POLE_GUARD_EPS, fully analytic for
+            # d>=_RGTF_BLEND_OUTER_EPS, smoothstep-blended in between.
+            w_exact = _smoothstep_blend_weight(d_pole, _RGTF_POLE_GUARD_EPS, _RGTF_BLEND_OUTER_EPS)
+            N_analytic = _rgtf_N(n, s)
+            if w_exact >= 1.0:
+                N_ns = _rgtf_exact_N_integral(F, T_i, phi_eV, mu_eV, E_lo_eV, E_hi_eV)
+            elif w_exact <= 0.0:
+                N_ns = N_analytic
+            else:
+                N_exact = _rgtf_exact_N_integral(F, T_i, phi_eV, mu_eV, E_lo_eV, E_hi_eV)
+                N_ns = w_exact * N_exact + (1.0 - w_exact) * N_analytic
         else:
             N_ns = _rgtf_N(n, s)
-            if abs(n - 1.0) < 0.05:
-                N_exact = _rgtf_exact_N_integral(F, T_i, phi_eV, mu_eV, E_lo_eV, E_hi_eV)
-                C_M = N_exact / N_ns if N_ns > 0.0 else 1.0
-                C_M = float(np.clip(C_M, 0.1, 10.0))
-            else:
-                C_M = 1.0
 
-        J_val = A_RICH * (T_i ** 2) * N_ns * C_M
+        J_val = A_RICH * (T_i ** 2) * N_ns
         if np.isfinite(J_val) and J_val >= 0.0:
             J[i] = J_val
         else:
             import warnings
 
             warnings.warn(
-                f"rgtf_2019 produced a non-physical value (N={N_ns!r}, C_M={C_M!r}) at "
+                f"rgtf_2019 produced a non-physical value (N={N_ns!r}) at "
                 f"F={F:.3e} V/m, T={T_i} K, phi={phi_eV} eV, mu={mu_eV} eV -- likely a field far "
                 "outside this model's validated regime (y(mu)=dphi(F)/phi close to or above 1). "
                 "Clamped to 0; treat this field point as unreliable.",

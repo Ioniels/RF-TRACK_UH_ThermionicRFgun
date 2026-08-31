@@ -25,6 +25,7 @@ import warnings
 from dataclasses import dataclass
 from typing import Optional
 
+import matplotlib as mpl
 import matplotlib.patheffects as patheffects
 import matplotlib.pyplot as plt
 import numpy as np
@@ -53,13 +54,17 @@ COLOR_LOST = "tab:green"
 #: Per-model color convention (implementation guide Sec. 4.1), used consistently across every
 #: emission-model figure (history overlay, sensitivity panels, comparison curves) so a reader
 #: learns a model's color once. Solid lines for fast production models; the direct reference uses
-#: a dark dashed line (guide's own convention) rather than a distinct color.
+#: a dark dashed line (guide's own convention) rather than a distinct color. Keyed by canonical
+#: model name (rf_gun.emission_models.EMISSION_MODEL_NAMES); old pre-refactor names still resolve
+#: to the same colors via EMISSION_MODEL_ALIASES, so callers should look up
+#: `EMISSION_MODEL_COLORS[canonical_emission_model_name(m)]` rather than indexing by a possibly-old
+#: name directly.
 EMISSION_MODEL_COLORS = {
-    "RD_schottky": "tab:blue",
-    "rld_schottky_plus_mg": "tab:orange",
+    "RDSchottky": "tab:blue",
+    "jensen2014_RDSchottky_MurphyGood_additive": "tab:orange",
     "jensen_gtf_2007": "tab:purple",
-    "rgtf_2019": "tab:green",
-    "murphy_good_direct_reference": "tab:red",
+    "jensen2019_RDSchottky_MurphyGood_transition": "tab:green",
+    "murphygood1956_SchottkyNordheim_integral": "tab:red",
 }
 
 
@@ -67,12 +72,16 @@ def get_default_density_cmap() -> LinearSegmentedColormap:
     """Return the default plasma colormap with transparent white at lowest density.
 
     The implementation is intentionally explicit and stable:
-    - starts from ``plt.cm.get_cmap('plasma', 256)``
+    - starts from ``matplotlib.colormaps['plasma'].resampled(256)``
     - copies the 256 RGBA colors
     - replaces the first color with ``[1, 1, 1, 0]``
     - returns ``LinearSegmentedColormap.from_list('plasma_with_white', new_colors)``
+
+    Uses `matplotlib.colormaps[name]` (the API since Matplotlib 3.7) rather than the removed
+    `plt.cm.get_cmap(name, N)` -- that call was fully removed (not just deprecated) in Matplotlib
+    3.9, so this function raised AttributeError on any modern Matplotlib install.
     """
-    base = plt.cm.get_cmap("plasma", 256)
+    base = mpl.colormaps["plasma"].resampled(256)
     new_colors = np.array(base(np.linspace(0.0, 1.0, 256)), copy=True)
     new_colors[0] = [1.0, 1.0, 1.0, 0.0]
     return LinearSegmentedColormap.from_list("plasma_with_white", new_colors)
@@ -86,7 +95,7 @@ def get_lost_cmap() -> LinearSegmentedColormap:
     and `PlotStyleConfig.backward_cmap`/`"binary"` (used for backward-loss highlighting) -- this
     is the third, independent color channel for `exclude_lost=False` highlighting.
     """
-    base = plt.cm.get_cmap("Greens", 256)
+    base = mpl.colormaps["Greens"].resampled(256)
     new_colors = np.array(base(np.linspace(0.0, 1.0, 256)), copy=True)
     new_colors[0] = [1.0, 1.0, 1.0, 0.0]
     return LinearSegmentedColormap.from_list("greens_with_white", new_colors)

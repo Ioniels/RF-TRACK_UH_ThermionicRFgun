@@ -95,6 +95,15 @@ class VolumeBuildParams:
     cathode_backstop_enabled: bool = False
     cathode_backstop_thickness_mm: float = DEFAULT_CATHODE_BACKSTOP_THICKNESS_MM
 
+    @property
+    def applied_deflection_current_A(self) -> float:
+        """The current actually applied to this run's tracking: `deflection_current_A` when the
+        magnet is enabled, exactly `0.0` otherwise. Use this (never `deflection_current_A` alone)
+        anywhere a figure, log line, or saved metadata field claims to show what field a run
+        experienced -- `deflection_current_A` alone is only the *configured* value, which stays
+        whatever it was set to even when the magnet is off."""
+        return float(self.deflection_current_A) if self.deflection_enabled else 0.0
+
 
 @dataclass(frozen=True)
 class ScreenBuildParams:
@@ -175,29 +184,39 @@ def _attach_beam_loading_sw(rft, FM, p: VolumeBuildParams):
 
     Q_scalar = float(p.bl_Q_loaded)
     rQ_scalar = float(p.bl_r_over_q_ohm_per_m)
-    Q_arr = np.array([Q_scalar], dtype=float)
-    rQ_arr = np.array([rQ_scalar], dtype=float)
 
-    ctor_errors = []
-    bl_obj = None
-    signatures = [
-        lambda: rft.BeamLoadingSW(FM, Q_scalar, rQ_scalar, int(p.bl_ncells), float(ME_MEV), -1.0, float(tinj_tau)),
-        lambda: rft.BeamLoadingSW(FM, Q_scalar, rQ_scalar, float(ME_MEV), -1.0, float(tinj_tau)),
-        lambda: rft.BeamLoadingSW(FM, Q_scalar, rQ_scalar, int(p.bl_ncells), float(ME_MEV), -1.0),
-        lambda: rft.BeamLoadingSW(FM, Q_scalar, rQ_scalar, float(ME_MEV), -1.0),
-        lambda: rft.BeamLoadingSW(FM, Q_arr, rQ_arr, int(p.bl_ncells), float(ME_MEV), -1.0, float(tinj_tau)),
-        lambda: rft.BeamLoadingSW(FM, Q_arr, rQ_arr, int(p.bl_ncells), float(ME_MEV), -1.0),
-        lambda: rft.BeamLoadingSW(FM, Q_arr, rQ_arr, int(p.bl_ncells)),
-    ]
-    for make in signatures:
-        try:
-            bl_obj = make()
-            break
-        except Exception as exc:
-            ctor_errors.append(str(exc))
-    if bl_obj is None:
-        msg = " | ".join(ctor_errors[:3])
-        raise RuntimeError(f"Could not construct BeamLoadingSW with attempted signatures. Details: {msg}")
+    # RF-Track 2.7.0's BeamLoadingSW has exactly one constructor -- confirmed directly against the
+    # installed binding (`help(RF_Track.BeamLoadingSW.__init__)` reports a single signature,
+    # `__doc__` shows no SWIG overload block) and matches the 2.7 manual's documented
+    # `BeamLoadingSW(SWS, Q, r_Q, Ncells, mass, q, tinj)`, with `tinj` already in units of the
+    # filling-time constant `tau=2Q/omega` (computed above). Do not fall back to guessed
+    # alternative signatures: a constructor call that "succeeds" with the wrong argument count for
+    # this RF-Track version would silently misassign quantities (e.g. mass where Ncells belongs)
+    # rather than fail -- version-gate explicitly instead of catching and retrying.
+    rf_track_version = str(getattr(rft, "version", "unknown"))
+    try:
+        bl_obj = rft.BeamLoadingSW(FM, Q_scalar, rQ_scalar, int(p.bl_ncells), float(ME_MEV), -1.0, float(tinj_tau))
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not construct BeamLoadingSW(SWS, Q, r_Q, Ncells, mass, q, tinj) -- the sole "
+            f"documented RF-Track 2.7 signature -- against the installed RF-Track version "
+            f"{rf_track_version!r}. This binding may require a different signature; do not guess "
+            f"one, update this call site for the detected version instead. Original error: {exc}"
+        ) from exc
+
+    # Verify the constructed element reports physically sane cavity parameters before trusting it
+    # (manual A4: "Verify Lcell, tfill, tinj, TT1, and TT2 after construction").
+    for getter_name in ("get_Lcell", "get_tfill", "get_tinj", "get_TT1", "get_TT2"):
+        getter = getattr(bl_obj, getter_name, None)
+        if not callable(getter):
+            raise RuntimeError(f"RF-Track {rf_track_version} BeamLoadingSW has no {getter_name}().")
+        value = np.asarray(getter(), dtype=float)
+        if not np.isfinite(value).all():
+            raise RuntimeError(
+                f"BeamLoadingSW.{getter_name}() returned non-finite value(s) after construction "
+                f"(Q_loaded={Q_scalar}, r/Q={rQ_scalar}, ncells={int(p.bl_ncells)}, "
+                f"tinj/tau={tinj_tau:.4e}); refusing to attach a mis-configured collective effect."
+            )
 
     FM.add_collective_effect(bl_obj)
 
@@ -355,10 +374,18 @@ def build_volume(
     V.odeint_epsabs = float(p.ode_epsabs)
 
     # NOTE: the manual (Sec. 4.1.4) recommends set_s0()/set_s1() only after adding every element,
-    # since adding one auto-resizes s0/s1. That ordering was tried here and, on a real production
-    # run (not synthetic), made the phase scan converge on a spurious crest with every particle
-    # lost there (NaN mean pz) -- root cause not understood. Reverted to set_s0/set_s1 BEFORE
-    # adding the dynamic aperture/deflection field, this function's original, validated order.
+    # since adding one auto-resizes s0/s1. That ordering was tried previously and, on a real
+    # production run, made the phase scan converge on a spurious crest with every particle lost
+    # there (NaN mean pz). A direct A/B regression against the real field maps (RF field + dynamic
+    # aperture + cathode backstop, SC/mirror/beam-loading/deflection/screens off, matching
+    # tests/test_s0_s1_ordering.py) found the two orderings give bit-identical tracked outcomes
+    # across a small phase scan -- so the divergence is not caused by this base configuration and
+    # must involve one of the elements not exercised there (space charge, mirror, beam loading,
+    # deflection UserField, or screens, alone or in combination, at production particle counts).
+    # Keeping the known-safe order (BEFORE adding the dynamic aperture/backstop/deflection) until
+    # someone reproduces the original divergence with the full production Volume and finds the
+    # actual root cause -- this is not "unresolved because untested," it is "resolved for the
+    # tested configuration, open for the rest."
     s0_m = float(p.z_min_m)
     if p.cathode_backstop_enabled:
         # Extend s0 backward so the backstop's z<0 span is inside the Volume's active region.

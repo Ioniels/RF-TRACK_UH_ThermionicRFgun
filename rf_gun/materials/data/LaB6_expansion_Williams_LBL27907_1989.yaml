@@ -1,0 +1,24 @@
+dataset_id: LaB6_expansion_Williams_LBL27907_1989
+material: LaB6
+property: linear_thermal_expansion_coefficient
+quantity_symbol: alpha_L
+value_per_K: 11.5e-6
+status: sensitivity_value_95pct_dense_specimen_not_exact_single_crystal_law
+
+reference:
+  key: Williams_LBL27907_1989
+  title: Thermal expansion and related high-temperature properties of LaB6 (Report LBL-27907, 1989)
+  year: 1989
+  url: null
+
+uncertainty:
+  type: relative_model
+  value: 0.20
+
+notes: >
+  Linear thermal-expansion-coefficient SENSITIVITY value for a 95%-dense high-temperature
+  polycrystalline specimen, not an exact single-crystal law (plan Sec. 5.2's explicit caveat,
+  reconfirmed unchanged in plan Sec. 19.3). Used only for the optional density correction
+  rho(T) = rho(T0) * exp[-3 * alpha_L * (T - T0)]
+  in ThermalComponent.rho_kg_m3(T, apply_expansion=True); disabled by default (plan Sec. 5.2:
+  "Density correction ... disabled until an expansion set is explicitly selected").

@@ -1,0 +1,27 @@
+dataset_id: LaB6_optical_Kowalczyk_IJT035-1538_2014
+material: LaB6
+property: spectral_emissivity_absorptivity
+quantity_symbol: epsilon_lambda
+status: spectral_anchor_points_not_total_hemispherical_emissivity
+
+anchors_nm:
+  550: 0.687
+  1064: 0.713
+
+reference:
+  key: Kowalczyk_IJT035_1538_2014
+  title: Kowalczyk, Int. J. Thermophys. 35, 1538 (2014) -- spectral emissivity/absorptivity of a LaB6 cathode surface
+  year: 2014
+  url: null
+
+uncertainty:
+  type: relative_model
+  value: 0.05
+
+notes: >
+  Two discrete-wavelength anchors only: 0.687 near 550 nm (visible-diagnostic band) and 0.713 at
+  1064 nm (Nd:YAG pyrometry/laser band) on the UH cathode. Per plan Sec. 5.5: do NOT substitute
+  these anchors directly for total hemispherical emissivity in a radiative-loss boundary
+  condition -- they constrain the spectral model and the synthetic UH optical diagnostic response
+  only. The effective radiative-loss model used by a thermal solver must carry its own separate
+  dataset name and uncertainty (plan Sec. 5.5), not silently reuse these two points.

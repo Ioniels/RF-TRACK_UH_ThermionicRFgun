@@ -1,0 +1,41 @@
+dataset_id: LaB6_density_Ivashchenko_PhysicaB531_2018
+material: LaB6
+property: reference_density
+quantity_symbol: rho0
+value_kg_m3: 4720.0
+status: reference_value_room_or_near_room_temperature
+
+reference:
+  key: Ivashchenko_PhysicaB531_2018
+  title: >
+    LaB6 physical/electronic-structure properties (Ivashchenko et al., Physica B 531, 2018) --
+    density reference value. Title text inferred from this project's dataset_id naming
+    convention and manual_references/ filename ("Ivashchenko 2018.pdf"); not independently
+    re-transcribed from the PDF's own title page in this implementation pass.
+  year: 2018
+  url: null
+  notes: >
+    Attribution correction per plan Sec. 19.3: this project's prior LaB6_heating note (p.12)
+    attributes rho0=4.72e3 kg/m3 to BOTH Ivashchenko 2018 and Adachi 2009; the plan's Sec. 5.2
+    summary table cites only Ivashchenko. Adachi 2009 is recorded as a co-source below so this
+    file matches the note's own attribution rather than the plan table's abbreviated version.
+
+co_reference:
+  key: Adachi_2009
+  title: >
+    LaB6 density co-source (Adachi et al., 2009); title text inferred from manual_references/
+    filename ("Adachi 2009.pdf") only, not independently re-verified against the PDF in this
+    pass.
+  year: 2009
+  url: null
+
+uncertainty:
+  type: relative_model
+  value: 0.02
+
+notes: >
+  Reference density near room temperature for solid (polycrystalline/sintered) LaB6. Treated as
+  a constant unless the optional thermal-expansion correction
+  rho(T) = rho(T0) * exp[-3 * integral(alpha_L(T') dT', T0, T)]
+  (LaB6_expansion_Williams_LBL27907_1989.yaml) is explicitly enabled -- disabled by default per
+  plan Sec. 5.2.

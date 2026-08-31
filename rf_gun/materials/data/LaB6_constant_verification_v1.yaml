@@ -1,0 +1,22 @@
+dataset_id: LaB6_constant_verification_v1
+material: LaB6
+property: thermal_bundle_constants
+status: verification_only
+
+values:
+  rho_kg_m3: 4720.0
+  cp_J_kg_K: 850.0
+  k_W_m_K: 45.0
+
+reference:
+  key: internal_verification_v1
+  title: Internal constant-property verification set (this project; not a literature source)
+  year: 2026
+  url: null
+
+notes: >
+  Constant rho, cp, k round test values for analytic Python-COMSOL cross-checks (plan Sec. 5.2).
+  NEVER a production physics set -- do not cite these numbers as a physical property of LaB6;
+  they exist solely so a Python solver and a COMSOL model can be verified against each other (or
+  against a closed-form analytic solution) using constant coefficients, independent of any real
+  material-property uncertainty.

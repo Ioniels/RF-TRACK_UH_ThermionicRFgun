@@ -4,13 +4,24 @@ and the physics assumptions behind it (field-free drift behind the cathode, mome
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence
 
 import numpy as np
 
 from ..back_bombardment import BackBombardmentData, kinetic_energy_joules, screen_trajectory
+from ..cathode_geometry import (
+    SURFACE_CATHODE_BEVEL,
+    SURFACE_CATHODE_FLAT,
+    SURFACE_CATHODE_SIDE,
+    SURFACE_HOLDER,
+    SURFACE_UNKNOWN,
+)
+from ..constants import q_e
 from .phase_space import _phase_space_panel
-from .style import DEFAULT_PLOT_STYLE, COLOR_SECONDARY
+from .style import DEFAULT_PLOT_STYLE, COLOR_SECONDARY, add_cathode_boundary_circle, get_default_density_cmap
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, avoids import-order/circularity concerns
+    from ..studies.back_bombardment_macropulse import BackBombardmentMacropulseStudy
 
 
 def _robust_range(*arrays: np.ndarray, lo_pct: float = 1.0, hi_pct: float = 99.0, pad_frac: float = 0.08):
@@ -400,3 +411,372 @@ def plot_back_bombardment_power_density_vs_time(
         "total_J": total_j,
         "cathode_area_mm2": cathode_area_mm2,
     }
+
+
+# ==================================================================================================
+# Figure A -- back-bombardment source qualification (implementation plan Sec. 12, "Figure A").
+#
+# Operates on the NEW v2 event schema (`rf_gun.back_bombardment_events.BackBombardmentEvents`) and
+# the BB0 volumetric source (`rf_gun.back_bombardment_deposition.BackBombardmentHeatSource`), via a
+# `rf_gun.studies.back_bombardment_macropulse.BackBombardmentMacropulseStudy` -- a DIFFERENT,
+# newer/richer object than the legacy `BackBombardmentData` every function above this point
+# consumes. Nothing above this point is modified; this is purely additive, exactly as the plan's
+# Work Package 4 requires ("legacy_ballistic"/the old figures stay available for comparison).
+# ==================================================================================================
+
+#: Surface-zone -> (color, marker, short label) for every panel below that needs a consistent,
+#: shared per-zone visual convention across the whole figure (plan Sec. 3.3's numeric zone codes,
+#: human-readable labels reused from `rf_gun.cathode_geometry.SURFACE_LABELS`).
+_ZONE_STYLE: Dict[int, Dict[str, str]] = {
+    int(SURFACE_CATHODE_FLAT): {"color": "tab:blue", "marker": "o", "label": "flat"},
+    int(SURFACE_CATHODE_BEVEL): {"color": "tab:orange", "marker": "^", "label": "bevel"},
+    int(SURFACE_CATHODE_SIDE): {"color": "tab:green", "marker": "s", "label": "side"},
+    int(SURFACE_HOLDER): {"color": "tab:red", "marker": "x", "label": "holder"},
+    int(SURFACE_UNKNOWN): {"color": "gray", "marker": ".", "label": "unknown"},
+}
+
+
+def _zone_style(code: int) -> Dict[str, str]:
+    return _ZONE_STYLE.get(int(code), {"color": "black", "marker": ".", "label": f"code {int(code)}"})
+
+
+def _weighted_percentile(values: np.ndarray, weights: np.ndarray, percentiles: Sequence[float]) -> np.ndarray:
+    """Weighted percentile(s) of `values` (weighted by `weights`), matching
+    `_weighted_range`'s own cumulative-weight interpolation method above but returning the
+    percentile value(s) directly rather than a padded axis range. Used for Figure A's "simple
+    statistical bands" (plan Sec. 12, item 4) -- a 16th/50th/84th-percentile weighted spread, not a
+    full bootstrap (deliberately out of scope for this pass, per the task description).
+
+    Returns `nan` for every requested percentile if there is no finite, non-negative-weight data.
+    """
+    v = np.asarray(values, dtype=float)
+    w = np.asarray(weights, dtype=float)
+    finite = np.isfinite(v) & np.isfinite(w) & (w >= 0.0)
+    v, w = v[finite], w[finite]
+    pcts = np.asarray(percentiles, dtype=float)
+    if v.size == 0 or float(np.sum(w)) <= 0.0:
+        return np.full(pcts.shape, np.nan)
+    order = np.argsort(v)
+    v_sorted, w_sorted = v[order], w[order]
+    cum_w = np.cumsum(w_sorted) / np.sum(w_sorted)
+    return np.interp(pcts / 100.0, cum_w, v_sorted)
+
+
+def _fmt_charge_energy(value: Optional[float]) -> str:
+    """`None` -> `"n/a"` (an accounting key genuinely absent from `events.accounting`); a finite
+    float -> scientific notation via `_sci`; anything else stringified as a defensive fallback."""
+    if value is None:
+        return "n/a"
+    try:
+        return _sci(float(value))
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _panel_impact_footprint(ax, events, geometry) -> None:
+    """Figure A, panel 1: weighted impacts with flat-face circle, bevel outer edge, holder
+    boundary, and a center-of-energy marker, colored/shaped by surface zone (plan Sec. 12, item 1).
+    """
+    x_mm = np.asarray(events.x_hit_m, dtype=float) * 1.0e3
+    y_mm = np.asarray(events.y_hit_m, dtype=float) * 1.0e3
+    w = np.asarray(events.macro_weight_electrons, dtype=float)
+    codes = np.asarray(events.surface_code)
+    w_max = float(np.max(w)) if w.size else 0.0
+
+    for code in sorted(int(c) for c in np.unique(codes)):
+        style = _zone_style(code)
+        m = codes == code
+        if not np.any(m):
+            continue
+        sizes = 8.0 + 40.0 * (w[m] / w_max if w_max > 0.0 else 0.0)
+        ax.scatter(
+            x_mm[m], y_mm[m], s=sizes, c=style["color"], marker=style["marker"], alpha=0.7,
+            edgecolors="none", label=f"{style['label']} (N={int(np.sum(m))})",
+        )
+
+    theta = np.linspace(0.0, 2.0 * np.pi, 256)
+    ax.plot(
+        geometry.flat_radius_mm * np.cos(theta), geometry.flat_radius_mm * np.sin(theta),
+        "k--", lw=1.2, label="flat edge",
+    )
+    ax.plot(
+        geometry.bevel_outer_radius_mm * np.cos(theta), geometry.bevel_outer_radius_mm * np.sin(theta),
+        "k-", lw=1.2, label="bevel outer edge",
+    )
+    ax.plot(
+        geometry.holder_outer_radius_mm * np.cos(theta), geometry.holder_outer_radius_mm * np.sin(theta),
+        color="gray", ls=":", lw=1.2, label="holder boundary",
+    )
+
+    E = np.asarray(events.incident_energy_J, dtype=float)
+    if np.sum(E) > 0.0:
+        cx = float(np.sum(x_mm * E) / np.sum(E))
+        cy = float(np.sum(y_mm * E) / np.sum(E))
+        ax.plot(cx, cy, marker="*", ms=16, color="gold", mec="black", mew=1.0, ls="none",
+                 label="center of energy", zorder=10)
+
+    ax.set_xlabel(r"$x\,(\mathrm{mm})$")
+    ax.set_ylabel(r"$y\,(\mathrm{mm})$")
+    ax.set_aspect("equal")
+    ax.set_title("Impact footprint and zones")
+    ax.legend(fontsize=6, loc="upper right", framealpha=0.85)
+
+    Q_C = float(np.sum(w) * q_e)
+    ax.text(
+        0.02, 0.02,
+        f"Population: all qualified events (N={events.n_events}); "
+        f"Q={_sci(Q_C)} C, E_incident={_sci(float(np.sum(E)))} J",
+        transform=ax.transAxes, fontsize=5.5, va="bottom",
+    )
+
+
+def _panel_deposited_energy_density(ax, fig, heat_source, geometry) -> None:
+    """Figure A, panel 2: deposited-energy density map (plan Sec. 12, item 2).
+
+    DESIGN DECISION (the plan explicitly leaves this to the implementer -- see this figure's
+    top-level docstring): rather than a separate true-area-corrected bevel panel or an azimuth-
+    unwrapped `(phi, arc length)` view, this is ONE combined `(x, y)` map spanning both the flat
+    face and the bevel annulus on the SAME uniform Cartesian grid `heat_source` already uses -- the
+    plan's own explicitly sanctioned "simpler-but-correct first implementation" of a "companion
+    inset/unwrapped bevel map". The bevel's true surface area exceeds its projected in-plane cell
+    area by `1/cos(bevel_angle_deg)` (`CathodeGeometry.bevel_true_area_mm2`); the color scale here
+    is per PROJECTED cell area, NOT area-corrected for the bevel -- stated explicitly in the
+    panel's own annotation below so it is never mistaken for an area-corrected map.
+    """
+    q_xy = np.sum(np.asarray(heat_source.q_layer_J, dtype=float), axis=2)  # (nx, ny), all layers
+    x_mm = np.asarray(heat_source.x_centers_m, dtype=float) * 1.0e3
+    y_mm = np.asarray(heat_source.y_centers_m, dtype=float) * 1.0e3
+    mask = np.asarray(heat_source.cathode_footprint_mask, dtype=bool)
+    q_masked = np.where(mask, q_xy, np.nan)
+
+    cmap = get_default_density_cmap()
+    im = ax.pcolormesh(x_mm, y_mm, q_masked.T, cmap=cmap, shading="nearest")
+    fig.colorbar(im, ax=ax, label=r"$E_{\rm dep}\,(\mathrm{J/cell})$", fraction=0.046)
+    add_cathode_boundary_circle(ax, geometry.flat_radius_mm, color="black", ls="--", label="flat edge")
+    add_cathode_boundary_circle(
+        ax, geometry.bevel_outer_radius_mm, color="black", ls="-", label="bevel outer edge"
+    )
+    ax.set_xlabel(r"$x\,(\mathrm{mm})$")
+    ax.set_ylabel(r"$y\,(\mathrm{mm})$")
+    ax.set_aspect("equal")
+    ax.set_title("Deposited-energy density (flat + bevel, one combined map)")
+    ax.legend(fontsize=5.5, loc="upper right", labelcolor="black", framealpha=0.85)
+
+    bevel_annulus_mm2 = float(np.pi * (geometry.bevel_outer_radius_mm**2 - geometry.flat_radius_mm**2))
+    area_factor = 1.0 / float(np.cos(geometry.bevel_angle_rad))
+    E_inc = float(heat_source.total_incident_energy_J)
+    E_dep = float(heat_source.total_deposited_energy_J)
+    note = (
+        f"E_incident={_sci(E_inc)} J, E_deposited={_sci(E_dep)} J (all LaB6 zones, all depth "
+        f"layers). NOT area-corrected: true bevel area "
+        f"({geometry.bevel_true_area_mm2:.4f} mm$^2$) = {area_factor:.3f}x its projected annulus "
+        f"area ({bevel_annulus_mm2:.4f} mm$^2$) -- bevel color values are per PROJECTED cell area."
+    )
+    ax.text(0.0, -0.20, note, transform=ax.transAxes, fontsize=5.3, va="top", wrap=True)
+
+
+def _panel_return_phase_energy(ax, events) -> None:
+    """Figure A, panel 3: `K_hit` vs. `t_hit_rf`, weighted by physical charge/energy and colored
+    by zone (plan Sec. 12, item 3). Uses the true impact time `t_hit_rf_s` (rather than the
+    emission RF phase) since it is the more directly informative "return phase" quantity for this
+    panel's purpose -- documented here per the task's "your call, document it" allowance.
+    """
+    t_ns = np.asarray(events.t_hit_rf_s, dtype=float) * 1.0e9
+    K_keV = np.asarray(events.kinetic_energy_eV, dtype=float) / 1.0e3
+    w = np.asarray(events.macro_weight_electrons, dtype=float)
+    codes = np.asarray(events.surface_code)
+    w_max = float(np.max(w)) if w.size else 0.0
+
+    for code in sorted(int(c) for c in np.unique(codes)):
+        style = _zone_style(code)
+        m = codes == code
+        if not np.any(m):
+            continue
+        sizes = 8.0 + 40.0 * (w[m] / w_max if w_max > 0.0 else 0.0)
+        ax.scatter(
+            t_ns[m], K_keV[m], s=sizes, c=style["color"], marker=style["marker"], alpha=0.7,
+            edgecolors="none", label=style["label"],
+        )
+
+    ax.set_xlabel(r"$t_{\rm hit,RF}\,(\mathrm{ns})$")
+    ax.set_ylabel(r"$K_{\rm hit}\,(\mathrm{keV})$")
+    ax.set_title("Return phase vs. impact energy")
+    ax.legend(fontsize=6, loc="best")
+    ax.grid(alpha=0.3)
+    ax.text(
+        0.02, 0.98,
+        f"Population: all qualified events (N={events.n_events}); marker size ~ "
+        "macro_weight_electrons",
+        transform=ax.transAxes, fontsize=5.5, va="top",
+    )
+
+
+def _panel_energy_incidence_distributions(ax, events) -> None:
+    """Figure A, panel 4: zone-separated weighted energy spectrum with simple statistical bands
+    (plan Sec. 12, item 4).
+
+    DESIGN DECISION: the incidence-angle distribution is folded into a compact per-zone weighted
+    16th/50th/84th-percentile text summary on this SAME axes, rather than a second full histogram
+    panel -- this keeps Figure A a literal 2x3 = six-panel grid (plan Sec. 12's own "2x3 layout"
+    framing) instead of nesting sub-grids that would multiply the number of visible panels beyond
+    six. The energy spectrum is the primary plotted content; both quantities are still
+    zone-separated and weighted, and both carry a statistical-band summary (shaded 16-84th
+    percentile for energy, numeric 16/50/84th percentile for angle).
+    """
+    codes = np.asarray(events.surface_code)
+    w = np.asarray(events.macro_weight_electrons, dtype=float)
+    K_keV = np.asarray(events.kinetic_energy_eV, dtype=float) / 1.0e3
+    theta_deg = np.degrees(np.asarray(events.incidence_angle_rad, dtype=float))
+
+    stat_lines = []
+    for code in sorted(int(c) for c in np.unique(codes)):
+        style = _zone_style(code)
+        m = codes == code
+        if not np.any(m):
+            continue
+        counts, edges = np.histogram(K_keV[m], bins=20, weights=w[m])
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        ax.step(centers, counts, where="mid", color=style["color"], label=style["label"])
+
+        p16, p50, p84 = _weighted_percentile(K_keV[m], w[m], [16.0, 50.0, 84.0])
+        if np.isfinite(p16) and np.isfinite(p84):
+            ax.axvspan(p16, p84, color=style["color"], alpha=0.12)
+        if np.isfinite(p50):
+            ax.axvline(p50, color=style["color"], ls=":", lw=1)
+
+        t16, t50, t84 = _weighted_percentile(theta_deg[m], w[m], [16.0, 50.0, 84.0])
+        stat_lines.append(f"{style['label']}: $\\theta$={t50:.1f}$^\\circ$ [{t16:.1f},{t84:.1f}]")
+
+    ax.set_xlabel(r"$K_{\rm hit}\,(\mathrm{keV})$")
+    ax.set_ylabel("weighted counts (electrons)")
+    ax.set_title("Energy spectrum by zone (shaded: weighted 16-84th pct)")
+    ax.legend(fontsize=6, loc="upper right")
+    ax.text(
+        0.98, 0.55, "Incidence angle, 16/50/84th weighted pct:\n" + "\n".join(stat_lines),
+        transform=ax.transAxes, fontsize=5.3, va="top", ha="right",
+    )
+
+
+def _panel_origin_to_impact(ax, events) -> None:
+    """Figure A, panel 5: emission `(x, y)` colored by a per-event energy proxy for deposited
+    energy (plan Sec. 12, item 5).
+
+    DESIGN DECISION: colored by each event's own `incident_energy_J` -- the exact per-event
+    deposited energy exists only aggregated onto the spatial/depth grid
+    (`heat_source.q_layer_J`), not per event (a single event's energy spreads across several depth
+    layers along its own CSDA path, see `rf_gun.back_bombardment_deposition`'s module docstring),
+    so `incident_energy_J` is used here as the best available per-event proxy and is labeled as
+    such, per the task's "your call, document it" allowance.
+    """
+    x_emit_mm = np.asarray(events.x_emit_m, dtype=float) * 1.0e3
+    y_emit_mm = np.asarray(events.y_emit_m, dtype=float) * 1.0e3
+    color_val = np.asarray(events.incident_energy_J, dtype=float)
+
+    sc = ax.scatter(x_emit_mm, y_emit_mm, c=color_val, cmap=get_default_density_cmap(), s=24, edgecolors="none")
+    fig = ax.figure
+    fig.colorbar(sc, ax=ax, label=r"$E_{\rm incident}\,(\mathrm{J})$ per event", fraction=0.046)
+    ax.set_xlabel(r"$x_{\rm emit}\,(\mathrm{mm})$")
+    ax.set_ylabel(r"$y_{\rm emit}\,(\mathrm{mm})$")
+    ax.set_title("Emission origin, colored by incident energy")
+    ax.set_aspect("equal")
+    ax.text(
+        0.0, -0.20,
+        "Colored by per-event incident_energy_J (proxy for deposited energy -- exact per-event "
+        "deposited energy exists only aggregated onto the spatial/depth grid, not per event).",
+        transform=ax.transAxes, fontsize=5.3, va="top", wrap=True,
+    )
+
+
+def _panel_accounting(ax, events, heat_source) -> None:
+    """Figure A, panel 6: accounting and convergence (plan Sec. 12, item 6) -- emitted/returned/
+    transmitted/other-loss charge and incident/deposited/escape energy, plus a `1/sqrt(N)`
+    particle-number statistical-uncertainty note (a full bootstrap is deliberately out of scope for
+    this pass, per the task description).
+    """
+    ax.axis("off")
+    accounting = events.accounting if isinstance(events.accounting, dict) else {}
+    charge = accounting.get("charge_C", {}) if isinstance(accounting.get("charge_C", {}), dict) else {}
+    energy = accounting.get("energy_J", {}) if isinstance(accounting.get("energy_J", {}), dict) else {}
+    n = events.n_events
+
+    lines = [
+        f"Q_emitted             = {_fmt_charge_energy(charge.get('emitted'))} C",
+        f"Q_returned (after)    = {_fmt_charge_energy(charge.get('returned_after_filter'))} C",
+        f"Q_transmitted         = {_fmt_charge_energy(charge.get('transmitted'))} C",
+        f"Q_other_loss          = {_fmt_charge_energy(charge.get('other_lost'))} C",
+        "",
+        f"E_incident (accounting) = {_fmt_charge_energy(energy.get('incident_after_filter'))} J",
+        f"E_incident (BB0, LaB6)  = {_sci(float(heat_source.total_incident_energy_J))} J",
+        f"E_deposited (BB0)       = {_sci(float(heat_source.total_deposited_energy_J))} J",
+        f"E_escape_geometric      = {_sci(float(heat_source.escaping_energy_geometric_J_total))} J",
+        f"E_escape_below_floor    = {_sci(float(heat_source.escaping_energy_below_tio_validity_J_total))} J",
+        f"E_excluded (non-LaB6)   = {_sci(float(heat_source.excluded_non_lab6_energy_J_total))} J",
+        "",
+        f"N_events = {n}  (BB0 included={heat_source.n_events_included}, "
+        f"excluded={heat_source.n_events_excluded})",
+        f"Statistical uncertainty ~ 1/sqrt(N) = {(1.0 / np.sqrt(max(n, 1))):.2%} "
+        "(particle-number estimate, not a bootstrap)",
+    ]
+    ax.text(0.0, 0.98, "\n".join(lines), transform=ax.transAxes, fontsize=7.0, va="top", family="monospace")
+    ax.set_title("Accounting and convergence")
+
+
+def plot_back_bombardment_source_qualification(study: "BackBombardmentMacropulseStudy", *, style=None):
+    """Figure A (plan Sec. 12): representative-cycle back-bombardment source qualification -- a
+    2x3 layout of six panels built from `study.study_input.events` (`BackBombardmentEvents`),
+    `study.heat_source` (`BackBombardmentHeatSource`), and `study.config.geometry`
+    (`CathodeGeometry`).
+
+    See each `_panel_*` helper above for the exact content and any design decision the plan leaves
+    open; in particular `_panel_deposited_energy_density` (panel 2, the bevel-map treatment) and
+    `_panel_energy_incidence_distributions` (panel 4, folding the incidence-angle distribution into
+    a text summary rather than a second histogram panel) document why this figure stays a literal
+    six-panel grid.
+
+    `fig.bb_source_qualification_panels` is set to the list of the six primary panel `Axes` (panel
+    order 1-6) purely so a caller/test can check panel count deterministically: `fig.colorbar(...)`
+    (used by panels 2 and 5) appends its own `Axes` to `fig.axes`, so `len(fig.axes)` alone is not
+    six even though there are exactly six logical panels.
+
+    Every panel states its own population filter and weighted charge/energy directly in its own
+    annotation (plan Sec. 12's explicit requirement, echoing Sec. 2.2's critique of the legacy
+    figures for not doing this) -- every panel here operates on the full qualified `events`
+    population (no panel applies additional filtering beyond what `events` itself already
+    represents), and says so explicitly rather than leaving the reader to assume it.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec
+
+    style = DEFAULT_PLOT_STYLE if style is None else style  # noqa: F841 - kept for API symmetry
+    events = study.study_input.events
+    heat_source = study.heat_source
+    geometry = study.config.geometry
+
+    fig = plt.figure(figsize=(19.0, 11.5))
+    gs = GridSpec(2, 3, figure=fig, wspace=0.5, hspace=0.6)
+
+    ax1 = fig.add_subplot(gs[0, 0])
+    _panel_impact_footprint(ax1, events, geometry)
+
+    ax2 = fig.add_subplot(gs[0, 1])
+    _panel_deposited_energy_density(ax2, fig, heat_source, geometry)
+
+    ax3 = fig.add_subplot(gs[0, 2])
+    _panel_return_phase_energy(ax3, events)
+
+    ax4 = fig.add_subplot(gs[1, 0])
+    _panel_energy_incidence_distributions(ax4, events)
+
+    ax5 = fig.add_subplot(gs[1, 1])
+    _panel_origin_to_impact(ax5, events)
+
+    ax6 = fig.add_subplot(gs[1, 2])
+    _panel_accounting(ax6, events, heat_source)
+
+    fig.bb_source_qualification_panels = [ax1, ax2, ax3, ax4, ax5, ax6]
+    fig.suptitle(
+        f"Back-bombardment source qualification -- representative RF period "
+        f"(N={events.n_events} qualified events, event_locator={events.event_locator!r})",
+        y=0.995,
+    )
+    return fig

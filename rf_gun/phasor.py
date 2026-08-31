@@ -1,10 +1,12 @@
 """Phasor construction and checks."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional, Tuple, Dict
 
 import numpy as np
 from scipy.interpolate import griddata, UnivariateSpline
+from scipy.spatial import Delaunay, cKDTree
 
 
 def select_iq_snapshots(
@@ -102,15 +104,90 @@ def rms_from_phasor_over_time(
     return np.sqrt(rms2)
 
 
-def interp_cfield(pts: np.ndarray, R: np.ndarray, Z: np.ndarray, phasor: np.ndarray) -> np.ndarray:
-    """Complex field interpolation with NaN fill."""
-    re_lin = griddata(pts, phasor.real, (R, Z), method="linear")
-    im_lin = griddata(pts, phasor.imag, (R, Z), method="linear")
-    re_nn = griddata(pts, phasor.real, (R, Z), method="nearest")
-    im_nn = griddata(pts, phasor.imag, (R, Z), method="nearest")
-    re = np.where(np.isfinite(re_lin), re_lin, re_nn)
-    im = np.where(np.isfinite(im_lin), im_lin, im_nn)
-    return (re + 1j * im).astype(np.complex128)
+@dataclass
+class FieldInterpolationContext:
+    """Reusable source-mesh triangulation and target-grid hull membership.
+
+    Building the Delaunay triangulation and target-grid hull test is the expensive, field-value-
+    independent step of `interp_cfield`. It depends only on the source vertex locations (`pts`)
+    and the target grid (`R`, `Z`), so one context is built once and reused for every field
+    component (Er/Ez, real/imaginary) evaluated on that same grid, instead of rebuilding it (and
+    re-running `Delaunay`) on every call as the previous implementation did.
+
+    `repaired_hole_fraction` is mutated by `interp_cfield` to the largest fraction seen across every
+    component interpolated with this context (isolated interior holes are rare; a handful of
+    components sharing one context should not silently overwrite each other's diagnostic).
+    """
+
+    kdtree: cKDTree
+    target_pts: np.ndarray  # (n_target, 2), flattened (r, z) target grid points
+    inside_hull: np.ndarray  # bool, flattened target-grid mask: True where inside native support
+    shape: Tuple[int, int]
+    repaired_hole_fraction: float = 0.0
+
+    @property
+    def outside_hull_fraction(self) -> float:
+        return float(np.mean(~self.inside_hull)) if self.inside_hull.size else float("nan")
+
+
+def build_field_interpolation_context(pts: np.ndarray, R: np.ndarray, Z: np.ndarray) -> FieldInterpolationContext:
+    """Triangulate the source vertices once and classify every target-grid point as inside or
+    outside the native convex hull. Reuse the returned context across every component passed to
+    `interp_cfield` for the same (pts, R, Z)."""
+    pts = np.asarray(pts, dtype=float)
+    tri = Delaunay(pts)
+    target_pts = np.column_stack([np.asarray(R).ravel(), np.asarray(Z).ravel()])
+    inside = tri.find_simplex(target_pts) >= 0
+    kdtree = cKDTree(pts)
+    return FieldInterpolationContext(
+        kdtree=kdtree, target_pts=target_pts, inside_hull=inside, shape=np.asarray(R).shape
+    )
+
+
+def interp_cfield(
+    pts: np.ndarray,
+    R: np.ndarray,
+    Z: np.ndarray,
+    phasor: np.ndarray,
+    *,
+    ctx: Optional[FieldInterpolationContext] = None,
+    outside_value: complex = 0.0,
+) -> np.ndarray:
+    """Complex field interpolation onto (R, Z) from scattered source vertices `pts`.
+
+    Outside the native convex hull of `pts` the field is set to `outside_value` (zero by default):
+    the measured map carries no information there, so nearest-neighbor extrapolation would invent
+    a nonzero field the data never supported. A handful of points strictly inside the hull can
+    still come back non-finite from the linear interpolant (e.g. an exact simplex-edge
+    degeneracy); those isolated interior holes are repaired with a KD-tree nearest lookup, not
+    treated as outside-support points. Pass a `FieldInterpolationContext` built once via
+    `build_field_interpolation_context` to avoid re-triangulating the source mesh for every
+    component (real/imag, Er/Ez) sharing the same (pts, R, Z).
+
+    `ctx.outside_hull_fraction` and `ctx.repaired_hole_fraction` (updated in place, largest fraction
+    seen across every component interpolated with this `ctx`) are available for run provenance.
+    """
+    if ctx is None:
+        ctx = build_field_interpolation_context(pts, R, Z)
+    shape = ctx.shape
+
+    re_lin = griddata(pts, phasor.real, (R, Z), method="linear").reshape(-1)
+    im_lin = griddata(pts, phasor.imag, (R, Z), method="linear").reshape(-1)
+
+    inside = ctx.inside_hull
+    re_flat = np.where(inside, re_lin, float(np.real(outside_value)))
+    im_flat = np.where(inside, im_lin, float(np.imag(outside_value)))
+
+    hole = inside & (~np.isfinite(re_lin) | ~np.isfinite(im_lin))
+    if np.any(hole):
+        _, nn_idx = ctx.kdtree.query(ctx.target_pts[hole])
+        re_flat[hole] = phasor.real[nn_idx]
+        im_flat[hole] = phasor.imag[nn_idx]
+
+    out = (re_flat + 1j * im_flat).astype(np.complex128).reshape(shape)
+    repaired_hole_fraction = float(np.mean(hole)) if hole.size else 0.0
+    ctx.repaired_hole_fraction = max(ctx.repaired_hole_fraction, repaired_hole_fraction)
+    return out
 
 
 def phasor_check(

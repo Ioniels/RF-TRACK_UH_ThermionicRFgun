@@ -22,6 +22,7 @@ from .work_function_models import evaluate_work_function_eV
 from .cathode_fields import sample_rf_field_on_cathode, extraction_field
 from .emission_sampling import apply_roughness, sample_thermionic_momenta
 from .emission_iteration import TemperatureField
+from .rf_params import PhaseCalibrationResult, build_phase_calibration_result
 from .rftrack_volume import (
     build_volume,
     track_volume_with_screens,
@@ -51,7 +52,7 @@ class EmissionParams:
     emission_phase_range_deg: float
     pz0_MeV_c: float
     pz_model: Literal["constant", "flux"] = "flux"
-    emission_law: str = "RD_schottky"
+    emission_law: str = "RDSchottky"
     beta_enh: float = 1.0
     roughness: RoughnessParams = RoughnessParams()
     time_dependent: bool = True
@@ -146,7 +147,7 @@ class SimulationResult:
 _RUNTIME_HISTORY_CACHE = Path(
     os.environ.get(
         "RF_GUN_RUNTIME_CACHE",
-        str(Path(__file__).resolve().parents[1] / ".rf_gun_transport_runtime_history.json"),
+        str(Path(__file__).resolve().parents[1] / "outputs" / ".cache" / "rf_gun_transport_runtime_history.json"),
     )
 )
 
@@ -416,9 +417,37 @@ def build_bunch_simple(
     q_total_C: float,
     rng: Optional[np.random.Generator] = None,
 ):
-    """Cold emission (no transverse thermal momentum)."""
+    """Cold emission, sampled over the full cathode disk (no transverse thermal momentum, but a
+    finite transverse launch position). This is a *finite-radius* calibration source: useful for
+    deliberately probing radial/space-charge-adjacent effects, but not the on-axis reference the
+    phase scan needs -- see `build_bunch_on_axis_cold` for that."""
     rng = np.random.default_rng() if rng is None else rng
     x, y = sample_disk(n, cathode_radius_mm, rng=rng)
+    px = np.zeros(n)
+    py = np.zeros(n)
+    z = np.zeros(n)
+    pz = np.full(n, float(pz0_MeV_c))
+
+    M = np.column_stack([x, px, y, py, z, pz])
+    N_real = float(abs(q_total_C) / q_e)
+    B0 = rft.Bunch6dT(ME_MEV, N_real, -1.0, M)
+    if hasattr(B0, "set_t0"):
+        B0.set_t0(np.zeros(n))
+    return B0
+
+
+def build_bunch_on_axis_cold(rft, n: int, pz0_MeV_c: float, q_total_C: float):
+    """Genuinely on-axis, cold calibration source: `x=y=px=py=0` for every particle, exactly (not
+    a small-radius disk sample). Every particle in this bunch is identical, so this source carries
+    no random-number-generator state at all -- calling it twice, or at any n, at the same phase
+    gives the identical result, which is what an RF-only phase-scan calibration needs (the brief:
+    "reuse the exact same calibration particle state at every phase, rather than drawing a new disk
+    sample from a progressing RNG"). `q_total_C` should be negligible (the calibration current
+    should not itself perturb the RF-only field it is measuring); `n` beyond 1 only matters if a
+    caller wants nonzero macro-charge spread across more macroparticles, not for phase-scan noise
+    reduction, since there is nothing left to average over."""
+    x = np.zeros(n)
+    y = np.zeros(n)
     px = np.zeros(n)
     py = np.zeros(n)
     z = np.zeros(n)
@@ -1029,39 +1058,49 @@ def run_phase_scan(
     phase_rel_deg: Sequence[float],
     transport_phase_deg: float,
     n_particles: int,
-    cathode_radius_mm: float,
     pz0_MeV_c: float,
     q_total_C: float = 1e-12,
-    rng: Optional[np.random.Generator] = None,
     refine: bool = True,
     refine_xatol_deg: float = 0.05,
     refine_maxiter: int = 30,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Fast phase scan (on-axis, cold launch).
+) -> PhaseCalibrationResult:
+    """RF-only phase scan with a genuinely on-axis, cold calibration source.
 
-    Runs a coarse scan over `phase_rel_deg` (kept full-range by default so a
-    change in the input field maps is still caught), then, unless
-    `refine=False`, brackets the coarse maximum and refines it with a bounded
-    scalar search. The refined point is folded back into the returned arrays,
-    so `np.max(pz_mean)` (as used by `veff_from_phase_scan_pz`) reflects the
-    refined crest rather than the coarse grid resolution. This lets the coarse
-    grid `phase_rel_deg` be much sparser than a fine grid would need to be,
-    without losing crest accuracy.
+    Every physics switch except the RF field itself is off for this scan (`vol_params_fast` below
+    forces space charge and beam loading off regardless of what `vol_params` requests), and the
+    same `build_bunch_on_axis_cold` source (`x=y=px=py=0`, negligible `q_total_C`) is reused
+    unchanged at every phase -- there is no RNG involved, so this is not "the same distribution
+    resampled," it is the identical particle state.
+
+    Runs a coarse scan over `phase_rel_deg` (kept full-range by default so a change in the input
+    field maps is still caught), then, unless `refine=False`, brackets the coarse maximum and
+    refines it with a bounded scalar search. The refined point is folded into the returned,
+    phase-sorted result, so the returned crest reflects the refined value rather than the coarse
+    grid resolution. This lets the coarse grid `phase_rel_deg` be much sparser than a fine grid
+    would need to be, without losing crest accuracy.
+
+    Returns a `PhaseCalibrationResult`; callers must check `.valid` before using `.crest_*` for
+    `Veff`/`R/Q`/any beam-loading-dependent path (see `rf_params.veff_from_phase_calibration`).
     """
     z_span_mm = abs(float(vol_params.z_max_m) - float(vol_params.z_min_m)) * 1e3
     phase_scan_tmax_mm = max(60.0, 2.5 * z_span_mm)
 
+    # A5: RF-only calibration -- space charge, mirror, beam loading, backstop, and deflection are
+    # all explicitly off, regardless of what the caller's `vol_params` requests for production.
     vol_params_fast = vol_params.replace(
         sc_enabled=False,
         beam_loading_enabled=False,
         beam_loading_verbose=False,
+        mirror_charge_enabled=False,
+        deflection_enabled=False,
+        cathode_backstop_enabled=False,
         t_max_mm=min(float(getattr(vol_params, "t_max_mm", 2000.0)), float(phase_scan_tmax_mm)),
     )
 
     def _mean_pz_at(phi_rel: float) -> float:
         phi_abs = (float(phi_rel) + float(transport_phase_deg)) % 360.0
         V = build_volume(rft, Er_grid, Ez_grid, phi_abs, vol_params_fast)
-        B0 = build_bunch_simple(rft, n_particles, cathode_radius_mm, pz0_MeV_c, q_total_C, rng=rng)
+        B0 = build_bunch_on_axis_cold(rft, n_particles, pz0_MeV_c, q_total_C)
         Bout = V.track(B0)
         Mf = Bout.get_phase_space()
         if Mf.shape[0] == 0:
@@ -1076,6 +1115,7 @@ def run_phase_scan(
         n_ok = 0 if np.isnan(pz) else int(n_particles)
         phase_scan.append((float(phi), float(phi_abs), pz, n_ok))
 
+    refined_applied = False
     if refine and np.any(np.isfinite([row[2] for row in phase_scan])):
         pz_coarse = np.array([row[2] for row in phase_scan], dtype=float)
         i_max = int(np.nanargmax(pz_coarse))
@@ -1090,14 +1130,20 @@ def run_phase_scan(
             )
             phi_rel_refined = float(res.x)
             pz_refined = -float(res.fun)
-            phi_abs_refined = (phi_rel_refined + float(transport_phase_deg)) % 360.0
-            phase_scan.append((phi_rel_refined, phi_abs_refined, pz_refined, int(n_particles)))
+            if np.isfinite(pz_refined):
+                phi_abs_refined = (phi_rel_refined + float(transport_phase_deg)) % 360.0
+                phase_scan.append((phi_rel_refined, phi_abs_refined, pz_refined, int(n_particles)))
+                refined_applied = True
 
-    phase_scan = np.array(sorted(phase_scan, key=lambda row: row[0]), dtype=float)
-    phi_rel = phase_scan[:, 0]
-    phi_abs = phase_scan[:, 1]
-    pz_mean = phase_scan[:, 2]
-    return phase_scan, phi_rel, phi_abs, pz_mean
+    phase_scan_arr = np.array(sorted(phase_scan, key=lambda row: row[0]), dtype=float)
+    return build_phase_calibration_result(
+        phi_rel_deg=phase_scan_arr[:, 0],
+        phi_abs_deg=phase_scan_arr[:, 1],
+        pz_mean_MeV_c=phase_scan_arr[:, 2],
+        n_ok=phase_scan_arr[:, 3],
+        pz0_MeV_c=float(pz0_MeV_c),
+        refined=refined_applied,
+    )
 
 
 def run_transport_with_progress(

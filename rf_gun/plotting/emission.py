@@ -143,11 +143,14 @@ def plot_emission_history(
                         zorder=0,
                     )
 
+        from ..emission_models import canonical_emission_model_name, EMISSION_MODEL_PLOT_LABELS
+
         law = str(thermo_info.get("emission_law", "")).strip()
         try:
-            from ..emission_models import canonical_emission_model_name, EMISSION_MODEL_PLOT_LABELS
-            title = f"Emission model: {EMISSION_MODEL_PLOT_LABELS[canonical_emission_model_name(law)]}"
+            canon_law = canonical_emission_model_name(law)
+            title = f"Emission model: {EMISSION_MODEL_PLOT_LABELS[canon_law]}"
         except (KeyError, ValueError):
+            canon_law = None
             title = "Emission model"
         axes[1].set_title(title)
 
@@ -160,15 +163,20 @@ def plot_emission_history(
             else:
                 F_pos = np.maximum(np.asarray(F_t, dtype=float), 0.0)
                 for m in comparison_models:
-                    if m == law:
+                    try:
+                        canon_m = canonical_emission_model_name(m)
+                    except ValueError:
+                        canon_m = m
+                    if canon_law is not None and canon_m == canon_law:
                         continue  # already plotted as the solid production-model curve
                     try:
                         res = evaluate_emission_model(m, F_pos, float(T_K), float(phi_eV))
                     except NotImplementedError:
                         continue
-                    color = EMISSION_MODEL_COLORS.get(m)
-                    ls = "-." if m == "murphy_good_direct_reference" else "--"
-                    axes[1].plot(t_ns, np.asarray(res.J_Apm2) * 1e-4, ls=ls, lw=1.3, color=color, label=m, alpha=0.85)
+                    color = EMISSION_MODEL_COLORS.get(canon_m)
+                    label = EMISSION_MODEL_PLOT_LABELS.get(canon_m, m)
+                    ls = "-." if canon_m == "murphygood1956_SchottkyNordheim_integral" else "--"
+                    axes[1].plot(t_ns, np.asarray(res.J_Apm2) * 1e-4, ls=ls, lw=1.3, color=color, label=label, alpha=0.85)
 
         handles, labels = axes[1].get_legend_handles_labels()
         if handles:
@@ -224,6 +232,38 @@ def plot_j_vs_n(thermo_info: Dict[str, Any]):
     plt.show()
 
 
+def _stable_ylim(values_by_model: Dict[str, np.ndarray], pad_fraction: float = 0.15, min_rel_range: float = 2.0e-3):
+    """Robust y-limits from only the finite, stability-flag-clear points across every model, so
+    one model's flagged-unstable excursion can't dominate the shared axis and flatten the rest --
+    see plot_emission_model_sensitivities' module note on why a single model used to visually
+    swamp the others.
+
+    `min_rel_range` floors the y-range at this fraction of the panel's central value: a
+    sensitivity that is genuinely (near-)constant across the whole model set (e.g. S_phi/S_T in a
+    thermionic-dominated regime, where every model should reduce to the same closed form) can
+    still carry residual floating-point-level noise (~1e-5 absolute, ~1e-6 relative here) after
+    every other numerical fix in this module -- letting matplotlib's default autoscale zoom in to
+    fit *that* would visually amplify genuinely negligible noise into what looks like a dramatic
+    feature. This floor keeps the axis from zooming in past the point where remaining variation is
+    physically meaningful, without hiding a real, larger excursion (which still expands the range
+    normally, since the floor is a *minimum*, not a fixed span).
+    """
+    finite_vals = [v[np.isfinite(v)] for v in values_by_model.values()]
+    finite_vals = [v for v in finite_vals if v.size]
+    if not finite_vals:
+        return None
+    allv = np.concatenate(finite_vals)
+    lo, hi = np.percentile(allv, [1.0, 99.0])
+    if lo == hi:
+        lo, hi = lo - 1.0, hi + 1.0
+    center = 0.5 * (lo + hi)
+    min_range = min_rel_range * max(abs(center), 1e-300)
+    if (hi - lo) < min_range:
+        lo, hi = center - 0.5 * min_range, center + 0.5 * min_range
+    pad = pad_fraction * (hi - lo)
+    return (lo - pad, hi + pad)
+
+
 def plot_emission_model_sensitivities(
     F_Vpm: np.ndarray,
     T_K: float,
@@ -237,12 +277,22 @@ def plot_emission_model_sensitivities(
     B) S_F = d ln J / d ln F;
     C) S_T = d ln J / d ln T;
     D) S_phi = -phi * d ln J / d phi.
+
+    Points flagged unstable under finite-difference step-doubling (any of S_F/S_T/S_phi, see
+    rf_gun.emission_sensitivity.compute_log_sensitivities) are excluded from each model's *line*
+    (so a single bad point can't draw a spike connecting two otherwise-smooth stretches) and from
+    the panels' shared y-autoscale (so one model's excursion can't flatten the others onto the
+    same axis) -- they're still shown, as small black markers, so the instability itself stays
+    visible rather than silently vanishing.
     """
     import matplotlib.pyplot as plt
 
+    from ..emission_models import EMISSION_MODEL_PLOT_LABELS, canonical_emission_model_name
     from ..emission_sensitivity import compute_log_sensitivities
 
-    models = list(models) if models is not None else ["RD_schottky", "rld_schottky_plus_mg"]
+    models = list(models) if models is not None else [
+        "RDSchottky", "jensen2014_RDSchottky_MurphyGood_additive",
+    ]
     F = np.asarray(F_Vpm, dtype=float)
 
     fig, axes = plt.subplots(2, 2, figsize=(10.5, 7.5), constrained_layout=True)
@@ -250,29 +300,57 @@ def plot_emission_model_sensitivities(
 
     sens_by_model = {m: compute_log_sensitivities(m, F, T_K, phi_eV, j_floor_Apm2=j_floor_Apm2) for m in models}
 
+    # Stable-only view of each panel, used both for line-breaking and for shared y-autoscale.
+    S_F_stable, S_T_stable, S_phi_stable = {}, {}, {}
+
     for m in models:
-        color = EMISSION_MODEL_COLORS.get(m, None)
+        canon = canonical_emission_model_name(m)
+        color = EMISSION_MODEL_COLORS.get(canon)
+        label = EMISSION_MODEL_PLOT_LABELS.get(canon, m)
         s = sens_by_model[m]
         J = s["J_Apm2"]
+        unstable_any = s["unstable_any"]
         mask = np.isfinite(J) & (J > 0.0)
-        style = dict(color=color, lw=1.8, label=m) if color else dict(lw=1.8, label=m)
+
+        def _break_at_unstable(arr):
+            out = np.array(arr, dtype=float, copy=True)
+            out[unstable_any] = np.nan
+            return out
+
+        S_F_stable[m] = _break_at_unstable(s["S_F"])
+        S_T_stable[m] = _break_at_unstable(s["S_T"])
+        S_phi_stable[m] = _break_at_unstable(s["S_phi"])
+
+        style = dict(color=color, lw=1.8, label=label) if color else dict(lw=1.8, label=label)
         axA.plot(F[mask], J[mask], **style)
-        axB.plot(F[mask], s["S_F"][mask], **style)
-        axC.plot(F[mask], s["S_T"][mask], **style)
-        axD.plot(F[mask], s["S_phi"][mask], **style)
-        if np.any(s["unstable"][mask]):
-            axB.plot(
-                F[mask & s["unstable"]], s["S_F"][mask & s["unstable"]],
-                "x", color="k", ms=6, zorder=5,
-            )
+        axB.plot(F[mask], S_F_stable[m][mask], **style)
+        axC.plot(F[mask], S_T_stable[m][mask], **style)
+        axD.plot(F[mask], S_phi_stable[m][mask], **style)
+
+        flagged = mask & unstable_any
+        if np.any(flagged):
+            marker_kwargs = dict(marker="x", color=color or "k", ms=5, zorder=5, ls="none")
+            axB.plot(F[flagged & s["unstable_F"]], s["S_F"][flagged & s["unstable_F"]], **marker_kwargs)
+            axC.plot(F[flagged & s["unstable_T"]], s["S_T"][flagged & s["unstable_T"]], **marker_kwargs)
+            axD.plot(F[flagged & s["unstable_phi"]], s["S_phi"][flagged & s["unstable_phi"]], **marker_kwargs)
+
+    for ax, values_by_model in ((axB, S_F_stable), (axC, S_T_stable), (axD, S_phi_stable)):
+        ylim = _stable_ylim(values_by_model)
+        if ylim is not None:
+            ax.set_ylim(*ylim)
 
     if F_populated_range is not None:
         F_min, F_peak, F_max = F_populated_range
-        for ax in (axA, axB, axC, axD):
+        for j, ax in enumerate((axA, axB, axC, axD)):
             if np.isfinite(F_min) and np.isfinite(F_max):
-                ax.axvspan(F_min, F_max, color="0.85", zorder=0)
+                # Thin dotted boundary lines rather than a solid shaded band, which visually
+                # competed with the curves ("grey sharding") without adding information the
+                # boundary lines alone don't already convey.
+                label = "Populated field range" if j == 0 else None
+                ax.axvline(F_min, color="0.6", ls=":", lw=1.1, alpha=0.8, label=label)
+                ax.axvline(F_max, color="0.6", ls=":", lw=1.1, alpha=0.8)
             if np.isfinite(F_peak):
-                ax.axvline(F_peak, color="k", ls="--", lw=1.0, alpha=0.6)
+                ax.axvline(F_peak, color="k", ls="--", lw=1.0, alpha=0.6, label="Peak field" if j == 0 else None)
 
     axA.set_yscale("log")
     axA.set_xscale("log")

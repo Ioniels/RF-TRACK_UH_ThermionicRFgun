@@ -1,0 +1,29 @@
+dataset_id: LaB6_k_Tanaka_OsakaThesis_1981
+material: LaB6
+property: thermal_conductivity
+quantity_symbol: k
+independent_variable: temperature_K
+temperature_K: [1300, 1400, 1600, 1800, 2000]
+value_W_m_K: [55.5, 51.5, 46.5, 43.0, 40.0]
+interpolation: pchip
+extrapolation: forbidden
+status: provisional_digitization
+
+uncertainty:
+  type: model
+  value: 0.10
+
+reference:
+  key: Tanaka_OsakaThesis_1981
+  title: Single crystal preparation of LaB6 and related borides and their electronic structures
+  year: 1981
+  url: https://hdl.handle.net/11094/24347
+
+notes: >
+  "Provisional high-T conductivity points" per plan Sec. 5.2/19.3: explicitly "solver-development
+  values only" (plan Sec. 5.2), not an independently re-digitized curve from Tanaka's thesis in
+  this implementation pass -- status=provisional_digitization flags this the same way as the Sun
+  segment below 1300 K. Joins continuously with the Sun placeholder segment (see
+  LaB6_k_Sun_JNST2192728_2023.yaml/.csv, ending at 55.6 W/m/K at 1273 K vs. this dataset's
+  55.5 W/m/K at 1300 K) to form the LaB6_UH_recommended_v1 composite k(T) via a single PCHIP fit
+  over the combined array (see lab6.py's _build_lab6_k_composite_dataset()).

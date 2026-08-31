@@ -1,0 +1,32 @@
+dataset_id: LaB6_cp_Tanaka_OsakaThesis_1981
+material: LaB6
+property: specific_heat_capacity
+quantity_symbol: cp
+independent_variable: temperature_K
+temperature_K: [1000, 1200, 1400, 1600, 1800, 2000]
+value_J_kg_K: [801, 824, 839, 850, 858, 865]
+interpolation: pchip
+extrapolation: forbidden
+status: cp_approximated_by_cV_derived_from_Debye_plus_electronic_model
+
+uncertainty:
+  type: relative_model
+  value: 0.03
+
+reference:
+  key: Tanaka_OsakaThesis_1981
+  title: Single crystal preparation of LaB6 and related borides and their electronic structures
+  year: 1981
+  url: https://hdl.handle.net/11094/24347
+
+notes: >
+  IMPORTANT attribution correction (plan Sec. 19.3): this table is NOT a cp table transcribed
+  verbatim from Tanaka's 1981 thesis. It is DERIVED by this project's own prior LaB6_heating
+  note's author from a Debye-plus-electronic heat-capacity model
+  (Theta_D ~= 1300 K, n = 7 atoms per LaB6 formula unit, gamma ~= 2.6e-3 J/mol/K^2), combining
+  Tanaka's Debye-model parameters (Theta_D, n) with Ivashchenko's LaB6 molar mass. cp is
+  approximated by cV (see `uncertainty` block above for the resulting few-percent cp-cV
+  uncertainty this approximation carries; the cp-cV correction itself is optional and not
+  applied here). Treat this dataset as a derived/secondary source, not a primary Tanaka-thesis
+  table -- the `status` field records this explicitly so it is not silently re-cited as "Tanaka
+  1981, Table N" in a later paper or plot caption.

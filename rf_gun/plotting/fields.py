@@ -6,6 +6,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 
 from ..aperture import aperture_radius_profile_mm
+from ..deflection_field import DEFAULT_B_PK_PER_A_T, DEFAULT_W_MM, DEFAULT_Z_P_MM, b0_deflection_T
 from .style import (
     DEFAULT_PLOT_STYLE,
     PlotStyleConfig,
@@ -267,3 +268,50 @@ def axis_phase(
     plt.show()
 
     return float(transport_phase_deg), float(phi_zero_deg)
+
+
+def plot_deflection_field_profile(
+    z_mm: np.ndarray,
+    configured_current_A: float,
+    applied_current_A: float,
+    B_pk_per_A_T: float = DEFAULT_B_PK_PER_A_T,
+    z_p_mm: float = DEFAULT_Z_P_MM,
+    w_mm: float = DEFAULT_W_MM,
+) -> Optional[Dict[str, np.ndarray]]:
+    """Plot the deflection field profile actually applied to a run.
+
+    Callers must resolve `applied_current_A` themselves as `configured_current_A if
+    deflection_enabled else 0.0` (e.g. `VolumeBuildParams.applied_deflection_current_A`) -- this
+    function never re-derives "applied" from "configured" so a caller cannot accidentally plot a
+    configured-but-unapplied current as though it were part of the run. When the magnet is disabled
+    (`applied_current_A == 0.0` but `configured_current_A != 0.0`), this prints a short
+    not-applicable note and returns `None` instead of drawing a curve for a field that had no
+    effect on this run; when both are zero (magnet genuinely off with no configured current), the
+    same applies. A plot is produced only when a nonzero field was actually applied.
+    """
+    import matplotlib.pyplot as plt
+
+    if applied_current_A == 0.0:
+        reason = (
+            f"deflection magnet disabled (configured I={configured_current_A:.4g} A, not applied)"
+            if configured_current_A != 0.0
+            else "deflection magnet disabled (no configured current)"
+        )
+        print(f"Deflection field profile: skipped -- {reason}.")
+        return None
+
+    z_mm = np.asarray(z_mm, dtype=float)
+    B_T = b0_deflection_T(z_mm, applied_current_A, B_pk_per_A_T, z_p_mm, w_mm)
+
+    fig, ax = plt.subplots(figsize=(8.0, 4.0))
+    ax.plot(z_mm, B_T * 1e3, lw=1.8, color="tab:purple")
+    ax.axhline(0.0, color="gray", lw=0.8, ls="--")
+    ax.set_xlabel(r"$z$ (mm, from cathode)", fontsize=12)
+    ax.set_ylabel(r"$B_x$ (mT)", fontsize=12)
+    ax.set_title(f"Deflection field profile (applied I = {applied_current_A:.4g} A)", fontsize=13)
+    ax.tick_params(labelsize=10)
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+    return {"z_mm": z_mm, "Bx_T": B_T, "applied_current_A": np.array(float(applied_current_A))}

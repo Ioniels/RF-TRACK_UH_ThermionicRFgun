@@ -1,0 +1,31 @@
+property_set: LaB6_UH_recommended_v1
+material: LaB6
+description: >
+  Default modern high-temperature composite cathode material set (plan Sec. 5.2): "each property
+  resolves to the best source identified in the supplied PDF." This file is composite-manifest
+  metadata read directly by lab6.py's register_lab6_materials(); it does NOT follow base.py's
+  generic ScalarPropertyDataset schema (no temperature_K/value_* arrays here) and is not passed to
+  load_property_dataset_yaml().
+
+components:
+  thermal:
+    rho0: LaB6_density_Ivashchenko_PhysicaB531_2018
+    expansion: LaB6_expansion_Williams_LBL27907_1989
+    cp: LaB6_cp_Tanaka_OsakaThesis_1981
+    k:
+      - LaB6_k_Sun_JNST2192728_2023
+      - LaB6_k_Tanaka_OsakaThesis_1981
+  electron_deposition: LaB6_stopping_Bakr_PRSTAB060708_2011
+  emission: null
+  optical: LaB6_optical_Kowalczyk_IJT035-1538_2014
+
+notes: >
+  emission is null here because it is bookkeeping/provenance only (plan Sec. 5.4): "In load_run
+  mode the default is to inherit the emission model and parameters from the originating
+  run_config.json." lab6.py's default LaB6_UH_recommended_v1 loader therefore builds an
+  EmissionComponent with a generic placeholder work_function_model_id
+  ("inherited_from_run_config") rather than a bulk LaB6 dataset key, recording that the real
+  emission model/parameters come from wherever the calling code's run_config.json says, not from
+  this material file. thermal.k lists two dataset files because the recommended k(T) is a single
+  PCHIP fit over their concatenated (Sun below ~1273 K, Tanaka 1300-2000 K) points, not two
+  independently-selected properties -- see lab6.py's _build_lab6_k_composite_dataset().

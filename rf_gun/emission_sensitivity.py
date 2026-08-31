@@ -6,8 +6,8 @@ Sensitivities are centered finite differences in log space:
     S_phi = -phi * d ln J / d phi   (work-function sensitivity, guide's sign convention so it
                                      comes out positive: J falls as phi rises)
 
-For RD_schottky these have exact closed forms (guide Sec. 4.3), used here as unit-test checks on
-the finite-difference implementation:
+For RDSchottky these have exact closed forms (guide Sec. 4.3), used here as
+unit-test checks on the finite-difference implementation:
     S_F   = dphi(F) / (2 k_B T)
     S_T   = 2 + (phi - dphi(F)) / (k_B T)
     S_phi = phi / (k_B T)
@@ -23,8 +23,8 @@ from .emission_models import EMISSION_MODEL_NAMES, delta_phi_schottky_eV, evalua
 
 
 def rd_schottky_analytic_sensitivities(F_Vpm: np.ndarray, T_K: float, phi_eV: float) -> Dict[str, np.ndarray]:
-    """Exact RD_schottky sensitivities (guide Sec. 4.3), for validating the finite-difference
-    implementation below rather than trusting it blindly."""
+    """Exact RDSchottky sensitivities (guide Sec. 4.3), for validating the
+    finite-difference implementation below rather than trusting it blindly."""
     F = np.asarray(F_Vpm, dtype=float)
     dphi = delta_phi_schottky_eV(F)
     kT_eV = KB_EV_PER_K * T_K
@@ -58,9 +58,13 @@ def compute_log_sensitivities(
 ) -> Dict[str, Any]:
     """S_F, S_T, S_phi for `model` over the field array F_Vpm, via centered finite differences in
     log space (guide Sec. 4.3). Points where J is below `j_floor_Apm2` are masked to NaN
-    ("numerically meaningless sensitivities", guide Sec. 4.4). When `check_step_doubling`, each
-    sensitivity is recomputed at 2*rel_step and flagged unstable where the two disagree by more
-    than 5% (guide's own stability check).
+    ("numerically meaningless sensitivities", guide Sec. 4.4). When `check_step_doubling`, each of
+    S_F/S_T/S_phi is independently recomputed at 2*rel_step and flagged unstable where the two
+    disagree by more than 5% (guide's own stability check, extended here to all three
+    sensitivities -- the original implementation only step-doubled S_F, which meant a model with a
+    branched/discontinuous formula -- e.g. jensen2019_RDSchottky_MurphyGood_transition near a thermionic/field-emission regime
+    crossing -- could show an unflagged spike in S_T or S_phi even when S_F's own check happened to
+    fall on the same branch on both sides of the step).
     """
     F_arr = np.atleast_1d(np.asarray(F_Vpm, dtype=float))
     n = F_arr.size
@@ -74,10 +78,17 @@ def compute_log_sensitivities(
     def J_of_phi(phi, F):
         return float(evaluate_emission_model(model, np.array([F]), T_K, phi).J_Apm2[0])
 
+    def _unstable(val, val2):
+        if not (np.isfinite(val) and np.isfinite(val2)) or abs(val) <= 1e-12:
+            return False
+        return abs(val2 - val) / abs(val) > 0.05
+
     S_F = np.full(n, np.nan)
     S_T = np.full(n, np.nan)
     S_phi = np.full(n, np.nan)
-    unstable = np.zeros(n, dtype=bool)
+    unstable_F = np.zeros(n, dtype=bool)
+    unstable_T = np.zeros(n, dtype=bool)
+    unstable_phi = np.zeros(n, dtype=bool)
     J_at_F = np.full(n, np.nan)
 
     for i, F in enumerate(F_arr):
@@ -93,13 +104,20 @@ def compute_log_sensitivities(
 
         if check_step_doubling:
             S_F2 = _central_log_derivative(J_of_F, F, 2.0 * rel_step)
-            if np.isfinite(S_F[i]) and np.isfinite(S_F2) and abs(S_F[i]) > 1e-12:
-                if abs(S_F2 - S_F[i]) / abs(S_F[i]) > 0.05:
-                    unstable[i] = True
+            S_T2 = _central_log_derivative(lambda T: J_of_T(T, F), T_K, 2.0 * rel_step)
+            S_phi2 = -_central_log_derivative(lambda phi: J_of_phi(phi, F), phi_eV, 2.0 * rel_step)
+            unstable_F[i] = _unstable(S_F[i], S_F2)
+            unstable_T[i] = _unstable(S_T[i], S_T2)
+            unstable_phi[i] = _unstable(S_phi[i], S_phi2)
+
+    unstable_any = unstable_F | unstable_T | unstable_phi
 
     return {
         "F_Vpm": F_arr, "J_Apm2": J_at_F,
-        "S_F": S_F, "S_T": S_T, "S_phi": S_phi, "unstable": unstable,
+        "S_F": S_F, "S_T": S_T, "S_phi": S_phi,
+        "unstable": unstable_F,  # backward-compatible name/meaning: S_F instability only
+        "unstable_F": unstable_F, "unstable_T": unstable_T, "unstable_phi": unstable_phi,
+        "unstable_any": unstable_any,
         "model": model, "T_K": T_K, "phi_eV": phi_eV, "rel_step": rel_step,
     }
 

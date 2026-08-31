@@ -1,0 +1,6 @@
+temperature_K,value,uncertainty,source_point_id
+300,63.0,0.15,placeholder_1
+400,60.5,0.15,placeholder_2
+700,58.0,0.15,placeholder_3
+1000,56.2,0.15,placeholder_4
+1273,55.6,0.15,placeholder_5
