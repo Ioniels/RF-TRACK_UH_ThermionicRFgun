@@ -127,21 +127,18 @@ def parse_args() -> argparse.Namespace:
         help="Radial width of the cathode's 45deg outer chamfer; impacts there still heat the "
              "cathode (see rg.classify_impact_surface), unlike the holder/wall beyond it.",
     )
-    # Opt-in, default off: wires rf_gun.rftrack_volume.VolumeBuildParams.cathode_backstop_enabled
-    # (a thin absorbing Aperture_1d element just behind the cathode plane, rf_gun.aperture.
-    # build_cathode_backstop) into this script's production Volume, and -- when set -- runs the
-    # new v2 return-event capture (rg.extract_back_bombardment_events) after transport, writing the
-    # new schema to the PLAIN back_bombardment_events.h5 (the canonical load_run path) and moving
-    # the existing legacy_ballistic reconstruction's output to back_bombardment_events_legacy_v1.h5
-    # instead, so both remain available for comparison without a filename collision (see
-    # BACK_BOMBARDMENT_MACROPULSE_IMPLEMENTATION_PLAN.md Sec. 3.2/4.1/13, addendum Sec. 19.2/19.6).
-    # Off by default so no existing run's default behavior/filenames change.
-    parser.add_argument("--cathode_backstop_enabled", action=argparse.BooleanOptionalAction, default=False,
-                         help="Enable the cathode backstop element and v2 back-bombardment event "
-                              "capture/HDF5 (written to the plain back_bombardment_events.h5; the "
+    # On by default: wires rf_gun.rftrack_volume.VolumeBuildParams.cathode_backstop_enabled (a thin
+    # absorbing element just behind the cathode plane) into the production Volume and runs the
+    # validated v2 return-event capture after transport (plain back_bombardment_events.h5); the
+    # legacy_ballistic reconstruction moves to back_bombardment_events_legacy_v1.h5 for comparison.
+    # Disable only for a deliberate A/B comparison against the pre-backstop behavior.
+    parser.add_argument("--cathode_backstop_enabled", action=argparse.BooleanOptionalAction, default=True,
+                         help="Cathode backstop element and v2 back-bombardment event capture/HDF5 "
+                              "(written to the plain back_bombardment_events.h5; the "
                               "legacy_ballistic reconstruction moves to "
                               "back_bombardment_events_legacy_v1.h5). Requires --save-lost-particles "
-                              "(auto-enabled with a printed note if unset).")
+                              "(auto-enabled with a printed note if unset). Disable "
+                              "(--no-cathode_backstop_enabled) only for a deliberate comparison.")
     parser.add_argument("--cathode_backstop_thickness_mm", type=float,
                          default=_DEFAULT_CATHODE_BACKSTOP_THICKNESS_MM,
                          help="Thickness of the --cathode_backstop_enabled Aperture_1d element "

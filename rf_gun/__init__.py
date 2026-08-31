@@ -296,7 +296,9 @@ from .plotting import (
 	plot_back_bombardment_energy_density,
 	plot_back_bombardment_power_density_vs_time,
 	plot_back_bombardment_source_qualification,
+	print_back_bombardment_source_qualification_summary,
 	plot_back_bombardment_macropulse,
+	print_back_bombardment_macropulse_summary,
 	plot_dynamic_aperture_losses,
 	plot_acceptance_scan,
 	save_run_figures,
@@ -571,7 +573,9 @@ __all__ = [
 	"plot_back_bombardment_energy_density",
 	"plot_back_bombardment_power_density_vs_time",
 	"plot_back_bombardment_source_qualification",
+	"print_back_bombardment_source_qualification_summary",
 	"plot_back_bombardment_macropulse",
+	"print_back_bombardment_macropulse_summary",
 	"plot_dynamic_aperture_losses",
 	"plot_acceptance_scan",
 	"save_run_figures",
@@ -596,12 +600,21 @@ __all__ = [
 ]
 
 from . import finesse_presets
-from .finesse_presets import FINESSE_PRESETS, FINESSE_TIERS, finesse_preset_dict, apply_finesse_preset_to_args
+from .finesse_presets import (
+	FINESSE_PRESETS,
+	FINESSE_TIERS,
+	FIXED_DR_UM,
+	FIXED_DZ_UM,
+	finesse_preset_dict,
+	apply_finesse_preset_to_args,
+)
 
 __all__ += [
 	"finesse_presets",
 	"FINESSE_PRESETS",
 	"FINESSE_TIERS",
+	"FIXED_DR_UM",
+	"FIXED_DZ_UM",
 	"finesse_preset_dict",
 	"apply_finesse_preset_to_args",
 ]

@@ -1108,6 +1108,18 @@ def run_phase_scan(
         return float(np.mean(Mf[:, 5]))
 
     phi_rel_coarse = np.asarray(phase_rel_deg, dtype=float)
+    n_coarse = phi_rel_coarse.size
+    # A grid built with endpoint=False over a full 360deg request (run_thermionic_tm010.py's and
+    # the notebook's own "don't repeat 0 and 360" fix) satisfies span+step == 360deg exactly; such
+    # a grid is physically periodic even though it is stored as a flat array with no explicit
+    # wraparound point -- phase 359.x deg is adjacent to phase 0 deg. A genuine partial-range scan
+    # (span+step << 360) is not periodic and its array ends are real boundaries.
+    circular = False
+    if n_coarse > 2:
+        span = float(phi_rel_coarse.max() - phi_rel_coarse.min())
+        step = span / (n_coarse - 1)
+        circular = bool(np.isclose(span + step, 360.0, atol=1e-6))
+
     phase_scan = []
     for phi in phi_rel_coarse:
         pz = _mean_pz_at(float(phi))
@@ -1119,8 +1131,19 @@ def run_phase_scan(
     if refine and np.any(np.isfinite([row[2] for row in phase_scan])):
         pz_coarse = np.array([row[2] for row in phase_scan], dtype=float)
         i_max = int(np.nanargmax(pz_coarse))
-        lo = phi_rel_coarse[max(i_max - 1, 0)]
-        hi = phi_rel_coarse[min(i_max + 1, len(phi_rel_coarse) - 1)]
+        if circular and (i_max == 0 or i_max == n_coarse - 1):
+            # The coarse crest sits at the array seam of a periodic scan: bracket it with its true
+            # circular neighbor (wrapping to the other end, offset by a full period) rather than
+            # only exploring one side, which a flat-array index computation would otherwise do.
+            if i_max == 0:
+                lo = float(phi_rel_coarse[-1]) - 360.0
+                hi = float(phi_rel_coarse[0])
+            else:
+                lo = float(phi_rel_coarse[-1])
+                hi = float(phi_rel_coarse[0]) + 360.0
+        else:
+            lo = phi_rel_coarse[max(i_max - 1, 0)]
+            hi = phi_rel_coarse[min(i_max + 1, n_coarse - 1)]
         if hi > lo:
             res = minimize_scalar(
                 lambda phi: -_mean_pz_at(phi),
@@ -1132,7 +1155,7 @@ def run_phase_scan(
             pz_refined = -float(res.fun)
             if np.isfinite(pz_refined):
                 phi_abs_refined = (phi_rel_refined + float(transport_phase_deg)) % 360.0
-                phase_scan.append((phi_rel_refined, phi_abs_refined, pz_refined, int(n_particles)))
+                phase_scan.append((phi_rel_refined % 360.0, phi_abs_refined, pz_refined, int(n_particles)))
                 refined_applied = True
 
     phase_scan_arr = np.array(sorted(phase_scan, key=lambda row: row[0]), dtype=float)
@@ -1143,6 +1166,7 @@ def run_phase_scan(
         n_ok=phase_scan_arr[:, 3],
         pz0_MeV_c=float(pz0_MeV_c),
         refined=refined_applied,
+        circular=circular,
     )
 
 

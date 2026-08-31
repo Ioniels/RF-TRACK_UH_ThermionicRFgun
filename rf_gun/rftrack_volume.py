@@ -89,10 +89,13 @@ class VolumeBuildParams:
     deflection_B_pk_per_A_T: float = DEFAULT_B_PK_PER_A_T
     deflection_z_p_mm: float = DEFAULT_Z_P_MM
     deflection_w_mm: float = DEFAULT_W_MM
-    #: Opt-in, default off: a thin absorbing element behind z=0 recording each backward-crossing
-    #: particle's exact state via RF-Track's own particle-loss table (see
-    #: `rf_gun.aperture.build_cathode_backstop`). Provisional -- not yet checked against a real run.
-    cathode_backstop_enabled: bool = False
+    #: A thin absorbing element behind z=0 recording each backward-crossing particle's exact state
+    #: via RF-Track's own particle-loss table (see `rf_gun.aperture.build_cathode_backstop`) --
+    #: this is what makes a returning electron get absorbed instead of unphysically continuing to
+    #: bounce through the field region, and enables the validated v2 backstop_raycast_v1
+    #: back-bombardment capture. On by default: this is real transport physics, not an optional
+    #: diagnostic -- disable only for a deliberate A/B comparison against the pre-backstop behavior.
+    cathode_backstop_enabled: bool = True
     cathode_backstop_thickness_mm: float = DEFAULT_CATHODE_BACKSTOP_THICKNESS_MM
 
     @property

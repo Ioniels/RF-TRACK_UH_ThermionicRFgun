@@ -356,7 +356,6 @@ def plot_emission_model_sensitivities(
     axA.set_xscale("log")
     axA.set_ylabel(r"$J\,(\mathrm{A\,m^{-2}})$")
     axA.set_title("Current density")
-    axA.legend(frameon=False, fontsize=8, loc="best")
 
     for ax, ylabel, title in (
         (axB, r"$S_F=\partial\ln J/\partial\ln F$", "Field sensitivity"),
@@ -371,6 +370,9 @@ def plot_emission_model_sensitivities(
         ax.set_xlabel(r"$F\,(\mathrm{V\,m^{-1}})$")
         ax.grid(alpha=0.3)
 
-    fig.suptitle(rf"Emission-model sensitivities: $T={T_K:.0f}\,$K, $\Phi={phi_eV:.2f}\,$eV")
+    # One shared legend above the whole figure, outside every axes -- the model-name strings are
+    # too long to fit inside a panel without overlapping the curves.
+    handles, labels = axA.get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=2, frameon=False, fontsize=8)
     plt.show()
     return sens_by_model

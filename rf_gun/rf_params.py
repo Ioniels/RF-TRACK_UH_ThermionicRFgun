@@ -43,6 +43,7 @@ class PhaseCalibrationResult:
     refined: bool
     valid: bool
     invalid_reason: Optional[str]
+    circular: bool = False
 
     @property
     def valid_fraction(self) -> float:
@@ -56,10 +57,21 @@ def build_phase_calibration_result(
     n_ok: np.ndarray,
     pz0_MeV_c: float,
     refined: bool,
+    circular: bool = False,
 ) -> PhaseCalibrationResult:
     """Build and validate a `PhaseCalibrationResult` from a phase scan already sorted by
     `phi_rel_deg` (as `run_phase_scan` produces). Pure numpy -- no RF-Track dependency, so it is
-    directly unit-testable against synthetic scans."""
+    directly unit-testable against synthetic scans.
+
+    `circular=True` (a scan spanning a full 360deg period) makes the crest-bracket check wrap
+    around the array ends: phase 359.x deg is physically adjacent to phase 0 deg, even though they
+    are the first and last entries of a flat array once the duplicate 0/360 endpoint has been
+    removed (as `run_phase_scan` does). Without this, a crest landing near the seam would be
+    reported as "unbracketed" (only one real neighbor exists in the flat array) even when it is a
+    perfectly well-resolved local maximum. `circular=False` (the default -- a genuine partial-range
+    scan) keeps the array ends as physically real boundaries: a crest at the edge of a deliberately
+    partial scan has no reason to be treated as adjacent to the opposite edge.
+    """
     phi_rel_deg = np.asarray(phi_rel_deg, dtype=float)
     phi_abs_deg = np.asarray(phi_abs_deg, dtype=float)
     pz_mean_MeV_c = np.asarray(pz_mean_MeV_c, dtype=float)
@@ -77,17 +89,26 @@ def build_phase_calibration_result(
     if start is not None:
         valid_intervals.append((start, len(finite_mask) - 1))
 
+    n = pz_mean_MeV_c.size
     crest_index: Optional[int] = None
     crest_bracketed = False
     if np.any(finite_mask):
         crest_index = int(np.nanargmax(pz_mean_MeV_c))
-        lo_i, hi_i = crest_index - 1, crest_index + 1
-        crest_bracketed = (
-            0 <= lo_i < pz_mean_MeV_c.size
-            and 0 <= hi_i < pz_mean_MeV_c.size
-            and bool(finite_mask[lo_i])
-            and bool(finite_mask[hi_i])
-        )
+        if circular and n > 2:
+            lo_i = (crest_index - 1) % n
+            hi_i = (crest_index + 1) % n
+            crest_bracketed = (
+                lo_i != crest_index and hi_i != crest_index
+                and bool(finite_mask[lo_i]) and bool(finite_mask[hi_i])
+            )
+        else:
+            lo_i, hi_i = crest_index - 1, crest_index + 1
+            crest_bracketed = (
+                0 <= lo_i < n
+                and 0 <= hi_i < n
+                and bool(finite_mask[lo_i])
+                and bool(finite_mask[hi_i])
+            )
 
     crest_pz = float(pz_mean_MeV_c[crest_index]) if crest_index is not None else None
     invalid_reason: Optional[str] = None
@@ -119,6 +140,7 @@ def build_phase_calibration_result(
         refined=bool(refined),
         valid=valid,
         invalid_reason=invalid_reason,
+        circular=bool(circular),
     )
 
 

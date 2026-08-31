@@ -521,14 +521,6 @@ def _panel_impact_footprint(ax, events, geometry) -> None:
     ax.set_title("Impact footprint and zones")
     ax.legend(fontsize=6, loc="upper right", framealpha=0.85)
 
-    Q_C = float(np.sum(w) * q_e)
-    ax.text(
-        0.02, 0.02,
-        f"Population: all qualified events (N={events.n_events}); "
-        f"Q={_sci(Q_C)} C, E_incident={_sci(float(np.sum(E)))} J",
-        transform=ax.transAxes, fontsize=5.5, va="bottom",
-    )
-
 
 def _panel_deposited_energy_density(ax, fig, heat_source, geometry) -> None:
     """Figure A, panel 2: deposited-energy density map (plan Sec. 12, item 2).
@@ -559,20 +551,8 @@ def _panel_deposited_energy_density(ax, fig, heat_source, geometry) -> None:
     ax.set_xlabel(r"$x\,(\mathrm{mm})$")
     ax.set_ylabel(r"$y\,(\mathrm{mm})$")
     ax.set_aspect("equal")
-    ax.set_title("Deposited-energy density (flat + bevel, one combined map)")
+    ax.set_title("Deposited energy per cell (flat + bevel)")
     ax.legend(fontsize=5.5, loc="upper right", labelcolor="black", framealpha=0.85)
-
-    bevel_annulus_mm2 = float(np.pi * (geometry.bevel_outer_radius_mm**2 - geometry.flat_radius_mm**2))
-    area_factor = 1.0 / float(np.cos(geometry.bevel_angle_rad))
-    E_inc = float(heat_source.total_incident_energy_J)
-    E_dep = float(heat_source.total_deposited_energy_J)
-    note = (
-        f"E_incident={_sci(E_inc)} J, E_deposited={_sci(E_dep)} J (all LaB6 zones, all depth "
-        f"layers). NOT area-corrected: true bevel area "
-        f"({geometry.bevel_true_area_mm2:.4f} mm$^2$) = {area_factor:.3f}x its projected annulus "
-        f"area ({bevel_annulus_mm2:.4f} mm$^2$) -- bevel color values are per PROJECTED cell area."
-    )
-    ax.text(0.0, -0.20, note, transform=ax.transAxes, fontsize=5.3, va="top", wrap=True)
 
 
 def _panel_return_phase_energy(ax, events) -> None:
@@ -603,12 +583,6 @@ def _panel_return_phase_energy(ax, events) -> None:
     ax.set_title("Return phase vs. impact energy")
     ax.legend(fontsize=6, loc="best")
     ax.grid(alpha=0.3)
-    ax.text(
-        0.02, 0.98,
-        f"Population: all qualified events (N={events.n_events}); marker size ~ "
-        "macro_weight_electrons",
-        transform=ax.transAxes, fontsize=5.5, va="top",
-    )
 
 
 def _panel_energy_incidence_distributions(ax, events) -> None:
@@ -626,9 +600,7 @@ def _panel_energy_incidence_distributions(ax, events) -> None:
     codes = np.asarray(events.surface_code)
     w = np.asarray(events.macro_weight_electrons, dtype=float)
     K_keV = np.asarray(events.kinetic_energy_eV, dtype=float) / 1.0e3
-    theta_deg = np.degrees(np.asarray(events.incidence_angle_rad, dtype=float))
 
-    stat_lines = []
     for code in sorted(int(c) for c in np.unique(codes)):
         style = _zone_style(code)
         m = codes == code
@@ -644,17 +616,10 @@ def _panel_energy_incidence_distributions(ax, events) -> None:
         if np.isfinite(p50):
             ax.axvline(p50, color=style["color"], ls=":", lw=1)
 
-        t16, t50, t84 = _weighted_percentile(theta_deg[m], w[m], [16.0, 50.0, 84.0])
-        stat_lines.append(f"{style['label']}: $\\theta$={t50:.1f}$^\\circ$ [{t16:.1f},{t84:.1f}]")
-
     ax.set_xlabel(r"$K_{\rm hit}\,(\mathrm{keV})$")
     ax.set_ylabel("weighted counts (electrons)")
-    ax.set_title("Energy spectrum by zone (shaded: weighted 16-84th pct)")
+    ax.set_title("Energy spectrum by zone (shaded: 16-84th pct)")
     ax.legend(fontsize=6, loc="upper right")
-    ax.text(
-        0.98, 0.55, "Incidence angle, 16/50/84th weighted pct:\n" + "\n".join(stat_lines),
-        transform=ax.transAxes, fontsize=5.3, va="top", ha="right",
-    )
 
 
 def _panel_origin_to_impact(ax, events) -> None:
@@ -679,70 +644,105 @@ def _panel_origin_to_impact(ax, events) -> None:
     ax.set_ylabel(r"$y_{\rm emit}\,(\mathrm{mm})$")
     ax.set_title("Emission origin, colored by incident energy")
     ax.set_aspect("equal")
-    ax.text(
-        0.0, -0.20,
-        "Colored by per-event incident_energy_J (proxy for deposited energy -- exact per-event "
-        "deposited energy exists only aggregated onto the spatial/depth grid, not per event).",
-        transform=ax.transAxes, fontsize=5.3, va="top", wrap=True,
+
+
+def _panel_backward_trajectories(ax, events, M_snaps, z_snaps, n_samples: int) -> None:
+    """Panel 6: z/pz trajectory across screens for a handful of returning particles, sampled to
+    span the range of how far each got (`furthest_z_m`) before turning back -- not a random or
+    first-N sample, so the panel shows both near-immediate returns and particles that nearly
+    transmitted before reversing.
+    """
+    pids = np.asarray(events.particle_id, dtype=np.int64)
+    if not M_snaps or not z_snaps or pids.size == 0:
+        ax.axis("off")
+        ax.text(0.5, 0.5, "No trajectory data available", ha="center", va="center", transform=ax.transAxes)
+        return
+
+    reach_m = np.asarray(events.furthest_z_m, dtype=float)
+    order = np.argsort(reach_m)
+    n_pick = min(int(n_samples), pids.size)
+    pick = np.unique(np.linspace(0, pids.size - 1, n_pick).round().astype(int))
+    sample_pids = pids[order][pick]
+
+    for pid in sample_pids:
+        z_mm, pz_MeVc = screen_trajectory(int(pid), M_snaps, z_snaps)
+        if z_mm.size:
+            ax.plot(z_mm, pz_MeVc, "-o", ms=3, lw=1.2, alpha=0.85)
+
+    ax.axhline(0.0, color="gray", ls="--", lw=1.0, alpha=0.6)
+    ax.set_xlabel(r"screen $z\,(\mathrm{mm})$")
+    ax.set_ylabel(r"$p_z\,(\mathrm{MeV/c})$")
+    ax.set_title(f"Sample trajectories (N={len(sample_pids)})")
+    ax.grid(alpha=0.3)
+
+
+def print_back_bombardment_source_qualification_summary(study: "BackBombardmentMacropulseStudy") -> None:
+    """Printed counterpart to `plot_back_bombardment_source_qualification`'s figure: event
+    locator, surface counts, charge/energy accounting, incidence-angle quantiles, and the
+    deposited-energy area-correction caveat -- everything the figure keeps out of its axes."""
+    events = study.study_input.events
+    hs = study.heat_source
+    geometry = study.config.geometry
+
+    codes = np.asarray(events.surface_code)
+    w = np.asarray(events.macro_weight_electrons, dtype=float)
+    theta_deg = np.degrees(np.asarray(events.incidence_angle_rad, dtype=float))
+    Q_C = float(np.sum(w) * q_e)
+    E_inc_total = float(np.sum(np.asarray(events.incident_energy_J, dtype=float)))
+
+    print(f"Back-bombardment source qualification -- event_locator={events.event_locator!r}, N={events.n_events}")
+    print(f"  Q_incident={_sci(Q_C)} C | E_incident={_sci(E_inc_total)} J")
+    for code in sorted(int(c) for c in np.unique(codes)):
+        style = _zone_style(code)
+        m = codes == code
+        if not np.any(m):
+            continue
+        t16, t50, t84 = _weighted_percentile(theta_deg[m], w[m], [16.0, 50.0, 84.0])
+        print(f"  {style['label']}: N={int(np.sum(m))}, incidence angle 50th[16,84]pct = {t50:.1f}[{t16:.1f},{t84:.1f}] deg")
+
+    bevel_annulus_mm2 = float(np.pi * (geometry.bevel_outer_radius_mm**2 - geometry.flat_radius_mm**2))
+    area_factor = 1.0 / float(np.cos(geometry.bevel_angle_rad))
+    print(
+        f"  Deposited-energy panel is J/cell, NOT area-corrected: true bevel area "
+        f"({geometry.bevel_true_area_mm2:.4f} mm^2) = {area_factor:.3f}x its projected annulus "
+        f"({bevel_annulus_mm2:.4f} mm^2)."
     )
 
-
-def _panel_accounting(ax, events, heat_source) -> None:
-    """Figure A, panel 6: accounting and convergence (plan Sec. 12, item 6) -- emitted/returned/
-    transmitted/other-loss charge and incident/deposited/escape energy, plus a `1/sqrt(N)`
-    particle-number statistical-uncertainty note (a full bootstrap is deliberately out of scope for
-    this pass, per the task description).
-    """
-    ax.axis("off")
     accounting = events.accounting if isinstance(events.accounting, dict) else {}
     charge = accounting.get("charge_C", {}) if isinstance(accounting.get("charge_C", {}), dict) else {}
     energy = accounting.get("energy_J", {}) if isinstance(accounting.get("energy_J", {}), dict) else {}
     n = events.n_events
-
-    lines = [
-        f"Q_emitted             = {_fmt_charge_energy(charge.get('emitted'))} C",
-        f"Q_returned (after)    = {_fmt_charge_energy(charge.get('returned_after_filter'))} C",
-        f"Q_transmitted         = {_fmt_charge_energy(charge.get('transmitted'))} C",
-        f"Q_other_loss          = {_fmt_charge_energy(charge.get('other_lost'))} C",
-        "",
-        f"E_incident (accounting) = {_fmt_charge_energy(energy.get('incident_after_filter'))} J",
-        f"E_incident (BB0, LaB6)  = {_sci(float(heat_source.total_incident_energy_J))} J",
-        f"E_deposited (BB0)       = {_sci(float(heat_source.total_deposited_energy_J))} J",
-        f"E_escape_geometric      = {_sci(float(heat_source.escaping_energy_geometric_J_total))} J",
-        f"E_escape_below_floor    = {_sci(float(heat_source.escaping_energy_below_tio_validity_J_total))} J",
-        f"E_excluded (non-LaB6)   = {_sci(float(heat_source.excluded_non_lab6_energy_J_total))} J",
-        "",
-        f"N_events = {n}  (BB0 included={heat_source.n_events_included}, "
-        f"excluded={heat_source.n_events_excluded})",
-        f"Statistical uncertainty ~ 1/sqrt(N) = {(1.0 / np.sqrt(max(n, 1))):.2%} "
-        "(particle-number estimate, not a bootstrap)",
-    ]
-    ax.text(0.0, 0.98, "\n".join(lines), transform=ax.transAxes, fontsize=7.0, va="top", family="monospace")
-    ax.set_title("Accounting and convergence")
+    print(
+        f"  Q: emitted={_fmt_charge_energy(charge.get('emitted'))} returned={_fmt_charge_energy(charge.get('returned_after_filter'))} "
+        f"transmitted={_fmt_charge_energy(charge.get('transmitted'))} other_loss={_fmt_charge_energy(charge.get('other_lost'))} C"
+    )
+    print(
+        f"  E: incident={_fmt_charge_energy(energy.get('incident_after_filter'))} J | BB0 incident={_sci(float(hs.total_incident_energy_J))} "
+        f"deposited={_sci(float(hs.total_deposited_energy_J))} escape_geom={_sci(float(hs.escaping_energy_geometric_J_total))} "
+        f"escape_floor={_sci(float(hs.escaping_energy_below_tio_validity_J_total))} excluded_non_lab6={_sci(float(hs.excluded_non_lab6_energy_J_total))} J"
+    )
+    print(
+        f"  N_events={n} (BB0 included={hs.n_events_included}, excluded={hs.n_events_excluded}) | "
+        f"statistical uncertainty ~1/sqrt(N)={(1.0 / np.sqrt(max(n, 1))):.2%}"
+    )
 
 
-def plot_back_bombardment_source_qualification(study: "BackBombardmentMacropulseStudy", *, style=None):
-    """Figure A (plan Sec. 12): representative-cycle back-bombardment source qualification -- a
-    2x3 layout of six panels built from `study.study_input.events` (`BackBombardmentEvents`),
-    `study.heat_source` (`BackBombardmentHeatSource`), and `study.config.geometry`
-    (`CathodeGeometry`).
+def plot_back_bombardment_source_qualification(
+    study: "BackBombardmentMacropulseStudy",
+    *,
+    M_snaps: Optional[Sequence[np.ndarray]] = None,
+    z_snaps: Optional[Sequence[float]] = None,
+    n_trajectory_samples: int = 10,
+    style=None,
+):
+    """Representative-cycle back-bombardment source qualification, 2x3: row 1 is the three spatial
+    maps (impact footprint, deposited energy, emission origin); row 2 is return phase vs. energy,
+    the energy spectrum by zone, and a sample of return trajectories.
 
-    See each `_panel_*` helper above for the exact content and any design decision the plan leaves
-    open; in particular `_panel_deposited_energy_density` (panel 2, the bevel-map treatment) and
-    `_panel_energy_incidence_distributions` (panel 4, folding the incidence-angle distribution into
-    a text summary rather than a second histogram panel) document why this figure stays a literal
-    six-panel grid.
-
-    `fig.bb_source_qualification_panels` is set to the list of the six primary panel `Axes` (panel
-    order 1-6) purely so a caller/test can check panel count deterministically: `fig.colorbar(...)`
-    (used by panels 2 and 5) appends its own `Axes` to `fig.axes`, so `len(fig.axes)` alone is not
-    six even though there are exactly six logical panels.
-
-    Every panel states its own population filter and weighted charge/energy directly in its own
-    annotation (plan Sec. 12's explicit requirement, echoing Sec. 2.2's critique of the legacy
-    figures for not doing this) -- every panel here operates on the full qualified `events`
-    population (no panel applies additional filtering beyond what `events` itself already
-    represents), and says so explicitly rather than leaving the reader to assume it.
+    `M_snaps`/`z_snaps` (the production transport's own screen snapshots) are needed for the
+    trajectory panel; without them that panel reports itself unavailable rather than the figure
+    failing. Accounting/quantiles/units live in
+    `print_back_bombardment_source_qualification_summary`, not in the axes.
     """
     import matplotlib.pyplot as plt
     from matplotlib.gridspec import GridSpec
@@ -752,8 +752,8 @@ def plot_back_bombardment_source_qualification(study: "BackBombardmentMacropulse
     heat_source = study.heat_source
     geometry = study.config.geometry
 
-    fig = plt.figure(figsize=(19.0, 11.5))
-    gs = GridSpec(2, 3, figure=fig, wspace=0.5, hspace=0.6)
+    fig = plt.figure(figsize=(15.0, 9.0))
+    gs = GridSpec(2, 3, figure=fig, wspace=0.45, hspace=0.4)
 
     ax1 = fig.add_subplot(gs[0, 0])
     _panel_impact_footprint(ax1, events, geometry)
@@ -762,21 +762,16 @@ def plot_back_bombardment_source_qualification(study: "BackBombardmentMacropulse
     _panel_deposited_energy_density(ax2, fig, heat_source, geometry)
 
     ax3 = fig.add_subplot(gs[0, 2])
-    _panel_return_phase_energy(ax3, events)
+    _panel_origin_to_impact(ax3, events)
 
     ax4 = fig.add_subplot(gs[1, 0])
-    _panel_energy_incidence_distributions(ax4, events)
+    _panel_return_phase_energy(ax4, events)
 
     ax5 = fig.add_subplot(gs[1, 1])
-    _panel_origin_to_impact(ax5, events)
+    _panel_energy_incidence_distributions(ax5, events)
 
     ax6 = fig.add_subplot(gs[1, 2])
-    _panel_accounting(ax6, events, heat_source)
+    _panel_backward_trajectories(ax6, events, M_snaps, z_snaps, n_trajectory_samples)
 
     fig.bb_source_qualification_panels = [ax1, ax2, ax3, ax4, ax5, ax6]
-    fig.suptitle(
-        f"Back-bombardment source qualification -- representative RF period "
-        f"(N={events.n_events} qualified events, event_locator={events.event_locator!r})",
-        y=0.995,
-    )
     return fig
