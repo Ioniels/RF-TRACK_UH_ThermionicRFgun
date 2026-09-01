@@ -103,52 +103,21 @@ absolute values.
 - **Interpolation** (`rf_gun.phasor.build_field_interpolation_context`/`interp_cfield`): the source
   Delaunay triangulation and hull-membership test are built once and reused across every field
   component sharing a grid. Outside the native convex hull the field is exactly zero (never
-  nearest-neighbor-extrapolated); a handful of interior points that a linear interpolant leaves
-  non-finite (e.g. an exact simplex-edge degeneracy) are repaired via a KD-tree nearest lookup,
-  counted separately as `repaired_hole_fraction`. Both fractions are printed at run time and stored
-  in `run_config.json`'s `field_provenance.interpolation` block.
+  nearest-neighbor-extrapolated).
 - **Magnetic field:** the raw `.mat` sensor files expose only `TotalField_E_X/Y/Z` (confirmed by
-  direct inspection of every top-level key) — no B/H component exists to measure. `RF_FieldMap_2d`
-  is therefore built with `Bt=Bz=0.0`, which reflects the source data rather than an assumption.
-  `run_config.json`'s `field_provenance.magnetic_field_source` records this status explicitly.
-  **Every result in this repository is E-only**; any transverse-force or emission-field
-  sensitivity that would depend on the cavity's real azimuthal RF `Bphi` is unverified until a
-  measured or independently-derived Maxwell-consistent magnetic map is supplied.
+  direct inspection of every top-level key) — no B/H component in these files for now.
 - **`BeamLoadingSW`:** constructed with the single documented RF-Track 2.7 constructor,
-  `BeamLoadingSW(SWS, Q, r_Q, Ncells, mass, q, tinj)` (confirmed by introspecting the installed
-  binding — it has exactly one constructor, not several to guess between); construction failure
-  raises immediately with the detected RF-Track version rather than retrying alternate argument
-  counts. `get_Lcell`/`get_tfill`/`get_tinj`/`get_TT1`/`get_TT2` are checked finite immediately
-  after construction.
+  `BeamLoadingSW(SWS, Q, r_Q, Ncells, mass, q, tinj)`.
 - **Volume element ordering:** `V.set_s0()`/`set_s1()` are called before the dynamic
-  aperture/backstop/deflection elements are added — the RF-Track 2.7 manual's general
-  recommendation (set them after every element) was tried previously and produced a spurious,
-  all-particles-lost phase-scan crest on a real production run. A direct A/B regression against
-  the real field maps (`tests/test_s0_s1_ordering.py`: RF field + aperture + backstop, space
-  charge/mirror/beam-loading/deflection off) found both orderings give bit-identical results for
-  that configuration, so the divergence must involve one of the untested elements at production
-  scale — open for future investigation, tracked by that regression test rather than left silently
-  unresolved.
+  aperture/backstop/deflection elements are added.
 - **RF-only phase calibration** (`rf_gun.simulation.run_phase_scan`,
   `rf_gun.rf_params.PhaseCalibrationResult`): the calibration source is genuinely on-axis and cold
-  (`x=y=px=py=0` for every particle, negligible charge — `build_bunch_on_axis_cold`), reused
-  unchanged at every phase (no RNG advances between phase points). Space charge, mirror charge,
-  beam loading, the cathode backstop, and the deflection magnet are all forced off for this scan
-  regardless of the caller's production settings. The coarse phase grid never repeats both 0° and
-  360° (the same physical phase) unless a genuine partial-range scan was requested. The result is
-  valid only if a crest exists with finite scan neighbors on both sides (a resolved local maximum,
-  not an isolated finite point) and represents a net forward energy gain; an invalid calibration
-  raises immediately, before `Veff`, `R/Q`, or any beam-loading-dependent quantity is computed or
-  written to `run_config.json` — this is the fix for the historical failure mode where a scan with
-  43 of 61 non-finite points still produced `Veff=NaN` written to disk.
+  (`x=y=px=py=0` for every particle, negligible charge — `build_bunch_on_axis_cold`).
 
 ## Self-consistent cathode emission
 
-- **Emission models** (`--emission_law`; naming convention: a short author/paper-code prefix plus
-  the two physical regimes/effects the model combines — see `rf_gun.emission_models` module
-  docstring; every name this repo has ever used for these models, including an earlier
-  author_papercode_year intermediate renaming, still works as a permanent backward-compatible
-  alias):
+- **Emission models** (`--emission_law`; see `rf_gun.emission_models` module
+  docstring:
   - `RDSchottky` (was `RD_schottky`, default) — *"Thermionic: Richardson-Dushman-Schottky"* —
     classical Richardson-Dushman thermionic emission with Schottky barrier lowering.
   - `jensen2014_RDSchottky_MurphyGood_additive` (was `rld_schottky_plus_mg`/`unified`) —
@@ -171,10 +140,6 @@ absolute values.
     `NotImplementedError`) — `jensen2019_RDSchottky_MurphyGood_transition` supersedes it as the
     production general thermal-field model.
 
-  The four core papers behind these models live in
-  `manual_references/Thermionic Emission Models/` (a local, untracked reference folder — see
-  `.gitignore`). `--compare-emission-models` evaluates several models at once for the
-  emission-model comparison and sensitivity figures.
 - **LaB6⟨100⟩ work function models** (`--work-function-temperature-model`): `constant_phi_eff`
   (Liu et al. 2017 thermionic anchor), `linear_tcwf` (that anchor extended with a
   temperature-coefficient-of-work-function slope), and `piecewise_surface_evolution` (a

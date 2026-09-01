@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Dict
 
 import numpy as np
-from scipy.interpolate import griddata, UnivariateSpline
+from scipy.interpolate import LinearNDInterpolator, UnivariateSpline
 from scipy.spatial import Delaunay, cKDTree
 
 
@@ -119,6 +119,7 @@ class FieldInterpolationContext:
     components sharing one context should not silently overwrite each other's diagnostic).
     """
 
+    tri: Delaunay
     kdtree: cKDTree
     target_pts: np.ndarray  # (n_target, 2), flattened (r, z) target grid points
     inside_hull: np.ndarray  # bool, flattened target-grid mask: True where inside native support
@@ -140,7 +141,7 @@ def build_field_interpolation_context(pts: np.ndarray, R: np.ndarray, Z: np.ndar
     inside = tri.find_simplex(target_pts) >= 0
     kdtree = cKDTree(pts)
     return FieldInterpolationContext(
-        kdtree=kdtree, target_pts=target_pts, inside_hull=inside, shape=np.asarray(R).shape
+        tri=tri, kdtree=kdtree, target_pts=target_pts, inside_hull=inside, shape=np.asarray(R).shape
     )
 
 
@@ -171,8 +172,11 @@ def interp_cfield(
         ctx = build_field_interpolation_context(pts, R, Z)
     shape = ctx.shape
 
-    re_lin = griddata(pts, phasor.real, (R, Z), method="linear").reshape(-1)
-    im_lin = griddata(pts, phasor.imag, (R, Z), method="linear").reshape(-1)
+    # LinearNDInterpolator built directly on ctx.tri (not scipy.interpolate.griddata, which would
+    # silently re-triangulate `pts` from scratch on every call -- the exact rebuild `ctx` exists to
+    # avoid): one interpolator per component, reusing the same tessellation for real and imag.
+    re_lin = LinearNDInterpolator(ctx.tri, phasor.real)(ctx.target_pts)
+    im_lin = LinearNDInterpolator(ctx.tri, phasor.imag)(ctx.target_pts)
 
     inside = ctx.inside_hull
     re_flat = np.where(inside, re_lin, float(np.real(outside_value)))

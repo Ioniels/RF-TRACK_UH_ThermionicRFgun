@@ -919,6 +919,17 @@ def extract_back_bombardment_events(
             "events despite the backstop being enabled, lost_table would still be a (0, 11) array, "
             "not None/absent; a None/missing table means the backstop was not enabled for this run."
         )
+    if vol_params is not None and not bool(getattr(vol_params, "cathode_backstop_enabled", False)):
+        raise ValueError(
+            "extract_back_bombardment_events: vol_params.cathode_backstop_enabled is False, but "
+            "this function's whole event-capture method (backstop_raycast_v1) depends on the "
+            "backstop having been physically present during tracking. A non-empty lost_table here "
+            "means something else (ordinary dynamic-aperture losses) populated it -- proceeding "
+            "would build a 'validated' event set from candidates that were never actually screened "
+            "by identify_backstop_loss_candidates against a real backstop. Re-track with "
+            "VolumeBuildParams(cathode_backstop_enabled=True), or omit vol_params if this really "
+            "is intentional (e.g. an external lost_table of known provenance)."
+        )
 
     thermo_info: dict[str, Any] = dict(getattr(simulation_result, "thermo_info", None) or {})
     B0 = getattr(simulation_result, "B0", None)

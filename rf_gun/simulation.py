@@ -216,6 +216,11 @@ def _runtime_key_payload(vol_params_eff: VolumeBuildParams, tracking: TrackingPa
         "sc_ny": int(getattr(vol_params_eff, "sc_ny", 0)),
         "sc_nz": int(getattr(vol_params_eff, "sc_nz", 0)),
         "mirror_charge_enabled": bool(getattr(vol_params_eff, "mirror_charge_enabled", False)),
+        # The cathode backstop adds real absorbing geometry and extends s0 backward (see
+        # rftrack_volume.build_volume) -- a backstop-on run must not silently reuse a runtime
+        # estimate cached from a backstop-off run.
+        "cathode_backstop_enabled": bool(getattr(vol_params_eff, "cathode_backstop_enabled", False)),
+        "cathode_backstop_thickness_mm": float(getattr(vol_params_eff, "cathode_backstop_thickness_mm", np.nan)),
     }
 
 

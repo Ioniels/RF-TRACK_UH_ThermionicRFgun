@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional
 
 import matplotlib as mpl
@@ -68,6 +69,7 @@ EMISSION_MODEL_COLORS = {
 }
 
 
+@lru_cache(maxsize=1)
 def get_default_density_cmap() -> LinearSegmentedColormap:
     """Return the default plasma colormap with transparent white at lowest density.
 
@@ -87,6 +89,7 @@ def get_default_density_cmap() -> LinearSegmentedColormap:
     return LinearSegmentedColormap.from_list("plasma_with_white", new_colors)
 
 
+@lru_cache(maxsize=1)
 def get_lost_cmap() -> LinearSegmentedColormap:
     """Green-gradient colormap for particles removed by the dynamic aperture, transparent at
     lowest density.

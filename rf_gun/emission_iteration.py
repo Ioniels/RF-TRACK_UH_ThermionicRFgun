@@ -46,7 +46,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
-from .constants import ME_MEV, c, q_e
+from .constants import ME_KG, ME_MEV, c, q_e
 from .emission_models import evaluate_emission_model
 from .emission_sampling import sample_thermionic_momenta
 from .work_function_models import evaluate_work_function_eV
@@ -258,10 +258,6 @@ def _bunch_matrix_from_weights(sample: Dict[str, np.ndarray], N_i: np.ndarray, m
     ])
 
 
-#: Electron mass, kg (SI) -- used only for the ballistic z-drift estimate below.
-_ME_KG = 9.1093837015e-31
-
-
 def _ballistic_z_drift_mm(F_local_creation_Vpm: np.ndarray, dt_since_creation_s: np.ndarray, z_max_m: float) -> np.ndarray:
     """Rough kinematic estimate z(dt) = 0.5*(e*F/m_e)*dt^2 of how far an already-emitted electron
     has drifted from the cathode by `dt_since_creation_s` after its own creation, given the
@@ -279,7 +275,7 @@ def _ballistic_z_drift_mm(F_local_creation_Vpm: np.ndarray, dt_since_creation_s:
     """
     F = np.maximum(np.asarray(F_local_creation_Vpm, dtype=float), 0.0)
     dt = np.maximum(np.asarray(dt_since_creation_s, dtype=float), 0.0)
-    accel = (q_e * F) / _ME_KG  # m/s^2
+    accel = (q_e * F) / ME_KG  # m/s^2
     z_m = 0.5 * accel * dt ** 2
     return np.minimum(z_m, z_max_m) * 1.0e3  # mm
 
@@ -459,7 +455,7 @@ def run_emission_field_iteration(
 
     near_cathode_params = volume_params.replace(
         z_min_m=0.0, z_max_m=max(float(config.z_max_m), 5.0 * z_probe_m),
-        sc_enabled=False, beam_loading_enabled=False,
+        sc_enabled=False, beam_loading_enabled=False, deflection_enabled=False,
     )
     V_field = build_volume(rft, Er_grid, Ez_grid, float(phi_deg), near_cathode_params)
     E_RF = sample_rf_field_on_cathode(rft, V_field, x_grid_m, y_grid_m, t_grid_s, z_probe_m)

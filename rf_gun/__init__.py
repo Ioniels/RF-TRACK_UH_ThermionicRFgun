@@ -170,6 +170,7 @@ from .aperture import (
     build_dynamic_aperture,
     build_cathode_backstop,
 )
+from .backstop_loss_separation import identify_backstop_loss_candidates
 from .particle_tags import (
     ParticleTags,
     build_particle_tags,
@@ -468,6 +469,7 @@ __all__ = [
 	"important_locations_mm",
 	"build_dynamic_aperture",
 	"build_cathode_backstop",
+	"identify_backstop_loss_candidates",
 	"ParticleTags",
 	"build_particle_tags",
 	"backward_ids_from_bout",

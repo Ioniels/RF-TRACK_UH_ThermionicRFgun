@@ -294,8 +294,6 @@ def plot_back_bombardment_energy_density(
     """
     import matplotlib.pyplot as plt
 
-    from .style import add_cathode_boundary_circle
-
     v = data.heating_relevant
     if not np.any(v):
         print("No particles with a physically plausible, cathode-relevant reconstruction.")
