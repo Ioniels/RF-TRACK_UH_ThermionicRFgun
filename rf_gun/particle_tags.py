@@ -1,8 +1,9 @@
-"""Shared particle-identity tagging: who is backward, who was lost by the dynamic aperture.
+"""Shared particle-identity tagging: who is backward, who was lost to the dynamic aperture.
 
 Computed once per run from `Bout`'s reliable absolute z/pz and RF-Track's own lost-particle
 table (`V.get_lost_particles()`, populated automatically whenever the dynamic aperture,
-`rf_gun.aperture.build_dynamic_aperture`, removes a particle during tracking), then reused
+`rf_gun.aperture.build_dynamic_aperture`, or the cathode backstop,
+`rf_gun.aperture.build_cathode_backstop`, removes a particle during tracking), then reused
 everywhere else (`compute_beam_properties`, every phase-space plot) via `%id` cross-referencing.
 
 Why `%id`, not a screen's own (z, pz): a `Screen`'s recorded phase space comes from an internal
@@ -13,10 +14,17 @@ are absolute and reliable, so tagging is done there and propagated to screens by
 identity (`%id`, confirmed to survive intact through B0 -> Screen -> Bout) rather than trusted
 from the screen's own columns.
 
-A particle removed by the dynamic aperture is physically gone from the moment it's removed
-onward: every screen upstream of that point still records it (it was alive then), and every
-screen downstream never records it at all. No z-gating is needed here -- `lost_ids` is simply
-"this id appears in RF-Track's own lost-particle table," true everywhere, always.
+A particle removed by the dynamic aperture or the backstop is physically gone from the moment
+it's removed onward: every screen upstream of that point still records it (it was alive then),
+and every screen downstream never records it at all. No z-gating is needed here -- `lost_ids` is
+simply "this id appears in RF-Track's own lost-particle table," true everywhere, always.
+
+The backstop and the dynamic aperture populate that same combined table with no per-row element
+tag, but they are not the same category: a backstop capture is a returning, back-bombarding
+particle -- physically backward, not a transverse aperture loss -- and `build_particle_tags`'s
+`backstop_z_min_m` argument reclassifies it into `backward_ids` accordingly (see its docstring).
+`lost_ids` alone is therefore the *dynamic-aperture-only* loss count whenever `backstop_z_min_m`
+is supplied; use `backward_ids | lost_ids` for a simple forward-vs-everything-else dichotomy.
 """
 from __future__ import annotations
 
@@ -56,6 +64,13 @@ MAX_PHYSICAL_KINETIC_ENERGY_MEV = 10.0
 class ParticleTags:
     backward_ids: frozenset
     lost_ids: frozenset  # empty frozenset when nothing was removed by the dynamic aperture
+    #: Subset of `backward_ids` whose back-bombardment ray-cast landed on LaB6 (the cathode flat
+    #: or its bevel). This is the population that actually heats the cathode, and it is a strict
+    #: subset: a backward particle can pass the cathode plane through the open annulus outside the
+    #: 3.2 mm LaB6 disk, or be absorbed on the cavity nose, without ever striking LaB6.
+    #: Empty when back-bombardment events were not captured for the run.
+    cathode_hit_ids: frozenset = frozenset()
+
 
 
 def _ids_of(M: np.ndarray, id_col: int = ID_COL) -> np.ndarray:
@@ -124,6 +139,31 @@ def unphysical_ids_from_bout(
     return frozenset(ids[bad].tolist())
 
 
+def backward_ids_from_lost_table(
+    lost_table: Optional[np.ndarray], id_col: int = LOST_TABLE_ID_COL, pz_col: int = 5
+) -> frozenset:
+    """IDs of every lost-table row that was travelling BACKWARD when it was removed (`Pz < 0`).
+
+    This is the physical definition of "went backward", and it is deliberately broader than
+    `backstop_ids_from_lost_table`, which additionally requires the row to sit in a narrow z-band
+    just behind the cathode. Those are two different questions:
+
+      * which rows do we ray-cast for a cathode impact?  -> the z-band (they are near the cathode)
+      * which particles actually turned around?          -> this one (`Pz < 0`, anywhere)
+
+    On the 1650 K / 0 A production run the z-band captures 89,514 rows while 170,993 are genuinely
+    backward: 81,479 turned around and were then absorbed on the cavity nose further out, at
+    z ~ 1.9 mm, just past the 1.5 mm slack. Counting those as transverse *aperture* losses -- which
+    is what happened before -- understates the backward population by nearly half.
+    """
+    arr = np.asarray(lost_table, dtype=float) if lost_table is not None else np.zeros((0, 0))
+    if arr.ndim != 2 or arr.shape[0] == 0 or arr.shape[1] <= max(pz_col, abs(id_col)):
+        return frozenset()
+    pz = arr[:, pz_col]
+    backward = np.isfinite(pz) & (pz < 0.0)
+    return frozenset(arr[backward, id_col].astype(np.int64).tolist())
+
+
 def lost_ids_from_lost_table(lost_table: Optional[np.ndarray], id_col: int = LOST_TABLE_ID_COL) -> frozenset:
     """IDs of particles removed by the dynamic aperture during tracking, from RF-Track's own
     `V.get_lost_particles()` table (already normalized to an (n, 11) array by
@@ -136,6 +176,24 @@ def lost_ids_from_lost_table(lost_table: Optional[np.ndarray], id_col: int = LOS
     return frozenset(arr[:, id_col].astype(np.int64).tolist())
 
 
+def backstop_ids_from_lost_table(lost_table: Optional[np.ndarray], backstop_z_min_m: float) -> frozenset:
+    """IDs of `lost_table` rows the cathode backstop actually captured (a returning, back-
+    bombarding particle), as opposed to an ordinary dynamic-aperture (transverse) loss -- both
+    populate the same combined RF-Track table with no per-row element tag (see
+    `rf_gun.aperture.build_cathode_backstop`'s docstring). Delegates the classification rule
+    itself to `rf_gun.backstop_loss_separation.identify_backstop_loss_candidates`; see that
+    function's docstring for why it's `Pz<0` and a Z-band, not a naive `Z<=0` cut."""
+    if lost_table is None:
+        return frozenset()
+    arr = np.asarray(lost_table, dtype=float)
+    if arr.ndim != 2 or arr.shape[0] == 0:
+        return frozenset()
+    from .backstop_loss_separation import identify_backstop_loss_candidates
+
+    is_backstop_row = identify_backstop_loss_candidates(arr, backstop_z_min_m=backstop_z_min_m)
+    return frozenset(arr[is_backstop_row, LOST_TABLE_ID_COL].astype(np.int64).tolist())
+
+
 def build_particle_tags(
     Bout_M: np.ndarray,
     lost_table: Optional[np.ndarray],
@@ -143,6 +201,8 @@ def build_particle_tags(
     threshold_backward_mevc: float = 0.0,
     extra_backward_ids: Optional[frozenset] = None,
     max_kinetic_energy_mev: Optional[float] = MAX_PHYSICAL_KINETIC_ENERGY_MEV,
+    backstop_z_min_m: Optional[float] = None,
+    cathode_hit_ids: Optional[frozenset] = None,
 ) -> ParticleTags:
     """Build the project-wide forward/backward/lost tagging, once per run.
 
@@ -160,16 +220,39 @@ def build_particle_tags(
     classification -- this is how `rf_gun.acceptance_scan`'s data-driven trailing-particle removal
     (`AcceptanceScanResult.trailing_ids`) plugs in, superseding `threshold_backward_mevc` as the
     project's mechanism for widening "backward" beyond the strict `z<0 or Pz<=0` definition.
+
+    `backstop_z_min_m`, when given (the cathode backstop's global z span's lower edge, i.e.
+    `-thickness_mm*1e-3` in this project's `z0_global=0` convention), reclassifies every
+    `lost_table` row the backstop actually captured (see `backstop_ids_from_lost_table`) as
+    *backward*, not lost: a particle absorbed by the backstop physically turned around and
+    returned toward the cathode -- it is the back-bombardment population, not an ordinary
+    transverse aperture loss, and belongs in "backward" everywhere forward/backward/lost is
+    reported. Omit (the default, `None`) to keep every `lost_table` row as `lost_ids` unchanged --
+    the pre-backstop-aware behavior, kept for callers that have not supplied this yet. Use
+    `backward_ids | lost_ids` wherever a simple forward-vs-"everything else" dichotomy (not the
+    three-way breakdown) is wanted -- backward particles are still a form of total loss from the
+    transmitted beam, just not a *dynamic-aperture* one.
     """
     backward_ids = backward_ids_from_bout(Bout_M, id_col, threshold_backward_mevc=threshold_backward_mevc)
     if extra_backward_ids:
         backward_ids = frozenset(backward_ids | extra_backward_ids)
     lost_ids = lost_ids_from_lost_table(lost_table)
+    if backstop_z_min_m is not None:
+        # "Backward" is a momentum-sign question, not a position one: every Pz<0 row turned
+        # around, whether it was then absorbed on the backstop just behind the cathode or on the
+        # cavity nose a millimetre further out. Using the narrow backstop z-band here instead
+        # left ~half the backward population miscounted as transverse aperture losses.
+        turned_around = backward_ids_from_lost_table(lost_table) & lost_ids
+        backward_ids = frozenset(backward_ids | turned_around)
+        lost_ids = frozenset(lost_ids - turned_around)
     if max_kinetic_energy_mev is not None:
         lost_ids = frozenset(
             lost_ids | unphysical_ids_from_bout(Bout_M, id_col, max_kinetic_energy_mev=max_kinetic_energy_mev)
         )
-    return ParticleTags(backward_ids=backward_ids, lost_ids=lost_ids)
+    cathode_hits = frozenset(cathode_hit_ids or frozenset()) & backward_ids
+    return ParticleTags(
+        backward_ids=backward_ids, lost_ids=lost_ids, cathode_hit_ids=cathode_hits
+    )
 
 
 def tag_mask(

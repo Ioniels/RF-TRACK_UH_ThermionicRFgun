@@ -45,6 +45,7 @@ explicit string metadata (not just implied by code) so a reader never has to gue
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import subprocess
@@ -52,21 +53,18 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 
-from .cathode_geometry import (
-    CathodeGeometry,
-    SURFACE_CATHODE_BEVEL,
-    SURFACE_CATHODE_FLAT,
-    SURFACE_CATHODE_SIDE,
-    SURFACE_HOLDER,
-    SURFACE_LABELS,
-    SURFACE_UNKNOWN,
-    SURFACE_ZONE_INFO,
+from .backstop_loss_separation import (
+    DEFAULT_APERTURE_MATCH_TOLERANCE_MM,
+    aperture_inward_normal,
+    identify_aperture_wall_losses,
 )
+from .cathode_geometry import CathodeGeometry, SURFACE_CATHODE_BEVEL, SURFACE_CATHODE_FLAT, SURFACE_CATHODE_SIDE, SURFACE_CAVITY_WALL, SURFACE_HOLDER, SURFACE_LABELS, SURFACE_ZONE_INFO
 from .constants import c, q_e
+from .particle_tags import ID_COL
 
 #: Bump only when a field is added, removed, or its meaning changes in a way that would break a
 #: reader written against an earlier version (matches `rf_gun.io.RUN_CONFIG_SCHEMA_VERSION`'s own
@@ -376,6 +374,19 @@ class BackBombardmentEvents:
         column (useful as a cross-check between the two -- see
         `tests/test_back_bombardment_events.py`)."""
         return np.isin(np.asarray(self.surface_code), _LAB6_SURFACE_CODES)
+
+    @property
+    def cathode_hit_ids(self) -> frozenset:
+        """`%id`s of the particles that actually struck LaB6 -- the population that heats the
+        cathode, and the input to `rf_gun.particle_tags.ParticleTags.cathode_hit_ids`.
+
+        A backward particle is NOT automatically a cathode hit: the annulus between the 3.2 mm
+        LaB6 disk and the cavity nose bore is open vacuum, so a returning electron can cross the
+        cathode plane without striking anything.
+        """
+        mask = self.heats_lab6_mask
+        ids = np.asarray(self.particle_id)[mask]
+        return frozenset(int(i) for i in ids)
 
     def resolved_geometry(self) -> CathodeGeometry:
         """Reconstruct the `CathodeGeometry` these events were captured against, from this
@@ -812,6 +823,73 @@ def _try_get_phase_space_column(B: Any, code: str, selection: str = "all") -> np
         return None
 
 
+
+def _screen_reach(
+    ids: np.ndarray,
+    M_snaps: Sequence[np.ndarray],
+    z_snaps: Sequence[float],
+    id_col: int = ID_COL,
+) -> tuple[np.ndarray, np.ndarray]:
+    """For each id, how many screens recorded it and the furthest (largest-z) one -- by presence
+    in a screen's own array, using that screen's known z (not the particle's unreliable per-screen
+    `%Z`). NaN/0 means never recorded (an immediate bounce-back).
+
+    NOTE this is quantized to the SCREEN POSITIONS, not a trajectory maximum: `furthest_z_m` can
+    only ever take one of the `z_snaps` values, and is NaN for every particle that turned back
+    before the first screen. On the production runs that is 61% of the returning population, so
+    this is a coarse penetration-class label, not a measurement of how deep the electrons went.
+    Anything needing the real excursion depth has to record it during tracking."""
+    n = ids.size
+    n_screens_reached = np.zeros(n, dtype=int)
+    last_screen_z_mm = np.full(n, np.nan, dtype=float)
+    if n == 0:
+        return n_screens_reached, last_screen_z_mm
+
+    id_to_row = {int(pid): row for row, pid in enumerate(ids)}
+    z_mm = np.asarray(z_snaps, dtype=float) * 1e3
+    for j, M in enumerate(M_snaps):
+        screen = np.asarray(M, dtype=float)
+        if screen.ndim != 2 or screen.shape[0] == 0 or screen.shape[1] <= id_col:
+            continue
+        for pid in screen[:, id_col].astype(np.int64):
+            row = id_to_row.get(int(pid))
+            if row is None:
+                continue
+            n_screens_reached[row] += 1
+            zj = float(z_mm[j]) if j < z_mm.size else np.nan
+            if np.isfinite(zj) and (not np.isfinite(last_screen_z_mm[row]) or zj > last_screen_z_mm[row]):
+                last_screen_z_mm[row] = zj
+    return n_screens_reached, last_screen_z_mm
+
+
+
+def screen_trajectory(
+    pid: int,
+    M_snaps: Sequence[np.ndarray],
+    z_snaps: Sequence[float],
+    id_col: int = ID_COL,
+    pz_col: int = 5,
+) -> tuple[np.ndarray, np.ndarray]:
+    """One particle's `(screen z [mm], that screen's recorded Pz [MeV/c])`, sorted by z, over
+    every screen where its `%id` was recorded.
+
+    Caveat: a screen's own Pz can carry the wrong sign once a particle has turned around and
+    re-crosses backward -- compare against the trusted `Bout` state rather than trusting a
+    screen's Pz alone (see `plot_back_bombardment_screen_reach`).
+    """
+    zs, pzs = [], []
+    for j, M in enumerate(M_snaps):
+        screen = np.asarray(M, dtype=float)
+        if screen.ndim != 2 or screen.shape[0] == 0 or screen.shape[1] <= max(id_col, pz_col):
+            continue
+        match = np.nonzero(screen[:, id_col].astype(np.int64) == int(pid))[0]
+        if match.size:
+            zs.append(float(z_snaps[j]) * 1e3)
+            pzs.append(float(screen[match[0], pz_col]))
+    order = np.argsort(zs)
+    return np.asarray(zs, dtype=float)[order], np.asarray(pzs, dtype=float)[order]
+
+
 def extract_back_bombardment_events(
     simulation_result: Any,
     geometry: CathodeGeometry,
@@ -903,7 +981,6 @@ def extract_back_bombardment_events(
          `"backstop_raycast_v1"`).
     """
     from .backstop_loss_separation import identify_backstop_loss_candidates
-    from .back_bombardment import _screen_reach
     from .simulation import _try_get_particle_ids
 
     lost_table_raw = getattr(simulation_result, "lost_table", None)
@@ -958,6 +1035,51 @@ def extract_back_bombardment_events(
 
     # -- Ray-cast every candidate (step 4) --------------------------------------------------
     ray = geometry.intersect_ray(x0, y0, z0, px, py, pz)
+
+    # -- Separate aperture-wall losses from true cathode-plane returns -----------------------
+    # The backstop candidate test is radius-blind and its +1.5 mm z-slack spans the whole
+    # cathode-side chamfer, so rows absorbed on the aperture cone arrive here too. They are
+    # cavity-wall losses whose impact point is simply their loss point -- ray-casting them onto
+    # the flat holder annulus at z=0 both invents an impact that never happened and inflates the
+    # cathode-region energy budget. See backstop_loss_separation.identify_aperture_wall_losses.
+    n_aperture_wall = 0
+    if bool(getattr(capture_config, "separate_aperture_wall_losses", True)):
+        on_aperture = identify_aperture_wall_losses(
+            x0, y0, z0,
+            delta_mm=float(getattr(capture_config, "aperture_delta_mm", 0.0)),
+            tolerance_mm=float(
+                getattr(capture_config, "aperture_match_tolerance_mm",
+                        DEFAULT_APERTURE_MATCH_TOLERANCE_MM)
+            ),
+        )
+        n_aperture_wall = int(np.sum(on_aperture))
+        if n_aperture_wall:
+            nx_w, ny_w, nz_w = aperture_inward_normal(
+                x0, y0, z0,
+                delta_mm=float(getattr(capture_config, "aperture_delta_mm", 0.0)),
+            )
+            p_norm_w = np.sqrt(px**2 + py**2 + pz**2)
+            safe_p = np.where(p_norm_w > 0.0, p_norm_w, 1.0)
+            cos_w = (px * nx_w + py * ny_w + pz * nz_w) / safe_p
+            # The loss point IS the impact point: zero travel, so t_hit == t_lost downstream.
+            # RayIntersection is frozen, so rebuild it rather than mutating in place.
+            ray = dataclasses.replace(
+                ray,
+                hit=ray.hit | on_aperture,
+                x_hit_mm=np.where(on_aperture, x0, ray.x_hit_mm),
+                y_hit_mm=np.where(on_aperture, y0, ray.y_hit_mm),
+                z_hit_mm=np.where(on_aperture, z0, ray.z_hit_mm),
+                n_in_x=np.where(on_aperture, nx_w, ray.n_in_x),
+                n_in_y=np.where(on_aperture, ny_w, ray.n_in_y),
+                n_in_z=np.where(on_aperture, nz_w, ray.n_in_z),
+                cos_incidence=np.where(on_aperture, cos_w, ray.cos_incidence),
+                incidence_angle_rad=np.where(
+                    on_aperture, np.arccos(np.clip(cos_w, -1.0, 1.0)), ray.incidence_angle_rad
+                ),
+                surface_code=np.where(
+                    on_aperture, SURFACE_CAVITY_WALL, ray.surface_code
+                ).astype(np.uint8),
+            )
 
     # -- Kinetic energy at impact: momentum is unchanged over the short field-free segment --
     p_norm = np.sqrt(px**2 + py**2 + pz**2)
@@ -1105,6 +1227,7 @@ def extract_back_bombardment_events(
             "n_returned_before_filter": n_candidates,
             "n_returned_after_filter": int(np.sum(ray.hit)) if n else 0,
             "n_other_lost": n_other_lost,
+            "n_aperture_wall": n_aperture_wall,
             "n_id_join_failed": n_id_join_failed,
             "n_ray_no_hit": n_ray_no_hit,
             "by_surface": counts_by_surface,

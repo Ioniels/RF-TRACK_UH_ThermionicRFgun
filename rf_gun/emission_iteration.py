@@ -371,6 +371,9 @@ def run_emission_field_iteration(
     config: EmissionFieldIterationConfig,
     phi_deg: float = 0.0,
     on_iteration: Optional[Callable[[int, "EmissionFieldIterationResult"], None]] = None,
+    *,
+    Bt_grid: Optional[np.ndarray] = None,
+    Bz_grid: Optional[np.ndarray] = None,
 ) -> EmissionFieldIterationResult:
     """Under-relaxed Picard iteration coupling emission current to E_SC+E_mirror(+E_BL) at the
     cathode (guide Sec. 7-8). Stage A (iteration 0: RF-only baseline, no SC/mirror/BL update yet)
@@ -457,7 +460,10 @@ def run_emission_field_iteration(
         z_min_m=0.0, z_max_m=max(float(config.z_max_m), 5.0 * z_probe_m),
         sc_enabled=False, beam_loading_enabled=False, deflection_enabled=False,
     )
-    V_field = build_volume(rft, Er_grid, Ez_grid, float(phi_deg), near_cathode_params)
+    V_field = build_volume(
+        rft, Er_grid, Ez_grid, float(phi_deg), near_cathode_params,
+        Bt_grid=Bt_grid, Bz_grid=Bz_grid,
+    )
     E_RF = sample_rf_field_on_cathode(rft, V_field, x_grid_m, y_grid_m, t_grid_s, z_probe_m)
 
     J = np.zeros((n_x * n_y, n_t))

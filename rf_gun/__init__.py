@@ -1,327 +1,82 @@
-"""RF gun simulation helpers."""
+"""RF-gun simulation, field processing, and analysis helpers.
 
-from .config import rft, show_versions, resolve_threads, set_thread_environment
-from .constants import c, q_e, ME_MEV
-from .helpers import (
-	sample_disk,
-	min_step,
-	med_step,
-	fmt_bytes,
-	format_duration,
-	sc_bl_tag,
+The package-level API is resolved lazily.  In particular, importing
+``rf_gun.fieldmaps`` must remain possible on preprocessing/analysis hosts where
+the proprietary RF-Track Python binding is not installed.  Accessing a
+tracking-facing symbol imports and version-checks RF-Track at that point.
+"""
+
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Any
+
+
+# Keep this order aligned with the historical eager imports: in the unlikely
+# event that two modules expose the same public name, package-level lookup keeps
+# the established winner.  Submodules themselves remain directly importable.
+_LAZY_MODULES = (
+    "config",
+    "constants",
+    "helpers",
+    "rf_params",
+    "field_io",
+    "phasor",
+    "emission_models",
+    "work_function_models",
+    "emission_sensitivity",
+    "cathode_fields",
+    "emission_iteration",
+    "rftrack_volume",
+    "simulation",
+    "frozen_source_attribution",
+    "materials",
+    "beam_loading_envelope",
+    "diagnostics",
+    "io",
+    "aperture",
+    "backstop_loss_separation",
+    "particle_tags",
+    "beam_properties",
+    "back_bombardment",
+    "cathode_geometry",
+    "back_bombardment_events",
+    "back_bombardment_study_config",
+    "back_bombardment_deposition",
+    "comsol_io",
+    "thermal",
+    "macropulse",
+    "studies",
+    "acceptance_scan",
+    "deflection_field",
+    "plotting",
+    "finesse_presets",
 )
-from .rf_params import (
-	delivered_power_on_resonance,
-	effective_length_from_abs_ez,
-	veff_from_phase_scan_pz,
-	veff_from_phase_calibration,
-	r_over_q_per_m,
-	PhaseCalibrationResult,
-	build_phase_calibration_result,
-)
-from .field_io import load_fieldmap_mat, interp_cfield, mesh_edge_length_stats
-from .phasor import (
-	select_iq_snapshots,
-	build_iq_phasor,
-	build_crest_phasor,
-	phasor_check,
-	FieldInterpolationContext,
-	build_field_interpolation_context,
-)
-from .emission_models import (
-	EMISSION_MODEL_NAMES,
-	EMISSION_MODEL_ALIASES,
-	EMISSION_MODEL_PLOT_LABELS,
-	EmissionModelResult,
-	canonical_emission_model_name,
-	evaluate_emission_model,
-	J_murphy_good_direct_reference,
-	J_rgtf_2019,
-)
-from .work_function_models import (
-	WORK_FUNCTION_MODEL_NAMES,
-	WORK_FUNCTION_MODEL_UNCERTAINTY_EV,
-	LIU_2017_PHI_EFF_EV,
-	LIU_2017_A_R_APM2K2,
-	BULYGA_ALPHA_PHI_EV_PER_K,
-	phi_eff_constant,
-	phi_eff_linear_tcwf,
-	phi_eff_piecewise_surface_evolution,
-	evaluate_work_function_eV,
-)
-from .emission_sensitivity import (
-	rd_schottky_analytic_sensitivities,
-	compute_log_sensitivities,
-	compare_emission_models,
-	select_operating_field_domain,
-)
-from .cathode_fields import (
-	signed_normal_field,
-	extraction_field,
-	sample_rf_field_on_cathode,
-	inspect_rftrack_field_capabilities,
-	extract_sc_field_with_probes,
-	extract_sc_and_mirror_from_snapshot,
-	analytic_sc_and_mirror_surface_field,
-	BeamLoadingFieldStatus,
-	extract_beam_loading_field,
-)
-from .emission_iteration import (
-	TemperatureField,
-	EmissionFieldIterationConfig,
-	EmissionFieldIterationResult,
-	run_emission_field_iteration,
-	spatial_source_from_iteration_result,
-)
-from .rftrack_volume import (
-	VolumeBuildParams,
-	ScreenBuildParams,
-	build_volume,
-	track_volume_with_screens,
-	find_Ez_axis_phasor_at_z0,
-	build_space_charge_engine,
-	inspect_rftrack_capabilities,
-)
-from .simulation import (
-	RoughnessParams,
-	EmissionParams,
-	TrackingParams,
-	DiagnosticsParams,
-	SimulationResult,
-	EXTENDED_PHASE_FMT,
-	THERMO_INFO_TIME_ARRAY_KEYS,
-	THERMO_INFO_PER_PARTICLE_KEYS,
-	THERMO_INFO_SPATIAL_GRID_KEYS,
-	thermo_info_summary,
-	screen_progress_callback,
-	build_bunch_simple,
-	build_bunch_on_axis_cold,
-	build_bunch_thermionic,
-	build_bunch_thermionic_spatial,
-	build_cathode_rf_source,
-	run_phase_scan,
-	run_transport_with_progress,
-)
-from .frozen_source_attribution import (
-	FROZEN_SOURCE_ATTRIBUTION_CASES,
-	FrozenSourceAttributionResult,
-	run_frozen_source_attribution,
-)
-from .materials import (
-	COMPONENT_NAMES,
-	CathodeMaterialSet,
-	ElectronDepositionComponent,
-	EmissionComponent,
-	OpticalComponent,
-	PropertyReference,
-	ResolvedProperty,
-	ScalarPropertyDataset,
-	ThermalComponent,
-	load_property_dataset_yaml,
-	tio_range_um,
-	tio_entrance_stopping_power_kev_per_um,
-	load_cathode_material,
-	load_material_component,
-	required_components_for,
-	validate_material_for,
-)
-from .beam_loading_envelope import (
-	solve_causal_modal_envelope,
-	steady_state_beam_induced_voltage,
-	estimate_beam_induced_cathode_field,
-	estimate_beam_induced_cathode_field_map,
-	estimate_beam_induced_cathode_field_from_current_density,
-)
-from .diagnostics import (
-	dispersion_from_moments,
-	manual_twiss_and_emittance,
-	info_get,
-	info_get_first,
-	summarize_array,
-	build_screen_summary_from_phase_space,
-	classify_particle_outcomes,
-)
-from .io import (
-	save_screen_distributions_hdf5,
-	save_lost_particles_json,
-	save_beam_openpmd,
-	save_run_config,
-	save_run_results,
-	save_back_bombardment_energy_map,
-	save_back_bombardment_events_hdf5,
-	to_json_safe,
-	atomic_write_json,
-	build_validation_report,
-	save_validation_report,
-)
-from .aperture import (
-    R1_MM,
-    R2_MM,
-    R_CAV_MM,
-    CHAMFER_LEN_MM,
-    CHAMFER_ANGLE_DEG,
-    A_CHI_MM,
-    RHO_MM,
-    L_MM,
-    DEFAULT_DELTA_CATHODE_CHAMFER_MM,
-    DEFAULT_CATHODE_BACKSTOP_THICKNESS_MM,
-    aperture_radius_profile_mm,
-    important_locations_mm,
-    build_dynamic_aperture,
-    build_cathode_backstop,
-)
-from .backstop_loss_separation import identify_backstop_loss_candidates
-from .particle_tags import (
-    ParticleTags,
-    build_particle_tags,
-    backward_ids_from_bout,
-    lost_ids_from_lost_table,
-    unphysical_ids_from_bout,
-    MAX_PHYSICAL_KINETIC_ENERGY_MEV,
-    tag_mask,
-    surviving_mask,
-)
-from .beam_properties import compute_beam_properties, transmission_curves
-from .back_bombardment import (
-	BackBombardmentData,
-	compute_back_bombardment,
-	kinetic_energy_joules,
-	screen_trajectory,
-	classify_impact_surface,
-	SURFACE_CATHODE_FACE,
-	SURFACE_CATHODE_CHAMFER,
-	SURFACE_EXCLUDED,
-	DEFAULT_CATHODE_CHAMFER_WIDTH_MM,
-)
-from .cathode_geometry import (
-	CathodeGeometry,
-)
-from .back_bombardment_events import (
-	BACK_BOMBARDMENT_EVENTS_SCHEMA_VERSION,
-	EVENT_SCHEMA_COLUMNS,
-	EVENT_ARRAY_FIELDS,
-	BackBombardmentEvents,
-	BackBombardmentStudyInput,
-	build_back_bombardment_provenance,
-	write_back_bombardment_events_h5,
-	read_back_bombardment_events_h5,
-	resolve_back_bombardment_study_input,
-	display_back_bombardment_event_schema,
-	extract_back_bombardment_events,
-)
-from .back_bombardment_study_config import (
-	CathodeMaterialSelection,
-	MacropulseConfig,
-	DepositionConfig,
-	DEFAULT_TOTAL_HEMISPHERICAL_EMISSIVITY,
-	ThermalConfig,
-	CouplingConfig,
-	BackBombardmentCaptureConfig,
-	BackBombardmentStudyConfig,
-	default_uh_back_bombardment_study_config,
-)
-from .back_bombardment_deposition import (
-	DEFAULT_DEPTH_LAYER_BOUNDARIES_UM,
-	DEFAULT_TIO_VALIDITY_FLOOR_KEV,
-	DEFAULT_CSDA_LOOKUP_POINTS,
-	BackBombardmentHeatSource,
-	build_back_bombardment_heat_source,
-	validate_energy_closure,
-	BACK_BOMBARDMENT_HEAT_SOURCE_SCHEMA_VERSION,
-	write_back_bombardment_heat_source_h5,
-	read_back_bombardment_heat_source_h5,
-)
-from .comsol_io import (
-	COMSOL_SOURCE_SCHEMA_VERSION,
-	COMSOL_THERMAL_RESULT_SCHEMA_VERSION,
-	DEFAULT_RF_FREQUENCY_HZ,
-	ComsolThermalResult,
-	ComsolComparison,
-	export_comsol_heat_source,
-	load_comsol_thermal_result,
-	compare_python_comsol_thermal,
-)
-from .thermal import (
-	ConstantTemperatureMap,
-	TemperatureMap2D,
-	InitialTemperatureMap,
-	VolumetricHeatSourceTimeSeries,
-	build_constant_power_heat_source_time_series,
-	ThermalResult,
-	solve_xy_layered_thermal,
-)
-from .macropulse import (
-    evaluate_rf_envelope,
-    build_macropulse_time_grid,
-    compute_n_rf_periods,
-    build_macropulse_heat_source,
-    MacropulseCurrentHistory,
-    build_macropulse_current_history,
-    validate_charge_balance,
-)
-from .studies import (
-    BACK_BOMBARDMENT_MACROPULSE_SCHEMA_VERSION,
-    BackBombardmentMacropulseStudy,
-    run_back_bombardment_macropulse_study,
-    validate_back_bombardment_study,
-    write_back_bombardment_macropulse_h5,
-)
-from .acceptance_scan import AcceptanceScanResult, scan_acceptance
-from .deflection_field import (
-	DEFAULT_B_PK_PER_A_T,
-	DEFAULT_W_MM,
-	DEFAULT_Z_P_MM,
-	DeflectionField,
-	b0_deflection_T,
-)
-from .plotting import (
-	field_maps,
-	axis_phase,
-	plot_deflection_field_profile,
-	plot_emission_history,
-	plot_j_vs_n,
-	plot_emission_model_sensitivities,
-	plot_frozen_source_attribution,
-	plot_emission_iteration_convergence,
-	plot_emission_iteration_waveforms,
-	plot_emission_iteration_near_cathode,
-	plot_emission_iteration_submodel_comparison,
-	plot_phase_space,
-	plot_spectra,
-	plot_screen_phase_space_slider,
-	plot_beam_moments_evolution,
-	plot_beam_twiss_evolution,
-	phase_plot,
-	plot_back_bombardment_phase_space,
-	plot_back_bombardment_screen_reach,
-	plot_back_bombardment_energy_density,
-	plot_back_bombardment_power_density_vs_time,
-	plot_back_bombardment_source_qualification,
-	print_back_bombardment_source_qualification_summary,
-	plot_back_bombardment_macropulse,
-	print_back_bombardment_macropulse_summary,
-	plot_dynamic_aperture_losses,
-	plot_acceptance_scan,
-	save_run_figures,
-	plot_class_conditioned_histograms,
-	save_beam_phase_space_json,
-	save_screen_phase_space_batch,
-	capture_figures,
-	FigureCapture,
-	PlotStyleConfig,
-	DEFAULT_PLOT_STYLE,
-	get_default_density_cmap,
-	get_lost_cmap,
-	get_recentered_diverging_cmap,
-	add_reference_lines,
-	add_aperture_curve,
-	add_cathode_boundary_circle,
-	COLOR_PRIMARY,
-	COLOR_SECONDARY,
-	COLOR_NEUTRAL,
-	COLOR_LOST,
-	EMISSION_MODEL_COLORS,
-)
+
+
+def __getattr__(name: str) -> Any:
+    if name not in __all__:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    if name == "finesse_presets":
+        value = import_module(".finesse_presets", __name__)
+        globals()[name] = value
+        return value
+    for module_name in _LAZY_MODULES:
+        module = import_module(f".{module_name}", __name__)
+        try:
+            value = getattr(module, name)
+        except AttributeError:
+            continue
+        globals()[name] = value
+        return value
+    raise AttributeError(
+        f"public symbol {name!r} is listed by {__name__!r} but no provider module exports it"
+    )
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
+
 
 __all__ = [
 	"rft",
@@ -339,7 +94,6 @@ __all__ = [
 	"sc_bl_tag",
 	"delivered_power_on_resonance",
 	"effective_length_from_abs_ez",
-	"veff_from_phase_scan_pz",
 	"veff_from_phase_calibration",
 	"r_over_q_per_m",
 	"PhaseCalibrationResult",
@@ -347,6 +101,7 @@ __all__ = [
 	"load_fieldmap_mat",
 	"interp_cfield",
 	"mesh_edge_length_stats",
+	"detect_pec_boundary_along_axis",
 	"select_iq_snapshots",
 	"build_iq_phasor",
 	"build_crest_phasor",
@@ -448,8 +203,6 @@ __all__ = [
 	"save_lost_particles_json",
 	"save_run_config",
 	"save_run_results",
-	"save_back_bombardment_energy_map",
-	"save_back_bombardment_events_hdf5",
 	"save_beam_openpmd",
 	"to_json_safe",
 	"atomic_write_json",
@@ -463,16 +216,19 @@ __all__ = [
 	"A_CHI_MM",
 	"RHO_MM",
 	"L_MM",
+	"L_END_MM",
+	"L_PIPE2_MM",
 	"DEFAULT_DELTA_CATHODE_CHAMFER_MM",
 	"DEFAULT_CATHODE_BACKSTOP_THICKNESS_MM",
 	"aperture_radius_profile_mm",
-	"important_locations_mm",
+	"exit_tube_end_z_m",
 	"build_dynamic_aperture",
 	"build_cathode_backstop",
 	"identify_backstop_loss_candidates",
 	"ParticleTags",
 	"build_particle_tags",
 	"backward_ids_from_bout",
+	"backstop_ids_from_lost_table",
 	"lost_ids_from_lost_table",
 	"unphysical_ids_from_bout",
 	"MAX_PHYSICAL_KINETIC_ENERGY_MEV",
@@ -480,10 +236,6 @@ __all__ = [
 	"surviving_mask",
 	"compute_beam_properties",
 	"transmission_curves",
-	"BackBombardmentData",
-	"compute_back_bombardment",
-	"kinetic_energy_joules",
-	"screen_trajectory",
 	"classify_impact_surface",
 	"SURFACE_CATHODE_FACE",
 	"SURFACE_CATHODE_CHAMFER",
@@ -553,6 +305,9 @@ __all__ = [
 	"DEFAULT_Z_P_MM",
 	"DeflectionField",
 	"b0_deflection_T",
+	"save_figure_formats",
+	"EPS_MAX_BYTES",
+	"DEFAULT_FIGURE_FORMATS",
 	"field_maps",
 	"axis_phase",
 	"plot_deflection_field_profile",
@@ -570,10 +325,6 @@ __all__ = [
 	"plot_beam_moments_evolution",
 	"plot_beam_twiss_evolution",
 	"phase_plot",
-	"plot_back_bombardment_phase_space",
-	"plot_back_bombardment_screen_reach",
-	"plot_back_bombardment_energy_density",
-	"plot_back_bombardment_power_density_vs_time",
 	"plot_back_bombardment_source_qualification",
 	"print_back_bombardment_source_qualification_summary",
 	"plot_back_bombardment_macropulse",
@@ -600,16 +351,6 @@ __all__ = [
 	"COLOR_LOST",
 	"EMISSION_MODEL_COLORS",
 ]
-
-from . import finesse_presets
-from .finesse_presets import (
-	FINESSE_PRESETS,
-	FINESSE_TIERS,
-	FIXED_DR_UM,
-	FIXED_DZ_UM,
-	finesse_preset_dict,
-	apply_finesse_preset_to_args,
-)
 
 __all__ += [
 	"finesse_presets",

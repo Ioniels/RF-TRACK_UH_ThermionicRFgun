@@ -2,6 +2,9 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+*.egg-info/
+build/
+dist/
 
 # Virtual environments
 .venv/
@@ -14,12 +17,18 @@ venv/
 archive/
 outputs/
 Koa outputs/
+KOA results/
 analysis_Koa/
 manual_references/
 logs/
 
-# Tests and local docs (not shared on GitHub)
-tests/
+# Solver-scale raw inputs are verified by checksum and kept outside Git history.
+field_maps/cavity_E_H_full_volume.h5
+# Local audit copies; active maps and matching controls remain visible to Git.
+field_maps/fill_audit_v1_archive/
+field_maps/fill_audit_v2/
+
+# Local upgrade notes (the executable regression tests are source and must be versioned)
 Upgrade_history/
 
 # Local artifacts / OS metadata

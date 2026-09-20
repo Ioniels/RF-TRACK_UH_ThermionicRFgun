@@ -21,11 +21,11 @@ reference manual, Sec. 5.1.3) to be in MeV/m.
 from __future__ import annotations
 
 from dataclasses import dataclass, field as dataclass_field
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
-from .constants import ME_MEV, c, epsilon_0, q_e
+from .constants import ME_MEV, c, epsilon_0
 
 
 #: compute_force's convention: for a Q=-1 (electron) probe, F[N] = Q*q_e*E[V/m] = -q_e*E, so

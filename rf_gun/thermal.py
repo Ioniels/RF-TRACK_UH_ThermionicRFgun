@@ -319,6 +319,24 @@ class VolumetricHeatSourceTimeSeries:
                 f"q_layer_W shape {q.shape} != (n_x,n_y,n_layers,n_t_bins)="
                 f"{(n_x, n_y, n_layers, n_bins)} (n_t_bins = t_grid_s.size-1)"
             )
+        if not np.all(np.isfinite(q)):
+            raise ValueError("q_layer_W must contain only finite values")
+        if np.any(q < 0.0):
+            raise ValueError("q_layer_W is deposited power and cannot contain negative values")
+        # Mask-false cells are never assembled into the finite-volume system. Reject sources that
+        # would silently lose their power there (the legacy edge-bin deposition path could create
+        # exactly this condition near the circular cathode boundary).
+        outside_abs_W = float(np.sum(np.abs(q[~mask, ...])))
+        total_abs_W = float(np.sum(np.abs(q)))
+        outside_tol_W = max(1.0e-15, 1.0e-12 * total_abs_W)
+        if outside_abs_W > outside_tol_W:
+            raise ValueError(
+                "q_layer_W contains deposited power outside cathode_footprint_mask: "
+                f"sum(abs(outside))={outside_abs_W:.9e} W exceeds tolerance "
+                f"{outside_tol_W:.9e} W. Those cells are not part of the thermal system; "
+                "regenerate the deposition source with boundary-cell remapping rather than "
+                "silently losing this power."
+            )
         if not (self.xy_cell_area_m2 > 0.0):
             raise ValueError(f"xy_cell_area_m2 must be positive, got {self.xy_cell_area_m2!r}")
 

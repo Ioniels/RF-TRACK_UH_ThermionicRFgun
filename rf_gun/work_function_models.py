@@ -20,7 +20,7 @@ directly to one dataset (constant_phi_eff_liu2017).
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 import numpy as np
 

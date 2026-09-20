@@ -1,0 +1,501 @@
+{
+  "source": "/home/niels/rftrack_proj/field_maps/cavity_E_H_full_volume.h5",
+  "source_size_bytes": 24805315242,
+  "frequency_hz": 2865417220.0,
+  "reported_port_power_w": 1800000.0,
+  "port_evaluation_frequency_hz": 3000000000.0,
+  "power_normalization_verified": false,
+  "steady_state_verified": false,
+  "reference_time_s": 9.930136193505002e-08,
+  "simulated_duration_s": 1.0000006242079978e-07,
+  "saved_window_duration_s": 1.3945149959555578e-09,
+  "archived_unsigned_drift_per_cycle": 0.0024985923464796414,
+  "legacy_end_time_factor": 2.127810231840993,
+  "step_start_sensitivity_using_archived_drift": [
+    {
+      "assumed_step_start_ns": 0,
+      "factor": 2.0980026479851026,
+      "tau_ns": 153.36283059080196
+    },
+    {
+      "assumed_step_start_ns": 2,
+      "factor": 2.018244935668439,
+      "tau_ns": 142.22272219053843
+    },
+    {
+      "assumed_step_start_ns": 5,
+      "factor": 1.9121368377659826,
+      "tau_ns": 127.40214022492245
+    },
+    {
+      "assumed_step_start_ns": 10,
+      "factor": 1.764224460943133,
+      "tau_ns": 106.74257184355976
+    },
+    {
+      "assumed_step_start_ns": 20,
+      "factor": 1.5446769983191786,
+      "tau_ns": 76.07741782154979
+    }
+  ],
+  "raw_trace_fits": [
+    {
+      "native_component": "Ey",
+      "requested_radius_mm": 0,
+      "requested_beam_z_mm": 0.1,
+      "native_indices": [
+        240,
+        328,
+        245
+      ],
+      "actual_beam_z_mm": 0.14878432214259635,
+      "phasor_amplitude": 20604726.192240912,
+      "signed_amplitude_drift_per_cycle": 0.0024949244514368,
+      "phase_drift_deg_per_cycle": 0.001313534607695372,
+      "linear_envelope_nrmse": 0.00019743290706092885,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.0024464700768624683,
+        0.002495333728799585
+      ],
+      "ideal_step_at_zero_factor": 2.0919164879124503
+    },
+    {
+      "native_component": "Ey",
+      "requested_radius_mm": 1,
+      "requested_beam_z_mm": 0.1,
+      "native_indices": [
+        250,
+        328,
+        245
+      ],
+      "actual_beam_z_mm": 0.14878432214259635,
+      "phasor_amplitude": 20188961.06456645,
+      "signed_amplitude_drift_per_cycle": 0.002492787213140977,
+      "phase_drift_deg_per_cycle": 0.001368313780715313,
+      "linear_envelope_nrmse": 0.00019292056006709452,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.002448565199433413,
+        0.00249306433315963
+      ],
+      "ideal_step_at_zero_factor": 2.08839080170374
+    },
+    {
+      "native_component": "Ey",
+      "requested_radius_mm": 0,
+      "requested_beam_z_mm": 5,
+      "native_indices": [
+        240,
+        279,
+        245
+      ],
+      "actual_beam_z_mm": 5.048784322142598,
+      "phasor_amplitude": 31773269.46282542,
+      "signed_amplitude_drift_per_cycle": 0.002491501320252169,
+      "phase_drift_deg_per_cycle": 0.0016263939886839143,
+      "linear_envelope_nrmse": 0.00018990806574621796,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.0024461255381564915,
+        0.002483094429527569
+      ],
+      "ideal_step_at_zero_factor": 2.086276808084152
+    },
+    {
+      "native_component": "Ey",
+      "requested_radius_mm": 1,
+      "requested_beam_z_mm": 5,
+      "native_indices": [
+        250,
+        279,
+        245
+      ],
+      "actual_beam_z_mm": 5.048784322142598,
+      "phasor_amplitude": 31933261.93955843,
+      "signed_amplitude_drift_per_cycle": 0.0024903568188057268,
+      "phase_drift_deg_per_cycle": 0.001794670356203439,
+      "linear_envelope_nrmse": 0.00018964077407177422,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.002443864232169278,
+        0.0024839158525809275
+      ],
+      "ideal_step_at_zero_factor": 2.0843998367113254
+    },
+    {
+      "native_component": "Ey",
+      "requested_radius_mm": 0,
+      "requested_beam_z_mm": 10,
+      "native_indices": [
+        240,
+        229,
+        245
+      ],
+      "actual_beam_z_mm": 10.048784322142597,
+      "phasor_amplitude": 32385064.51820938,
+      "signed_amplitude_drift_per_cycle": 0.0024896067092600067,
+      "phase_drift_deg_per_cycle": 0.0020054062788044886,
+      "linear_envelope_nrmse": 0.00015388281995814887,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.0024395335885437786,
+        0.002475620178599019
+      ],
+      "ideal_step_at_zero_factor": 2.083171995135741
+    },
+    {
+      "native_component": "Ey",
+      "requested_radius_mm": 1,
+      "requested_beam_z_mm": 10,
+      "native_indices": [
+        250,
+        229,
+        245
+      ],
+      "actual_beam_z_mm": 10.048784322142597,
+      "phasor_amplitude": 32357382.04141572,
+      "signed_amplitude_drift_per_cycle": 0.0024881849097960398,
+      "phase_drift_deg_per_cycle": 0.0018885190928424188,
+      "linear_envelope_nrmse": 0.0001515562382114517,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.002436892772939143,
+        0.0024736861129606583
+      ],
+      "ideal_step_at_zero_factor": 2.0808497241078774
+    },
+    {
+      "native_component": "Ey",
+      "requested_radius_mm": 0,
+      "requested_beam_z_mm": 20,
+      "native_indices": [
+        240,
+        129,
+        245
+      ],
+      "actual_beam_z_mm": 20.0487843221426,
+      "phasor_amplitude": 31864939.515914273,
+      "signed_amplitude_drift_per_cycle": 0.002473132386356143,
+      "phase_drift_deg_per_cycle": 0.0026139835045929736,
+      "linear_envelope_nrmse": 0.0001418520537034905,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.0024231246871674263,
+        0.002417107028214906
+      ],
+      "ideal_step_at_zero_factor": 2.0566626646658315
+    },
+    {
+      "native_component": "Ey",
+      "requested_radius_mm": 1,
+      "requested_beam_z_mm": 20,
+      "native_indices": [
+        250,
+        129,
+        245
+      ],
+      "actual_beam_z_mm": 20.0487843221426,
+      "phasor_amplitude": 31878570.29584958,
+      "signed_amplitude_drift_per_cycle": 0.0024733817353487023,
+      "phase_drift_deg_per_cycle": 0.0027057380576756157,
+      "linear_envelope_nrmse": 0.0001419758130398359,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.00242377787641277,
+        0.0024196226997086376
+      ],
+      "ideal_step_at_zero_factor": 2.057057487103464
+    },
+    {
+      "native_component": "Ey",
+      "requested_radius_mm": 0,
+      "requested_beam_z_mm": 25,
+      "native_indices": [
+        240,
+        79,
+        245
+      ],
+      "actual_beam_z_mm": 25.0487843221426,
+      "phasor_amplitude": 24213839.885555945,
+      "signed_amplitude_drift_per_cycle": 0.0024644100785203883,
+      "phase_drift_deg_per_cycle": 0.0026011666231069435,
+      "linear_envelope_nrmse": 0.00015923654079075982,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.002421476506486219,
+        0.0023986150590335972
+      ],
+      "ideal_step_at_zero_factor": 2.0429727147132493
+    },
+    {
+      "native_component": "Hz",
+      "requested_radius_mm": 1,
+      "requested_beam_z_mm": 5,
+      "native_indices": [
+        250,
+        279,
+        245
+      ],
+      "actual_beam_z_mm": 5.048784322142598,
+      "phasor_amplitude": 2720.9864133009196,
+      "signed_amplitude_drift_per_cycle": 0.0026251132292946077,
+      "phase_drift_deg_per_cycle": -0.007650860609178767,
+      "linear_envelope_nrmse": 0.0006148561868585867,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.003241073129451948,
+        0.003129690593261273
+      ],
+      "ideal_step_at_zero_factor": 2.3394185765169335
+    },
+    {
+      "native_component": "Hz",
+      "requested_radius_mm": 10,
+      "requested_beam_z_mm": 5,
+      "native_indices": [
+        340,
+        279,
+        245
+      ],
+      "actual_beam_z_mm": 5.048784322142598,
+      "phasor_amplitude": 28791.609725336202,
+      "signed_amplitude_drift_per_cycle": 0.0025829550911007425,
+      "phase_drift_deg_per_cycle": -0.005256167431560243,
+      "linear_envelope_nrmse": 0.0004626949352131024,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.0031107519418079187,
+        0.002896797185199282
+      ],
+      "ideal_step_at_zero_factor": 2.251538028956096
+    },
+    {
+      "native_component": "Hz",
+      "requested_radius_mm": 1,
+      "requested_beam_z_mm": 10,
+      "native_indices": [
+        250,
+        229,
+        245
+      ],
+      "actual_beam_z_mm": 10.048784322142597,
+      "phasor_amplitude": 2763.651419814666,
+      "signed_amplitude_drift_per_cycle": 0.0026811700382143684,
+      "phase_drift_deg_per_cycle": -0.0063284581938990656,
+      "linear_envelope_nrmse": 0.0006548757538675728,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.0031638593897363506,
+        0.0032728743555797504
+      ],
+      "ideal_step_at_zero_factor": 2.470304356938173
+    },
+    {
+      "native_component": "Hz",
+      "requested_radius_mm": 10,
+      "requested_beam_z_mm": 10,
+      "native_indices": [
+        340,
+        229,
+        245
+      ],
+      "actual_beam_z_mm": 10.048784322142597,
+      "phasor_amplitude": 24480.578289444416,
+      "signed_amplitude_drift_per_cycle": 0.0025794195931114075,
+      "phase_drift_deg_per_cycle": -0.003627945667167257,
+      "linear_envelope_nrmse": 0.0005096419049775104,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.0031437953918587525,
+        0.0030283767166804677
+      ],
+      "ideal_step_at_zero_factor": 2.2445351390603827
+    },
+    {
+      "native_component": "Hz",
+      "requested_radius_mm": 1,
+      "requested_beam_z_mm": 20,
+      "native_indices": [
+        250,
+        129,
+        245
+      ],
+      "actual_beam_z_mm": 20.0487843221426,
+      "phasor_amplitude": 2721.680262116607,
+      "signed_amplitude_drift_per_cycle": 0.002628954835388277,
+      "phase_drift_deg_per_cycle": -0.008371770641348192,
+      "linear_envelope_nrmse": 0.0007618549719022988,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.00312525192796052,
+        0.0033583977056755782
+      ],
+      "ideal_step_at_zero_factor": 2.3478504650949934
+    },
+    {
+      "native_component": "Hz",
+      "requested_radius_mm": 10,
+      "requested_beam_z_mm": 20,
+      "native_indices": [
+        340,
+        129,
+        245
+      ],
+      "actual_beam_z_mm": 20.0487843221426,
+      "phasor_amplitude": 24553.778322709662,
+      "signed_amplitude_drift_per_cycle": 0.0026135795918379263,
+      "phase_drift_deg_per_cycle": -0.0019267294909231323,
+      "linear_envelope_nrmse": 0.000615257273633122,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.0031255575228934496,
+        0.00321271449911255
+      ],
+      "ideal_step_at_zero_factor": 2.3145433654664
+    },
+    {
+      "native_component": "Ex",
+      "requested_radius_mm": 1,
+      "requested_beam_z_mm": 0.1,
+      "native_indices": [
+        250,
+        329,
+        245
+      ],
+      "actual_beam_z_mm": 0.09878432214259492,
+      "phasor_amplitude": 13519.013017271069,
+      "signed_amplitude_drift_per_cycle": 0.0010421741973626918,
+      "phase_drift_deg_per_cycle": 0.10557087329396636,
+      "linear_envelope_nrmse": 0.010602130339370564,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.0030477582007251308,
+        -0.0029758166453257152
+      ],
+      "ideal_step_at_zero_factor": 1.1424233310710579
+    },
+    {
+      "native_component": "Ex",
+      "requested_radius_mm": 1,
+      "requested_beam_z_mm": 5,
+      "native_indices": [
+        250,
+        280,
+        245
+      ],
+      "actual_beam_z_mm": 4.998784322142597,
+      "phasor_amplitude": 641690.7514890747,
+      "signed_amplitude_drift_per_cycle": 0.00244270693817093,
+      "phase_drift_deg_per_cycle": 0.005980511785180731,
+      "linear_envelope_nrmse": 0.00019321184535486474,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.002427645427679611,
+        0.0023116619109569483
+      ],
+      "ideal_step_at_zero_factor": 2.0099013436142923
+    },
+    {
+      "native_component": "Ex",
+      "requested_radius_mm": 10,
+      "requested_beam_z_mm": 5,
+      "native_indices": [
+        340,
+        280,
+        245
+      ],
+      "actual_beam_z_mm": 4.998784322142597,
+      "phasor_amplitude": 8849256.410352034,
+      "signed_amplitude_drift_per_cycle": 0.0025209128943989257,
+      "phase_drift_deg_per_cycle": 0.0005347950446226671,
+      "linear_envelope_nrmse": 0.0003664617020539278,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.0025478589780939024,
+        0.0025627764361571496
+      ],
+      "ideal_step_at_zero_factor": 2.136031816154861
+    },
+    {
+      "native_component": "Ex",
+      "requested_radius_mm": 1,
+      "requested_beam_z_mm": 10,
+      "native_indices": [
+        250,
+        230,
+        245
+      ],
+      "actual_beam_z_mm": 9.998784322142598,
+      "phasor_amplitude": 180844.97359943882,
+      "signed_amplitude_drift_per_cycle": 0.002751717186186547,
+      "phase_drift_deg_per_cycle": 4.75090766971661e-05,
+      "linear_envelope_nrmse": 0.0016126044383822913,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.0029530043473435853,
+        0.002598375937481066
+      ],
+      "ideal_step_at_zero_factor": 2.662818297179729
+    },
+    {
+      "native_component": "Ex",
+      "requested_radius_mm": 10,
+      "requested_beam_z_mm": 10,
+      "native_indices": [
+        340,
+        230,
+        245
+      ],
+      "actual_beam_z_mm": 9.998784322142598,
+      "phasor_amplitude": 3067691.8712439523,
+      "signed_amplitude_drift_per_cycle": 0.002535017015686892,
+      "phase_drift_deg_per_cycle": -0.001667401975416822,
+      "linear_envelope_nrmse": 0.0009931409752999827,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.0026102230267970664,
+        0.0026770141172774635
+      ],
+      "ideal_step_at_zero_factor": 2.1609769952854165
+    },
+    {
+      "native_component": "Ex",
+      "requested_radius_mm": 1,
+      "requested_beam_z_mm": 20,
+      "native_indices": [
+        250,
+        130,
+        245
+      ],
+      "actual_beam_z_mm": 19.998784322142598,
+      "phasor_amplitude": 34202.99206699412,
+      "signed_amplitude_drift_per_cycle": 0.0009492688571519794,
+      "phase_drift_deg_per_cycle": 0.035460103872096235,
+      "linear_envelope_nrmse": 0.008761780959006767,
+      "half_window_amplitude_drifts_per_cycle": [
+        0.0021461444023639165,
+        -0.002306116504224925
+      ],
+      "ideal_step_at_zero_factor": 1.121552656437356
+    }
+  ],
+  "free_start_decay_profiles_at_axis_10mm": [
+    {
+      "assumed_tau_ns": 40,
+      "nrmse": 0.00015225182795871185,
+      "steady_to_reference_amplitude": 1.2853594861652677
+    },
+    {
+      "assumed_tau_ns": 80,
+      "nrmse": 0.00015287477768184842,
+      "steady_to_reference_amplitude": 1.5707239180282584
+    },
+    {
+      "assumed_tau_ns": 120,
+      "nrmse": 0.00015316831977313527,
+      "steady_to_reference_amplitude": 1.8560928076151366
+    },
+    {
+      "assumed_tau_ns": 157,
+      "nrmse": 0.00015332145295355738,
+      "steady_to_reference_amplitude": 2.1200613915297435
+    },
+    {
+      "assumed_tau_ns": 207,
+      "nrmse": 0.00015344800392668248,
+      "steady_to_reference_amplitude": 2.4767779679397846
+    },
+    {
+      "assumed_tau_ns": 400,
+      "nrmse": 0.00015365072679810507,
+      "steady_to_reference_amplitude": 3.853715722391798
+    },
+    {
+      "assumed_tau_ns": 1000,
+      "nrmse": 0.00015378816544046173,
+      "steady_to_reference_amplitude": 8.134382283088364
+    }
+  ],
+  "interpretation": "Local growth is measured. Q and the steady-state factor depend on source-history and single-mode assumptions; profile values are not confidence limits."
+}

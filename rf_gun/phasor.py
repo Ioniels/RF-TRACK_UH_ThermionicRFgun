@@ -76,6 +76,222 @@ def build_crest_phasor(field_crest: np.ndarray, scale: Optional[float] = None) -
     return (field_crest / env) * float(scale)
 
 
+@dataclass(frozen=True)
+class HarmonicPhasorFit:
+    """Result of a fixed-frequency, all-snapshot harmonic least-squares fit.
+
+    The convention is ``field(t) = offset + Re{phasor * exp(+j*omega*(t-t_ref))}``.
+    ``normalized_rms_residual`` is computed globally over every value supplied to the fit, after
+    removing the fitted DC offset.  It is therefore a compact data-quality diagnostic, not a
+    per-vertex uncertainty estimate.
+    """
+
+    phasor: np.ndarray
+    offset: np.ndarray
+    time_reference_s: float
+    rms_residual: float
+    normalized_rms_residual: float
+    condition_number: float
+    rank: int
+    n_samples: int
+
+
+def fit_harmonic_phasor(
+    field_time_series: np.ndarray,
+    time_s: np.ndarray,
+    frequency_hz: float,
+    *,
+    time_axis: int = -1,
+    time_reference_s: Optional[float] = None,
+    fit_offset: bool = True,
+) -> HarmonicPhasorFit:
+    """Fit one complex phasor to *all* stored snapshots at a fixed frequency.
+
+    Unlike :func:`build_iq_phasor`, this neither assumes the selected snapshots are exactly a
+    quarter period apart nor normalizes field components independently.  Consequently, calling
+    it separately for Cartesian components preserves their measured relative amplitudes and
+    phases.  ``time_s`` must use seconds; keeping that unit explicit prevents the legacy MAT
+    convention (timestamps stored numerically in ns) from leaking into general field-map code.
+
+    The time dimension can be anywhere in ``field_time_series`` and is removed in the returned
+    ``phasor``/``offset`` arrays.  A DC term is fitted by default because solver exports can carry
+    a small numerical offset; set ``fit_offset=False`` only when the source guarantees zero DC.
+    """
+    values = np.asarray(field_time_series, dtype=float)
+    times = np.asarray(time_s, dtype=float).reshape(-1)
+    if values.ndim == 0:
+        raise ValueError("fit_harmonic_phasor: field_time_series must have a time dimension")
+
+    axis = int(time_axis)
+    if axis < 0:
+        axis += values.ndim
+    if axis < 0 or axis >= values.ndim:
+        raise ValueError(
+            f"fit_harmonic_phasor: time_axis={time_axis} is invalid for {values.ndim} dimensions"
+        )
+    if values.shape[axis] != times.size:
+        raise ValueError(
+            "fit_harmonic_phasor: time-axis length does not match time_s "
+            f"({values.shape[axis]} != {times.size})"
+        )
+    min_samples = 3 if fit_offset else 2
+    if times.size < min_samples:
+        raise ValueError(
+            f"fit_harmonic_phasor: need at least {min_samples} time samples "
+            f"(got {times.size})"
+        )
+    if not np.all(np.isfinite(times)) or not np.all(np.isfinite(values)):
+        raise ValueError("fit_harmonic_phasor: field values and timestamps must be finite")
+    if np.unique(times).size != times.size:
+        raise ValueError("fit_harmonic_phasor: timestamps must be distinct")
+    frequency_hz = float(frequency_hz)
+    if not np.isfinite(frequency_hz) or frequency_hz <= 0.0:
+        raise ValueError("fit_harmonic_phasor: frequency_hz must be finite and positive")
+
+    t_ref = float(times[0] if time_reference_s is None else time_reference_s)
+    if not np.isfinite(t_ref):
+        raise ValueError("fit_harmonic_phasor: time_reference_s must be finite")
+    theta = 2.0 * np.pi * frequency_hz * (times - t_ref)
+
+    # For P=a+jb, Re(P exp(+j theta)) = a*cos(theta) - b*sin(theta).
+    columns = [np.cos(theta), -np.sin(theta)]
+    if fit_offset:
+        columns.append(np.ones_like(theta))
+    design = np.column_stack(columns)
+    moved = np.moveaxis(values, axis, -1)
+    original_shape = moved.shape[:-1]
+    samples_by_point = moved.reshape(-1, times.size).T
+    coefficients, _, rank, singular_values = np.linalg.lstsq(design, samples_by_point, rcond=None)
+    if int(rank) != design.shape[1]:
+        raise ValueError(
+            "fit_harmonic_phasor: sampled phases do not span an identifiable harmonic fit "
+            f"(design rank {rank}, expected {design.shape[1]})"
+        )
+
+    phasor = (coefficients[0] + 1j * coefficients[1]).reshape(original_shape)
+    if fit_offset:
+        offset = coefficients[2].reshape(original_shape)
+    else:
+        offset = np.zeros(original_shape, dtype=float)
+
+    residual = samples_by_point - design @ coefficients
+    rms_residual = float(np.sqrt(np.mean(residual * residual)))
+    centered = samples_by_point - (coefficients[2][None, :] if fit_offset else 0.0)
+    rms_signal = float(np.sqrt(np.mean(centered * centered)))
+    normalized = rms_residual / rms_signal if rms_signal > 0.0 else (0.0 if rms_residual == 0.0 else np.inf)
+    condition = float(singular_values[0] / singular_values[-1])
+    return HarmonicPhasorFit(
+        phasor=np.asarray(phasor, dtype=np.complex128),
+        offset=np.asarray(offset, dtype=float),
+        time_reference_s=t_ref,
+        rms_residual=rms_residual,
+        normalized_rms_residual=float(normalized),
+        condition_number=condition,
+        rank=int(rank),
+        n_samples=int(times.size),
+    )
+
+
+def fold_axisymmetric_planar_fields(
+    x_m: np.ndarray,
+    z_m: np.ndarray,
+    radial_cartesian: np.ndarray,
+    longitudinal: np.ndarray,
+    *,
+    pair_tolerance_m: Optional[float] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
+    """Parity-project a signed meridional plane onto one axisymmetric ``(r,z)`` half-plane.
+
+    For a cylindrically symmetric field, the Cartesian component along the signed cut is odd in
+    ``x`` while the longitudinal component is even.  The old production path used ``abs(x)`` and
+    left both halves as overlapping interpolation vertices; that made the triangulation choose
+    between two values without actually enforcing or measuring symmetry.  Here every ``x>=0``
+    sample is paired with its nearest reflected ``x<=0`` sample, then
+
+    ``radial = (F(+x)-F(-x))/2`` and ``longitudinal = (F(+x)+F(-x))/2``.
+
+    The returned coordinates contain only ``x>=0`` samples, so there are no duplicate folded
+    vertices.  Field arrays may have trailing dimensions (for example time); their first axis
+    must match the coordinate arrays.  The diagnostic dictionary reports normalized parity
+    residuals and the geometric pairing tolerance/error.
+    """
+    x = np.asarray(x_m, dtype=float).reshape(-1)
+    z = np.asarray(z_m, dtype=float).reshape(-1)
+    radial = np.asarray(radial_cartesian)
+    axial = np.asarray(longitudinal)
+    if x.size != z.size or radial.shape[0] != x.size or axial.shape[0] != x.size:
+        raise ValueError(
+            "fold_axisymmetric_planar_fields: coordinate and field leading dimensions must match"
+        )
+    if not (np.all(np.isfinite(x)) and np.all(np.isfinite(z))):
+        raise ValueError("fold_axisymmetric_planar_fields: coordinates must be finite")
+
+    positive = np.flatnonzero(x >= 0.0)
+    negative = np.flatnonzero(x <= 0.0)
+    if positive.size == 0 or negative.size == 0:
+        raise ValueError("fold_axisymmetric_planar_fields: the plane must contain both signs of x")
+
+    positive_points = np.column_stack([x[positive], z[positive]])
+    reflected_negative_points = np.column_stack([-x[negative], z[negative]])
+    distances, nearest = cKDTree(reflected_negative_points).query(positive_points)
+
+    if pair_tolerance_m is None:
+        # One percent of the smaller median native coordinate step safely accommodates harmless
+        # floating export jitter without pairing genuinely different mesh cells.
+        steps = []
+        for coord in (x, z):
+            unique = np.unique(coord)
+            delta = np.diff(unique)
+            delta = delta[delta > np.finfo(float).eps]
+            if delta.size:
+                steps.append(float(np.median(delta)))
+        if not steps:
+            raise ValueError("fold_axisymmetric_planar_fields: cannot infer a pairing tolerance")
+        tolerance = 0.01 * min(steps)
+    else:
+        tolerance = float(pair_tolerance_m)
+    if not np.isfinite(tolerance) or tolerance <= 0.0:
+        raise ValueError("fold_axisymmetric_planar_fields: pair_tolerance_m must be positive")
+    if np.any(distances > tolerance):
+        raise ValueError(
+            "fold_axisymmetric_planar_fields: reflected mesh halves do not pair within tolerance "
+            f"(max error {float(np.max(distances)):.6g} m > {tolerance:.6g} m; "
+            f"{int(np.count_nonzero(distances > tolerance))} unmatched positive-side samples)"
+        )
+
+    partner = negative[np.asarray(nearest, dtype=int)]
+    radial_folded = 0.5 * (radial[positive] - radial[partner])
+    longitudinal_folded = 0.5 * (axial[positive] + axial[partner])
+
+    on_axis = np.isclose(x[positive], 0.0, atol=max(np.finfo(float).eps, tolerance * 1.0e-3))
+    radial_folded = np.array(radial_folded, copy=True)
+    radial_folded[on_axis] = 0.0
+
+    off_axis = ~on_axis
+
+    def _normalized_rms(numerator: np.ndarray, denominator: np.ndarray) -> float:
+        num = float(np.sqrt(np.mean(np.abs(numerator) ** 2))) if numerator.size else 0.0
+        den = float(np.sqrt(np.mean(np.abs(denominator) ** 2))) if denominator.size else 0.0
+        return num / den if den > 0.0 else (0.0 if num == 0.0 else np.inf)
+
+    diagnostics = {
+        "n_input": int(x.size),
+        "n_output": int(positive.size),
+        "n_axis": int(np.count_nonzero(on_axis)),
+        "pair_tolerance_m": tolerance,
+        "pair_max_error_m": float(np.max(distances)),
+        "radial_odd_residual": _normalized_rms(
+            radial[positive][off_axis] + radial[partner][off_axis],
+            radial_folded[off_axis],
+        ),
+        "longitudinal_even_residual": _normalized_rms(
+            axial[positive][off_axis] - axial[partner][off_axis],
+            longitudinal_folded[off_axis],
+        ),
+    }
+    return x[positive], z[positive], radial_folded, longitudinal_folded, diagnostics
+
+
 def rms_from_phasor_over_time(
     phasor: np.ndarray,
     t_ns: np.ndarray,
@@ -211,10 +427,19 @@ def phasor_check(
     import matplotlib.pyplot as plt
 
     mode = str(mode).strip().lower()
-    if mode not in ("reconstruct", "simplified"):
+    if mode not in ("all_time", "reconstruct", "legacy_iq", "simplified"):
         raise ValueError(f"Unknown mode: {mode}")
 
-    if mode == "reconstruct":
+    fit_result = None
+    if mode in ("all_time", "reconstruct"):
+        fit_result = fit_harmonic_phasor(Ez_yz, np.asarray(t_ns) * 1.0e-9, f_hz, time_axis=1)
+        # rms_from_phasor_over_time uses exp(+jwt), while the fit result is referenced to t_ref.
+        Ez_phasor = fit_result.phasor * np.exp(
+            -1j * 2.0 * np.pi * float(f_hz) * fit_result.time_reference_s
+        )
+        phase_deg = 0.0
+        phase_label = f"all {fit_result.n_samples} snapshots, t_ref={fit_result.time_reference_s*1e9:.4f} ns"
+    elif mode == "legacy_iq":
         Ez_0 = Ez_yz[:, i0]
         Ez_90 = Ez_yz[:, i90]
         Ez_max_0 = float(np.max(np.abs(Ez_0)))
@@ -251,6 +476,12 @@ def phasor_check(
         "ratio": ratio,
         "phase_deg": phase_deg,
     }
+    if fit_result is not None:
+        out.update({
+            "normalized_rms_residual": fit_result.normalized_rms_residual,
+            "condition_number": fit_result.condition_number,
+            "n_fit_samples": fit_result.n_samples,
+        })
 
     if t_ns.size <= 1:
         return out

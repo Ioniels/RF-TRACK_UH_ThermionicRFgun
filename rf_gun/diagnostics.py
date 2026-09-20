@@ -252,8 +252,25 @@ def classify_particle_outcomes(
     lost_id_col: int = -1,
     k_col: int = K_COL,
     max_kinetic_energy_mev: Optional[float] = MAX_PHYSICAL_KINETIC_ENERGY_MEV,
+    backstop_z_min_m: Optional[float] = None,
+    cathode_hit_ids: Optional[frozenset] = None,
 ):
     """Classify particles into transmitted/backward (from `final`=`Bout`'s own z/pz) and lost.
+
+    Supplying `cathode_hit_ids` (from `BackBombardmentEvents.cathode_hit_ids()`) additionally
+    splits `backward_returned` into `count_hit_cathode` / `count_missed_cathode`, giving the four
+    outcomes that actually matter for this gun:
+
+        forward, survived every aperture      -> transmitted
+        forward, removed by the aperture R(z) -> lost.count_aperture
+        backward, struck LaB6                 -> backward_returned.count_hit_cathode
+        backward, did not strike LaB6         -> backward_returned.count_missed_cathode
+
+    Turning around is not the same as bombarding the cathode. The LaB6 disk is 2.8 mm across the
+    flat and 3.2 mm across the bevel, and the annulus out to the cavity nose bore is open vacuum,
+    so a returning electron can cross the cathode plane without striking anything. Only
+    `count_hit_cathode` deposits energy in the cathode. Where the rest end up is deliberately not
+    subdivided here.
 
     "Lost" combines two disjoint sources: RF-Track's own `lost_table` (particles the dynamic
     aperture removed during tracking, id-based, see `rf_gun.aperture`/`rf_gun.particle_tags`) and
@@ -263,6 +280,16 @@ def classify_particle_outcomes(
     transverse bound yet still blow up numerically in momentum, and would otherwise be silently
     counted as "transmitted"). Pass `max_kinetic_energy_mev=None` to use only `lost_table`.
     transmitted/backward exclude both lost sources by construction.
+
+    `backstop_z_min_m`, when given (the cathode backstop's global z span's lower edge, matching
+    `rf_gun.particle_tags.build_particle_tags`'s own parameter of the same name), reclassifies
+    every `lost_table` row the backstop actually captured
+    (`rf_gun.backstop_loss_separation.identify_backstop_loss_candidates`) into "backward_returned"
+    instead of "lost": a backstop capture physically turned around and returned toward the
+    cathode -- it is the back-bombardment population, not a dynamic-aperture (transverse) loss.
+    `lost`'s own `count_aperture` is the dynamic-aperture-only count in that case. Omit (the
+    default) to keep every `lost_table` row counted as `lost`, matching this function's pre-
+    backstop-aware behavior.
     """
     initial = np.asarray(initial)
     final = np.asarray(final)
@@ -273,6 +300,12 @@ def classify_particle_outcomes(
         backward_mask = np.zeros((0,), dtype=bool)
         unphysical_mask = np.zeros((0,), dtype=bool)
     else:
+        # Column 4 of `%X %Px %Y %Py %Z %Pz ...` is `%Z` in MILLIMETRES already -- do not rescale
+        # it. Every `final_z_mean_mm` below used to carry a stray `1e3 *`, so the value reported in
+        # run_results.json was 1000x too large (cross-checked against the same run's openPMD Bout,
+        # which writes `z_mm * 1e-3`: a KOA study_ii "fine" case reported 1383559.15 mm for a beam
+        # the HDF5 puts at 1.3836 m). Sign-only uses (the forward/backward masks here) were never
+        # affected; only the reported means were.
         zf_full = np.asarray(final[:, 4], dtype=float)
         pzf_full = np.asarray(final[:, 5], dtype=float)
         if max_kinetic_energy_mev is not None and final.shape[1] > k_col:
@@ -320,32 +353,52 @@ def classify_particle_outcomes(
     unphysical_mask_match = unphysical_mask[final_rows]
 
     n_trans = int(np.sum(transmitted_mask))
-    n_back = int(np.sum(backward_mask))
+    n_back_bout = int(np.sum(backward_mask))
     n_unphysical = int(np.sum(unphysical_mask))
 
     lost_arr = np.asarray(lost_table, dtype=float) if lost_table is not None else np.zeros((0, 0))
     has_lost = lost_arr.ndim == 2 and lost_arr.shape[0] > 0
-    n_lost_table = int(lost_arr.shape[0]) if has_lost else 0
 
-    lost_pzf_mean = np.nan
-    lost_zf_mean_mm = np.nan
-    lost_pz0_mean = np.nan
-    lost_t0_mean = np.nan
-    if has_lost and lost_arr.shape[1] > max(5, abs(lost_id_col)):
-        # LOST_COLUMNS order: x, px, y, py, z, pz, t, mass, q, N, id.
-        lost_pzf_mean = float(np.mean(lost_arr[:, 5]))
-        lost_zf_mean_mm = 1e3 * float(np.mean(lost_arr[:, 4]))
+    def _row_stats(rows: np.ndarray) -> tuple[int, float, float, float, float]:
+        """`(n, final_pz_mean, final_z_mean_mm, initial_pz0_mean, initial_t0_mean)` for a subset
+        of `lost_table` rows -- final-state stats come straight from the row's own columns
+        (LOST_COLUMNS order: x, px, y, py, z, pz, t, mass, q, N, id), initial-state stats by
+        id-matching back to `initial`."""
+        n = int(rows.shape[0])
+        if n == 0 or rows.shape[1] <= max(5, abs(lost_id_col)):
+            return 0, np.nan, np.nan, np.nan, np.nan
+        pzf_mean = float(np.mean(rows[:, 5]))
+        zf_mean_mm = float(np.mean(rows[:, 4]))
+        pz0_mean = np.nan
+        t0_mean = np.nan
         if initial.ndim == 2 and initial.shape[1] > id_col:
-            lost_ids = lost_arr[:, lost_id_col].astype(np.int64)
+            row_ids = rows[:, lost_id_col].astype(np.int64)
             init_ids = initial[:, id_col].astype(np.int64)
             by_id = {int(pid): i for i, pid in enumerate(init_ids.tolist())}
-            rows0 = [by_id[int(pid)] for pid in lost_ids.tolist() if int(pid) in by_id]
+            rows0 = [by_id[int(pid)] for pid in row_ids.tolist() if int(pid) in by_id]
             if rows0:
-                lost_pz0_mean = float(np.mean(initial[rows0, 5])) if initial.shape[1] > 5 else np.nan
+                pz0_mean = float(np.mean(initial[rows0, 5])) if initial.shape[1] > 5 else np.nan
                 if t0_mm_c is not None:
                     t0_full = np.asarray(t0_mm_c, dtype=float).reshape(-1)
                     if t0_full.size == initial.shape[0]:
-                        lost_t0_mean = float(np.mean(t0_full[rows0]))
+                        t0_mean = float(np.mean(t0_full[rows0]))
+        return n, pzf_mean, zf_mean_mm, pz0_mean, t0_mean
+
+    backstop_arr = np.zeros((0, lost_arr.shape[1] if lost_arr.ndim == 2 else 0))
+    if has_lost and backstop_z_min_m is not None:
+
+        # Backward is a momentum-sign question (Pz<0), not a position one -- see
+        # rf_gun.particle_tags.backward_ids_from_lost_table. The narrow backstop z-band decides
+        # only which rows get ray-cast for a cathode impact, not who turned around.
+        pz_lost = np.asarray(lost_arr[:, 5], dtype=float)
+        is_backstop_row = np.isfinite(pz_lost) & (pz_lost < 0.0)
+        backstop_arr = lost_arr[is_backstop_row]
+        aperture_arr = lost_arr[~is_backstop_row]
+    else:
+        aperture_arr = lost_arr if has_lost else np.zeros((0, 0))
+
+    n_lost_table, lost_pzf_mean, lost_zf_mean_mm, lost_pz0_mean, lost_t0_mean = _row_stats(aperture_arr)
+    n_backstop, backstop_pzf_mean, backstop_zf_mean_mm, backstop_pz0_mean, backstop_t0_mean = _row_stats(backstop_arr)
 
     def frac(n: int) -> float:
         return float(n / n0) if n0 > 0 else np.nan
@@ -367,9 +420,27 @@ def classify_particle_outcomes(
     unphys_initial_pz_mean = _masked_mean(pz0, unphysical_mask_match) if pz0 is not None else np.nan
     unphys_final_pz_mean = _masked_mean(pzf, unphysical_mask_match) if pzf is not None else np.nan
     unphys_initial_t0_mean = _masked_mean(t0, unphysical_mask_match) if t0 is not None else np.nan
-    unphys_final_z_mean_mm = 1e3 * _masked_mean(zf, unphysical_mask_match) if zf is not None else np.nan
+    unphys_final_z_mean_mm = _masked_mean(zf, unphysical_mask_match) if zf is not None else np.nan
 
+    n_back = n_back_bout + n_backstop
     n_lost = n_lost_table + n_unphysical
+
+    # Split the backward population by whether it actually struck LaB6. Turning around is NOT the
+    # same as bombarding the cathode: the annulus between the 3.2 mm LaB6 disk and the cavity nose
+    # bore is open vacuum, so a returning electron can cross the cathode plane without hitting
+    # anything. Only `hit_cathode` deposits energy in the cathode.
+    n_hit_cathode: Optional[int] = None
+    n_missed_cathode: Optional[int] = None
+    if cathode_hit_ids is not None:
+        hit_set = frozenset(int(i) for i in cathode_hit_ids)
+        n_hit_cathode = 0
+        if backstop_arr.ndim == 2 and backstop_arr.shape[0] and backstop_arr.shape[1] > abs(lost_id_col):
+            backstop_ids = backstop_arr[:, lost_id_col].astype(np.int64)
+            n_hit_cathode += int(sum(1 for pid in backstop_ids.tolist() if int(pid) in hit_set))
+        if n_back_bout and final.ndim == 2 and final.shape[1] > id_col:
+            bout_back_ids = final[backward_mask, id_col].astype(np.int64)
+            n_hit_cathode += int(sum(1 for pid in bout_back_ids.tolist() if int(pid) in hit_set))
+        n_missed_cathode = int(n_back - n_hit_cathode)
 
     return {
         "n_initial": n0,
@@ -380,15 +451,36 @@ def classify_particle_outcomes(
             "initial_pz_mean": _masked_mean(pz0, transmitted_mask_match) if pz0 is not None else np.nan,
             "final_pz_mean": _masked_mean(pzf, transmitted_mask_match) if pzf is not None else np.nan,
             "initial_t0_mean_mm_c": _masked_mean(t0, transmitted_mask_match) if t0 is not None else np.nan,
-            "final_z_mean_mm": 1e3 * _masked_mean(zf, transmitted_mask_match) if zf is not None else np.nan,
+            "final_z_mean_mm": _masked_mean(zf, transmitted_mask_match) if zf is not None else np.nan,
         },
         "backward_returned": {
             "count": n_back,
             "fraction": frac(n_back),
-            "initial_pz_mean": _masked_mean(pz0, backward_mask_match) if pz0 is not None else np.nan,
-            "final_pz_mean": _masked_mean(pzf, backward_mask_match) if pzf is not None else np.nan,
-            "initial_t0_mean_mm_c": _masked_mean(t0, backward_mask_match) if t0 is not None else np.nan,
-            "final_z_mean_mm": 1e3 * _masked_mean(zf, backward_mask_match) if zf is not None else np.nan,
+            "count_bout": n_back_bout,
+            "count_backstop": n_backstop,
+            # None unless `cathode_hit_ids` was supplied (it comes from the back-bombardment
+            # event capture, which runs after this classification in the driver).
+            "count_hit_cathode": n_hit_cathode,
+            "count_missed_cathode": n_missed_cathode,
+            "fraction_hit_cathode": (
+                frac(n_hit_cathode) if n_hit_cathode is not None else None
+            ),
+            "initial_pz_mean": combine_mean(
+                _masked_mean(pz0, backward_mask_match) if pz0 is not None else np.nan, n_back_bout,
+                backstop_pz0_mean, n_backstop,
+            ),
+            "final_pz_mean": combine_mean(
+                _masked_mean(pzf, backward_mask_match) if pzf is not None else np.nan, n_back_bout,
+                backstop_pzf_mean, n_backstop,
+            ),
+            "initial_t0_mean_mm_c": combine_mean(
+                _masked_mean(t0, backward_mask_match) if t0 is not None else np.nan, n_back_bout,
+                backstop_t0_mean, n_backstop,
+            ),
+            "final_z_mean_mm": combine_mean(
+                _masked_mean(zf, backward_mask_match) if zf is not None else np.nan, n_back_bout,
+                backstop_zf_mean_mm, n_backstop,
+            ),
         },
         "lost": {
             "count": n_lost,

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uh-rf-gun"
+version = "0.1.0"
+description = "Thermionic RF-gun field processing, RF-Track transport, and back-bombardment analysis"
+requires-python = ">=3.11"
+dependencies = [
+    "h5py>=3.10",
+    "matplotlib>=3.8",
+    "numpy>=2.0",
+    "PyYAML>=6",
+    "scipy>=1.12",
+]
+
+[project.optional-dependencies]
+notebook = ["ipykernel>=6", "nbformat>=5", "ipywidgets", "pandas", "openpmd-beamphysics"]
+test = ["pytest>=8", "pyflakes"]
+
+[tool.setuptools.packages.find]
+include = ["rf_gun*"]
+
+[tool.setuptools.package-data]
+"rf_gun.materials" = ["data/*.yaml", "data/*.csv"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"
+pythonpath = ["."]

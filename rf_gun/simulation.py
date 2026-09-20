@@ -371,6 +371,41 @@ def _resolve_beam_loading_tinj(
     B0,
     thermo_info: Dict[str, Any],
 ) -> VolumeBuildParams:
+    """Resolve `bl_tinj_mode="auto_from_emission"` to a concrete `bl_tinj_manual_mm_c`, using a
+    *current-weighted mean* emission time -- not the earliest time-bin center (`np.min`, this
+    function's own prior behavior).
+
+    Root cause (confirmed against real KOA production runs, all five `KOA_slurm_scripts/study_*`
+    families, ~55 failed array tasks in one batch, each with `RuntimeError:
+    BeamLoadingSW.get_TT1() returned non-finite value(s)`): every one of those runs uses
+    `--emission-field-iteration --use-converged-iteration-source`, so `thermo_info["t_s"]` is the
+    *converged Emission Fields Iteration*'s own bin-centered time grid (default 24 bins spanning
+    the emission-phase window, `rf_gun.emission_iteration`), not a per-particle array. `min(t_s)`
+    is then just the center of that grid's very first bin -- roughly half a bin width, a pure
+    discretization artifact of the chosen bin count with no physical meaning of its own -- which
+    for this cavity's parameters (`Q_loaded~1867`, `tau~2.08e-7 s`) happens to land `tinj/tau`
+    inside a region where RF-Track 2.7.0's compiled `BeamLoadingSW` returns non-finite transit-
+    time factors after an otherwise-successful construction. (An earlier version of this function
+    -- and this docstring -- attributed the failure to `min()` of a genuine per-particle emission-
+    time array collapsing as particle count grows; `B0.get_t0()`, the accessor that theory relied
+    on, does not actually exist on `Bunch6dT`, so that particular code path was silently dead and
+    never the operative one. The real mechanism is the bin-count artifact above, confirmed by
+    reconstructing the actual production emission source and inspecting `thermo_info["t_s"]`
+    directly -- it does not depend on particle count at all, only on the Emission Fields
+    Iteration's own fixed bin count.)
+
+    The mean is not vulnerable to that discretization artifact (a uniform grid's mean sits at
+    its own temporal midpoint regardless of how many bins subdivide it), and weighting it by the
+    bunch's own emitted-current history (`thermo_info["I_A_t"]`/`"J_Apm2_t"`, aligned with `t_s`)
+    makes it the physically correct "center of charge injection" rather than merely "the grid's
+    own midpoint" -- checked against this project's actual (near-crest-centered, close to
+    symmetric) emission profile, the two agree to within 1 part in 1e15 here, but the weighted
+    version does not rely on that symmetry holding for every possible configuration. See also
+    `rf_gun.rftrack_volume._attach_beam_loading_sw`'s own floor, a second, independent safety net
+    against whatever residually-small value still reaches it (for this cavity, the emission
+    window itself is ~3-4 orders of magnitude shorter than `tau`, so any point within it needs
+    that floor regardless of exactly which one is picked here).
+    """
     if not bool(getattr(vol_params, "beam_loading_enabled", False)):
         return vol_params
     mode = str(getattr(vol_params, "bl_tinj_mode", "manual")).strip().lower()
@@ -384,7 +419,7 @@ def _resolve_beam_loading_tinj(
             t0 = np.asarray(get_t0(), dtype=float).reshape(-1)
             t0 = t0[np.isfinite(t0)]
             if t0.size:
-                tinj_mm_c = float(np.min(t0))
+                tinj_mm_c = float(np.mean(t0))
         except Exception:
             tinj_mm_c = None
 
@@ -392,9 +427,21 @@ def _resolve_beam_loading_tinj(
         t_model_s = thermo_info.get("t_s", None)
         if t_model_s is not None:
             t_model_s = np.asarray(t_model_s, dtype=float).reshape(-1)
-            t_model_s = t_model_s[np.isfinite(t_model_s)]
-            if t_model_s.size:
-                tinj_mm_c = float(np.min(t_model_s) * c * 1e3)
+            weights = thermo_info.get("I_A_t", None)
+            if weights is None:
+                weights = thermo_info.get("J_Apm2_t", None)
+            weights = np.asarray(weights, dtype=float).reshape(-1) if weights is not None else None
+            if weights is not None and weights.shape != t_model_s.shape:
+                weights = None  # misaligned with t_s -- fall back to an unweighted mean below
+            finite = np.isfinite(t_model_s)
+            if weights is not None:
+                finite = finite & np.isfinite(weights) & (weights >= 0.0)
+            t_model_s = t_model_s[finite]
+            weights = weights[finite] if weights is not None else None
+            if t_model_s.size and weights is not None and weights.size and np.sum(weights) > 0.0:
+                tinj_mm_c = float(np.sum(t_model_s * weights) / np.sum(weights) * c * 1e3)
+            elif t_model_s.size:
+                tinj_mm_c = float(np.mean(t_model_s) * c * 1e3)
 
     if tinj_mm_c is None:
         t_emit_s = thermo_info.get("t_emit_s", None)
@@ -402,7 +449,7 @@ def _resolve_beam_loading_tinj(
             t_emit_s = np.asarray(t_emit_s, dtype=float).reshape(-1)
             t_emit_s = t_emit_s[np.isfinite(t_emit_s)]
             if t_emit_s.size:
-                tinj_mm_c = float(np.quantile(t_emit_s, 1e-3) * c * 1e3)
+                tinj_mm_c = float(np.mean(t_emit_s) * c * 1e3)
 
     if tinj_mm_c is None:
         tinj_mm_c = 0.0
@@ -791,6 +838,9 @@ def build_cathode_rf_source(
     n_time_bins: int = 60,
     z_probe_m: Optional[float] = None,
     temperature_field_K: Optional[TemperatureField] = None,
+    *,
+    Bt_grid: Optional[np.ndarray] = None,
+    Bz_grid: Optional[np.ndarray] = None,
 ) -> Dict[str, np.ndarray]:
     """RF-only J(x,y,t) [A/m^2] (guide Sec. 6.4), for build_bunch_thermionic_spatial()'s
     `prescribed_source` argument -- sampled from the *actual configured RF-Track field-map
@@ -826,7 +876,10 @@ def build_cathode_rf_source(
         sc_enabled=False, beam_loading_enabled=False, deflection_enabled=False,
     )
     z_probe = float(z_probe_m) if z_probe_m is not None else float(near_cathode_params.z_max_m) / 4.0
-    V_field = build_volume(rft, Er_grid, Ez_grid, float(phi_deg), near_cathode_params)
+    V_field = build_volume(
+        rft, Er_grid, Ez_grid, float(phi_deg), near_cathode_params,
+        Bt_grid=Bt_grid, Bz_grid=Bz_grid,
+    )
 
     x_points_m = X_mm.ravel() * 1e-3
     y_points_m = Y_mm.ravel() * 1e-3
@@ -1068,6 +1121,9 @@ def run_phase_scan(
     refine: bool = True,
     refine_xatol_deg: float = 0.05,
     refine_maxiter: int = 30,
+    *,
+    Bt_grid: Optional[np.ndarray] = None,
+    Bz_grid: Optional[np.ndarray] = None,
 ) -> PhaseCalibrationResult:
     """RF-only phase scan with a genuinely on-axis, cold calibration source.
 
@@ -1104,7 +1160,10 @@ def run_phase_scan(
 
     def _mean_pz_at(phi_rel: float) -> float:
         phi_abs = (float(phi_rel) + float(transport_phase_deg)) % 360.0
-        V = build_volume(rft, Er_grid, Ez_grid, phi_abs, vol_params_fast)
+        V = build_volume(
+            rft, Er_grid, Ez_grid, phi_abs, vol_params_fast,
+            Bt_grid=Bt_grid, Bz_grid=Bz_grid,
+        )
         B0 = build_bunch_on_axis_cold(rft, n_particles, pz0_MeV_c, q_total_C)
         Bout = V.track(B0)
         Mf = Bout.get_phase_space()
@@ -1189,6 +1248,9 @@ def run_transport_with_progress(
     rng: Optional[np.random.Generator] = None,
     on_screen: Optional[Callable[[int, float, Dict[str, float]], None]] = None,
     spatial_source: Optional[Dict[str, np.ndarray]] = None,
+    *,
+    Bt_grid: Optional[np.ndarray] = None,
+    Bz_grid: Optional[np.ndarray] = None,
 ):
     """Run transport with staged progress text.
 
@@ -1271,6 +1333,7 @@ def run_transport_with_progress(
 
     runtime_payload = _runtime_key_payload(vol_params_eff, tracking, len(z_snaps))
     runtime_payload["spatial_emission_sampling"] = spatial_source is not None
+    runtime_payload["rf_magnetic_field_enabled"] = Bt_grid is not None
     runtime_key = _runtime_key_string(runtime_payload)
     runtime_key_hash = _runtime_key_hash(runtime_key)
     est_s = _TRANSPORT_RUNTIME_HISTORY.get(runtime_key, None)
@@ -1281,6 +1344,7 @@ def run_transport_with_progress(
         f"| emission_sc_steps={int(getattr(vol_params_eff, 'emission_nsteps', 0))} "
         f"| screens={len(z_snaps)} | sc={'on' if bool(getattr(vol_params_eff, 'sc_enabled', False)) else 'off'} "
         f"| bl={'on' if bool(getattr(vol_params_eff, 'beam_loading_enabled', False)) else 'off'} "
+        f"| rf_B={'on' if Bt_grid is not None else 'off'} "
         f"| key={runtime_key_hash}"
     )
     print(settings_line, flush=True)
@@ -1319,8 +1383,13 @@ def run_transport_with_progress(
                 z_snaps,
                 screen_params=screen_params,
                 return_volume=True,
+                Bt_grid=Bt_grid,
+                Bz_grid=Bz_grid,
             )
-        V = build_volume(rft, Er_grid, Ez_grid, tracking.phi_deg, vol_params_track)
+        V = build_volume(
+            rft, Er_grid, Ez_grid, tracking.phi_deg, vol_params_track,
+            Bt_grid=Bt_grid, Bz_grid=Bz_grid,
+        )
         return V.track(B0), [], V
 
     t_solver_s = time.time()
@@ -1431,7 +1500,14 @@ def run_transport_with_progress(
     m0 = np.array(B0.get_phase_space(tracking.phase_fmt, "all"), copy=True)
     mf = np.array(Bout.get_phase_space(tracking.phase_fmt, "all"), copy=True)
     t0_mm_c = np.asarray(thermo_info.get("initial_t0_mm_c", []), dtype=float)
-    classes = classify_particle_outcomes(m0, mf, t0_mm_c=t0_mm_c if t0_mm_c.size else None, lost_table=lost_table)
+    _backstop_z_min_m = (
+        -float(vol_params_eff.cathode_backstop_thickness_mm) * 1e-3
+        if bool(getattr(vol_params_eff, "cathode_backstop_enabled", False)) else None
+    )
+    classes = classify_particle_outcomes(
+        m0, mf, t0_mm_c=t0_mm_c if t0_mm_c.size else None, lost_table=lost_table,
+        backstop_z_min_m=_backstop_z_min_m,
+    )
     init_ids = _try_get_particle_ids(B0, selection="all")
     classes["initial_t0_mm_c"] = t0_mm_c.tolist() if t0_mm_c.size else []
     classes["initial_pz_MeV_c"] = np.asarray(m0[:, 5], dtype=float).tolist() if m0.ndim == 2 and m0.shape[1] > 5 else []

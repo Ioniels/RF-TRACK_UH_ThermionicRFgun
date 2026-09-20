@@ -57,7 +57,6 @@ that comparison is done, e.g. via `rf_gun.frozen_source_attribution.run_frozen_s
 """
 from __future__ import annotations
 
-from typing import Optional
 
 import numpy as np
 

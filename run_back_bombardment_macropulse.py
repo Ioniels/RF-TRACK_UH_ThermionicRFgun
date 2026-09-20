@@ -412,6 +412,23 @@ def _write_study_json(rg: Any, study: Any, output_dir: Path) -> None:
                 study.heat_source.escaping_energy_below_tio_validity_J_total
             ),
             "excluded_non_lab6_energy_J_total": study.heat_source.excluded_non_lab6_energy_J_total,
+            # Keep in step with the same block in
+            # rf_gun/studies/back_bombardment_macropulse.py -- test_bb0_closure_keys_match
+            # fails if the two ever diverge again.
+            "rim_reassigned_energy_J_total": study.heat_source.rim_reassigned_energy_J_total,
+            "rim_reassigned_event_count": int(study.heat_source.rim_reassigned_event_count),
+            "rim_reassigned_fraction_of_deposited": (
+                float(study.heat_source.rim_reassigned_energy_J_total)
+                / float(study.heat_source.total_deposited_energy_J)
+                if float(study.heat_source.total_deposited_energy_J) > 0.0
+                else 0.0
+            ),
+            "non_finite_position_energy_J_total": (
+                study.heat_source.non_finite_position_energy_J_total
+            ),
+            "non_finite_position_event_count": int(
+                study.heat_source.non_finite_position_event_count
+            ),
         },
         "thermal": {
             "backend": study.thermal_result.backend,
@@ -436,18 +453,25 @@ def _write_study_json(rg: Any, study: Any, output_dir: Path) -> None:
 
 
 def _save_figures(rg: Any, study: Any, output_dir: Path) -> None:
+    import matplotlib.pyplot as plt
+
     figures_dir = output_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
 
-    fig_a = rg.plot_back_bombardment_source_qualification(study)
-    path_a = figures_dir / "back_bombardment_source_qualification.png"
-    fig_a.savefig(path_a, dpi=150)
-    print(f"Wrote {path_a}")
-
-    fig_b = rg.plot_back_bombardment_macropulse(study)
-    path_b = figures_dir / "back_bombardment_macropulse.png"
-    fig_b.savefig(path_b, dpi=150)
-    print(f"Wrote {path_b}")
+    # Same writer, format bundle and .eps size cap as every other figure in this project --
+    # see rf_gun.plotting.figure_io.save_figure_formats.
+    figures = {
+        "back_bombardment_source_qualification": rg.plot_back_bombardment_source_qualification,
+        "back_bombardment_macropulse": rg.plot_back_bombardment_macropulse,
+    }
+    for stem, fig_fn in figures.items():
+        fig = fig_fn(study)
+        if fig is None:
+            continue
+        written = rg.save_figure_formats(fig, figures_dir, stem, dpi=150)
+        plt.close(fig)
+        for name in written:
+            print(f"Wrote {figures_dir / name}")
 
 
 # ------------------------------------------------------------------------------------------------

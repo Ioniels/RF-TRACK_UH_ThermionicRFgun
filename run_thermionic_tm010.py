@@ -4,14 +4,24 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
 import matplotlib
 import numpy as np
+
+# Compatibility aliases for existing scripts; implementations live in the package.
+from rf_gun.fieldmaps.tracking import (
+    load_qualified_artifact_for_tracking as _load_qualified_artifact_for_tracking,
+    artifact_tracking_provenance as _artifact_provenance_record,
+)
+from rf_gun.provenance import (
+    sha256_file as _sha256_file,
+    canonical_json_sha256 as _canonical_payload_sha256,
+)
 import time
 
 matplotlib.use("Agg")
@@ -37,10 +47,20 @@ _DEFAULT_CATHODE_BACKSTOP_THICKNESS_MM = 2.0
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run thermionic TM010 transport with RF-Track.")
 
-    parser.add_argument("--preset", choices=["none", "quick"], default="none")
+    parser.add_argument("--preset", choices=["none", "quick"], default="none",
+                         help="'quick': fast low-fidelity smoke-test configuration (forces "
+                              "n_particles=1000, sc_enabled=True, beam_loading=True, and "
+                              "finesse=coarse unless --finesse is also given); overrides any "
+                              "conflicting explicit flag, with a printed note when it does. Not a "
+                              "physics-accurate setting -- for pipeline sanity checks only.")
     # Solver/meshing finesse tier -- see rf_gun/finesse_presets.py. Applied after --preset, so it
     # always wins over --preset quick's own values.
-    parser.add_argument("--finesse", choices=list(_FINESSE_TIER_NAMES), default=None)
+    parser.add_argument("--finesse", choices=list(_FINESSE_TIER_NAMES), default=None,
+                         help="Solver/meshing finesse tier (rf_gun.finesse_presets); coarser is "
+                              "faster and less accurate. None (default) leaves every finesse-"
+                              "scoped argument at its own individual CLI default rather than "
+                              "applying a matched tier -- except under --preset quick, which sets "
+                              "this to 'coarse' unless given explicitly here.")
     parser.add_argument("--output", type=Path, default=None)
 
     parser.add_argument("--threads", type=int, default=None)
@@ -50,12 +70,74 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-family", type=str, default="thermionic")
     parser.add_argument("--scan-tags", type=str, nargs="*", default=None)
 
-    parser.add_argument("--xy_fieldmap", type=Path, default=Path("field_maps/XYplanarSensorData.mat"))
-    parser.add_argument("--yz_fieldmap", type=Path, default=Path("field_maps/YZplanarSensorData.mat"))
-    parser.add_argument("--phasor_mode", choices=["reconstruct", "simplified"], default="reconstruct")
+    parser.add_argument(
+        "--field-artifact",
+        type=Path,
+        default=None,
+        help=(
+            "Qualified compact axisymmetric HDF5 artifact produced by the dedicated XFdtd "
+            "field-treatment pipeline. Its frequency, r/z grid, and E/B phasors are used "
+            "verbatim after full payload verification. If omitted, the legacy planar-MAT "
+            "compatibility path is used."
+        ),
+    )
+    parser.add_argument(
+        "--allow-legacy-mat-fieldmap",
+        action="store_true",
+        help=(
+            "Opt in to the retired legacy planar-MAT field path. Without this, omitting "
+            "--field-artifact is a hard error: the .mat maps carry no magnetic field and are "
+            "no longer a production input, so falling back to them silently would quietly "
+            "produce an E-only run against unqualified data."
+        ),
+    )
+    parser.add_argument(
+        "--rf-magnetic-field",
+        choices=["artifact", "zero"],
+        default="artifact",
+        help=(
+            "For --field-artifact runs, use its axisymmetric Btheta/Bz maps (default), or "
+            "deliberately omit RF B as an E-only control. Legacy MAT inputs contain no B map "
+            "and therefore remain E-only."
+        ),
+    )
+    parser.add_argument(
+        "--field-tail-policy",
+        choices=["modal", "zero-control"],
+        default="modal",
+        help=(
+            "Required artifact variant: qualified modal evanescent continuation (production "
+            "default), or the separately qualified zero-tail sensitivity control. This explicit "
+            "selection prevents a zero-tail control artifact from being used accidentally."
+        ),
+    )
+    parser.add_argument(
+        "--xy_fieldmap", type=Path, default=Path("field_maps/XYplanarSensorData.mat"),
+        help="Legacy compatibility input, used only when --field-artifact is omitted.",
+    )
+    parser.add_argument(
+        "--yz_fieldmap", type=Path, default=Path("field_maps/YZplanarSensorData.mat"),
+        help="Legacy compatibility input, used only when --field-artifact is omitted.",
+    )
+    parser.add_argument(
+        "--phasor_mode",
+        choices=["all_time", "reconstruct", "legacy_iq", "simplified"],
+        default="all_time",
+        help=(
+            "Field time reconstruction: all_time (default) is a fixed-frequency least-squares "
+            "fit using every snapshot; reconstruct is a backward-compatible alias for all_time; "
+            "legacy_iq reproduces the historical independently-normalized two-snapshot method; "
+            "simplified uses the raw longitudinal-crest snapshot without component rescaling."
+        ),
+    )
 
     parser.add_argument("--f_hz", type=float, default=2.856e9)
-    parser.add_argument("--y_cathode_mm", type=float, default=12.75)
+    parser.add_argument("--y_cathode_mm", type=float, default=12.75,
+                         help="Cathode position in the XY field map's own y-axis (maps to z=0). "
+                              "Must match the field data's own PEC-screening boundary -- checked "
+                              "automatically at runtime (rg.detect_pec_boundary_along_axis) and "
+                              "rejected if it doesn't, since a wrong value corrupts the on-axis "
+                              "field right at the emission surface.")
     parser.add_argument("--r_max_m", type=float, default=_R_CAV_MM * 1e-3)
     # Field-grid resolution: independent of --finesse/--preset (see rf_gun.finesse_presets module
     # docstring) -- these defaults match FIXED_DR_UM/FIXED_DZ_UM there (hand-copied, not imported,
@@ -64,8 +146,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dr_um", type=float, default=4.0)
     parser.add_argument("--dz_um", type=float, default=13.0)
     parser.add_argument("--z_min", type=float, default=0.0)
-    parser.add_argument("--z_max", type=float, default=None)
-    parser.add_argument("--ext_zmax", type=float, default=0.0075)
+    parser.add_argument("--z_max", type=float, default=None,
+                        help="Downstream end of the field map / tracking domain [m], measured "
+                             "from the cathode. Default: the end of the last narrow tube section "
+                             "of the real channel (rf_gun.aperture.exit_tube_end_z_m -- "
+                             "L_END_MM=40.589 mm, shifted by --delta_cathode_chamfer_mm), i.e. "
+                             "the last z at which the modelled structure still exists. An "
+                             "explicit value always wins and --ext_zmax is then ignored.")
+    parser.add_argument("--ext_zmax", type=float, default=0.0,
+                        help="Extra window [m] added past the geometric tube end when --z_max is "
+                             "not given. Default 0 (stop exactly at the tube end). Anything >0 "
+                             "puts the domain -- and the exit screen/Bout -- beyond the modelled "
+                             "channel, where the field map has no geometry to interpolate.")
 
     parser.add_argument("--dt_mm", type=float, default=0.01)
     parser.add_argument("--sc_dt_mm", type=float, default=0.01)
@@ -84,25 +176,53 @@ def parse_args() -> argparse.Namespace:
     # the sign convention) -- a tunable CLI flag so different cathode insertion depths can be tried.
     parser.add_argument("--delta_cathode_chamfer_mm", type=float, default=None)
 
-    parser.add_argument("--sc_enabled", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--sc_enabled", action=argparse.BooleanOptionalAction, default=True,
+                         help="Space charge (RF-Track SpaceCharge_PIC_FreeSpace), PIC mesh sized "
+                              "by --sc-nx/--sc-ny/--sc-nz.")
     parser.add_argument("--sc-nx", dest="sc_nx", type=int, default=32)
     parser.add_argument("--sc-ny", dest="sc_ny", type=int, default=32)
     parser.add_argument("--sc-nz", dest="sc_nz", type=int, default=32)
-    parser.add_argument("--mirror-charges", dest="mirror_charges", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--mirror-charges", dest="mirror_charges", action=argparse.BooleanOptionalAction, default=False,
+                         help="Cathode image (mirror) charge, at --mirror-z-m.")
     parser.add_argument("--mirror-z-m", dest="mirror_z_m", type=float, default=0.0)
     parser.add_argument("--mirror-charge-tolerance", dest="mirror_charge_tolerance", type=float, default=None)
-    parser.add_argument("--beam_loading", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--beam_loading", action=argparse.BooleanOptionalAction, default=False,
+                         help="RF-Track's real BeamLoadingSW collective effect, calibrated from "
+                              "the phase scan's Veff/(R/Q) (see --bl_* flags below). A real "
+                              "cross-validation found it currently produces zero measurable "
+                              "effect on tracked dynamics for this gun geometry in RF-Track 2.7.0 "
+                              "(see tests/test_beam_loading_cross_validation.py); attaching it "
+                              "still exercises the real production code path.")
     parser.add_argument("--bl_q0", type=float, default=4000.0)
     parser.add_argument("--bl_qext", type=float, default=3500.0)
-    parser.add_argument("--bl_p_fwd_w", type=float, default=1.0e6)
+    parser.add_argument(
+        "--rf-forward-power-w",
+        "--bl_p_fwd_w",
+        dest="bl_p_fwd_w",
+        type=float,
+        default=1.0e6,
+        help=(
+            "Forward RF power [W]. For artifact-backed runs this rescales every E and B "
+            "phasor together from the solver's recorded source power; the same value is used "
+            "for delivered-power and BeamLoadingSW calibration. --bl_p_fwd_w is retained as "
+            "a compatibility alias."
+        ),
+    )
     parser.add_argument("--bl_r_over_q_ohm_per_m", type=float, default=1.0)
     parser.add_argument("--bl_ncells", type=int, default=1)
     parser.add_argument("--bl_tinj_mode", choices=["auto_from_emission", "manual"], default="auto_from_emission")
     parser.add_argument("--bl_tinj_manual_mm_c", type=float, default=0.0)
 
-    parser.add_argument("--n_screens", type=int, default=0)
-    parser.add_argument("--screens_z", type=float, nargs="*", default=None)
-    parser.add_argument("--no-screens", action="store_true", default=False)
+    parser.add_argument("--n_screens", type=int, default=0,
+                         help="Number of evenly-spaced diagnostic z-screens. Ignored if "
+                              "--screens_z is given, or if --no-screens/--screens is set.")
+    parser.add_argument("--screens_z", type=float, nargs="*", default=None,
+                         help="Explicit screen z-positions [m], overriding --n_screens. Ignored "
+                              "if --no-screens/--screens is set.")
+    parser.add_argument("--screens", dest="screens_enabled", action=argparse.BooleanOptionalAction, default=True,
+                         help="--no-screens: record no diagnostic screens regardless of "
+                              "--n_screens/--screens_z (a printed note fires if either was also "
+                              "given). --screens (default): screens controlled normally.")
 
     parser.add_argument("--screen_width_mm", type=float, default=None)
     parser.add_argument("--screen_height_mm", type=float, default=None)
@@ -145,7 +265,12 @@ def parse_args() -> argparse.Namespace:
                               "(rf_gun.aperture.build_cathode_backstop); also used to reconstruct "
                               "the backstop_z_min_m band for backstop/dynamic-aperture loss "
                               "separation in rg.extract_back_bombardment_events.")
-    parser.add_argument("--emission_scale", type=float, default=1.0)
+    parser.add_argument("--emission_scale", type=float, default=1.0,
+                         help="Divides --r_cathode_mm to get the emitting radius actually used "
+                              "(cathode_radius_mm_used = r_cathode_mm / emission_scale) -- NOT a "
+                              "direct current/emission scale factor. emission_scale=2.0 halves "
+                              "the emitting radius (and roughly quarters emitted charge), it does "
+                              "not double anything.")
     parser.add_argument("--use_const_pz", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--pz_init_mevc", type=float, default=4.0e-3)
     parser.add_argument("--ra_um", type=float, default=0.0)
@@ -165,13 +290,27 @@ def parse_args() -> argparse.Namespace:
             "RD_schottky", "rld_schottky_plus_mg", "unified", "rgtf_2019", "murphy_good_direct_reference",
         ],
         default="RDSchottky",
+        help="Thermionic emission model (rf_gun.emission_models). Current names: 'RDSchottky' "
+             "(Richardson-Dushman-Schottky, default), 'jensen2014_RDSchottky_MurphyGood_additive', "
+             "'jensen2019_RDSchottky_MurphyGood_transition', "
+             "'murphygood1956_SchottkyNordheim_integral' (slow direct-integral reference); "
+             "'jensen_gtf_2007' is registered but not yet implemented. Older equivalent spellings "
+             "are also accepted for backward compatibility with existing scripts.",
     )
     parser.add_argument("--compare-emission-models", dest="compare_emission_models", type=str, nargs="*", default=None)
-    parser.add_argument("--richardson-constant", dest="richardson_constant", type=float, default=None)
-    parser.add_argument("--chemical-potential-eV", dest="chemical_potential_eV", type=float, default=None)
+    parser.add_argument("--richardson-constant", dest="richardson_constant", type=float, default=None,
+                         help="NOT YET IMPLEMENTED -- raises NotImplementedError if set to "
+                              "anything but None; not wired into the tracking pipeline's emission "
+                              "law. Leave unset.")
+    parser.add_argument("--chemical-potential-eV", dest="chemical_potential_eV", type=float, default=None,
+                         help="NOT YET IMPLEMENTED -- raises NotImplementedError if set to "
+                              "anything but None; not wired into the tracking pipeline's emission "
+                              "law. Leave unset.")
     parser.add_argument(
         "--beta-application", dest="beta_application",
         choices=["total_macro_field", "external_field_only"], default="total_macro_field",
+        help="'external_field_only' is NOT YET IMPLEMENTED -- raises NotImplementedError. Only "
+             "'total_macro_field' (the default, beta_enh applied to E_RF+E_SC+E_mirror) works.",
     )
 
     parser.add_argument(
@@ -263,13 +402,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--beta_f", type=float, default=1.0)
     parser.add_argument("--emission_phase_range", type=float, default=90.0)
 
-    parser.add_argument("--phase_scan_min", type=float, default=0.0)
+    parser.add_argument("--phase_scan_min", type=float, default=0.0,
+                         help="RF-only calibration phase scan (relative, deg) -- used only to "
+                              "find the accelerating crest for Veff/(R/Q)/beam-loading; forced "
+                              "on-axis and cold, independent of the production transport phase.")
     parser.add_argument("--phase_scan_max", type=float, default=360.0)
     parser.add_argument("--phase_scan_n", type=int, default=90)
     parser.add_argument("--phase_scan_n_part", type=int, default=20)
     parser.add_argument("--phase_scan_dt_mm", type=float, default=0.5)
 
-    parser.add_argument("--deflection_enabled", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--deflection_enabled", action=argparse.BooleanOptionalAction, default=False,
+                         help="Deflection magnet (Bx(z) dipole kick). Forces single-threaded "
+                              "tracking (rf_gun.rftrack_volume.build_volume) whenever enabled -- "
+                              "a real wall-clock cost, not a bug.")
     parser.add_argument("--deflection_current_A", type=float, default=0.0)
     parser.add_argument("--deflection_B_pk_per_A_T", type=float, default=None)
     parser.add_argument("--deflection_z_p_mm", type=float, default=None)
@@ -303,27 +448,26 @@ def parse_args() -> argparse.Namespace:
 
 
 def apply_preset(args: argparse.Namespace) -> None:
+    """`--preset quick`: a fast, low-fidelity configuration for smoke-testing the pipeline, not a
+    physics-accurate run. Overwrites `n_particles`/`sc_enabled`/`beam_loading` unconditionally
+    (and `finesse` if not already set) -- prints a note whenever that actually discards a value
+    the operator explicitly passed on the command line, so e.g. `--preset quick --n_particles
+    500000` doesn't silently end up at 1,000 particles with no visible trace of why.
+    """
     if args.preset != "quick":
         return
-    args.n_particles = 1_000
-    args.sc_enabled = True
-    args.beam_loading = True
+    _overrides = {"n_particles": 1_000, "sc_enabled": True, "beam_loading": True}
+    for _name, _preset_value in _overrides.items():
+        _current = getattr(args, _name)
+        if _current != _preset_value:
+            print(f"Note: --preset quick overrides --{_name}={_current!r} with {_preset_value!r}.")
+        setattr(args, _name, _preset_value)
     if args.finesse is None:
         args.finesse = "coarse"
 
 
-def _sha256_file(path: Path, chunk_size: int = 1 << 20) -> str:
-    """SHA-256 hex digest of a file's bytes, for compact field-map provenance (Section 6.1: enough
-    to detect a changed/wrong raw field-map file without saving the file itself in run metadata)."""
-    h = hashlib.sha256()
-    with Path(path).open("rb") as f:
-        for chunk in iter(lambda: f.read(chunk_size), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def _requested_screen_count(args: argparse.Namespace) -> int:
-    if bool(args.no_screens):
+    if not bool(args.screens_enabled):
         return 0
     if args.screens_z:
         return int(len(args.screens_z))
@@ -612,6 +756,7 @@ def main() -> None:
 
     import rf_gun as rg
     from rf_gun.finesse_presets import apply_finesse_preset_to_args
+    from rf_gun.phasor import fit_harmonic_phasor, fold_axisymmetric_planar_fields
 
     apply_finesse_preset_to_args(args, args.finesse)
 
@@ -641,8 +786,8 @@ def main() -> None:
 
     try:
         rft.cvar.number_of_threads = int(effective_threads)
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"Warning: could not set rft.cvar.number_of_threads={effective_threads}: {exc}")
 
     slurm_cpus = os.environ.get("SLURM_CPUS_PER_TASK", "unset")
     rftrack_max_threads = getattr(rft, "max_number_of_threads", "n/a")
@@ -689,93 +834,294 @@ def main() -> None:
     else:
         print("Timing diagnostics: OFF")
 
+    # RF-Track writes a handful of alarming-looking-but-benign lines to stderr from its C++ side.
+    # Under Jupyter they are invisible (IPython does not capture an extension module's C-level
+    # fd 2 -- it goes to the terminal running the kernel), so they surface for the first time when
+    # SLURM's --error= captures fd 2 into a .err file, and then read as a crashed run. They are
+    # not: every one of the 53 completed runs in the previous KOA batch emitted the autophase line
+    # as the FIRST line of its .err file and finished normally. Label them here, on stderr, so
+    # they land in the same file directly above the lines they explain.
+    print(
+        "Note: the following RF-Track stderr lines are EXPECTED and NON-FATAL in this project:\n"
+        "  'error: autophase failed to find an on-crest accelerating phase.'\n"
+        "      RF-Track's own crest finder, whose result this project never uses. The field map's\n"
+        "      reference time and phase are set explicitly (rf_gun.rftrack_volume: FM.set_phid()\n"
+        "      + FM.set_t0(0.0)) from this run's own RF-only phase-scan calibration, reported\n"
+        "      above as 'Phase scan: crest at ... deg'. If that scan succeeded, the calibration\n"
+        "      is fine regardless of what RF-Track's internal autophase did.\n"
+        "  'warning: as the beam's first particle was lost, Bunch6d::get_phase_space()/get_info()\n"
+        "   will use the beam centroid as reference particle.'\n"
+        "      Expected whenever particle 0 hits the aperture; recorded in run_results.json as\n"
+        "      reference_particle_note/reference_particle_warning.\n"
+        "A run that actually failed says so on stdout and leaves no .run_complete in the output\n"
+        "directory -- that file, not the .err contents, is this run's success signal.",
+        file=sys.stderr, flush=True,
+    )
+
     output_dir.mkdir(parents=True, exist_ok=True)
+    completion_marker_path = output_dir / ".run_complete"
+    if completion_marker_path.exists():
+        # A rerun must earn a new marker.  Leaving the previous marker in place while this process
+        # is still running (or after it fails) lets SLURM wrappers misclassify stale output as a
+        # successful run with the new configuration.
+        completion_marker_path.unlink()
 
-    xy = rg.load_fieldmap_mat(str(args.xy_fieldmap), verbose=False)
-    yz = rg.load_fieldmap_mat(str(args.yz_fieldmap), verbose=False)
+    delta_cathode_chamfer_mm = (
+        float(args.delta_cathode_chamfer_mm)
+        if args.delta_cathode_chamfer_mm is not None
+        else rg.DEFAULT_DELTA_CATHODE_CHAMFER_MM
+    )
 
-    t_ns = yz["time"].astype(np.float64)
-    t_ns = t_ns - t_ns[0]
-    ez_rms = np.sqrt(np.mean(yz["Ez"] ** 2, axis=0))
-
-    f_hz = float(args.f_hz)
-    lambda_m = rg.c / f_hz
-    z_max = float(args.z_max) if args.z_max is not None else (lambda_m / 4.0 + float(args.ext_zmax))
+    # Domain end = the end of the last narrow tube section of the real channel, not a wavelength
+    # fraction. The previous default (lambda/4 + 7.5 mm = 33.742 mm at 2.856 GHz) stopped tracking
+    # 6.8 mm short of the structure's actual exit, which is why every run's Bout/s_out sat at
+    # ~33.7 mm regardless of geometry. `exit_tube_end_z_m` follows --delta_cathode_chamfer_mm, so
+    # the domain end stays pinned to the same physical face when the cathode insertion changes.
+    _z_max_geometric = rg.exit_tube_end_z_m(delta_cathode_chamfer_mm)
+    z_max = float(args.z_max) if args.z_max is not None else (_z_max_geometric + float(args.ext_zmax))
     z_min = float(args.z_min)
-
-    x_mm = xy["vertices"][:, 0]
-    y_mm = xy["vertices"][:, 1]
-    r_m = np.abs(x_mm) * 1e-3
-    z_m = (float(args.y_cathode_mm) - y_mm) * 1e-3
+    if z_max > _z_max_geometric + 1e-12:
+        beyond_geometry_detail = (
+            "The artifact support is checked separately below, but the dynamic aperture has no "
+            "validated structure beyond that face."
+            if args.field_artifact is not None
+            else "The legacy field is zero outside its interpolation support and the dynamic "
+            "aperture has no validated structure beyond that face."
+        )
+        print(
+            f"Warning: z_max={z_max * 1e3:.3f} mm extends past the end of the last narrow tube "
+            f"section ({_z_max_geometric * 1e3:.3f} mm). {beyond_geometry_detail}",
+            flush=True,
+        )
+    print(
+        f"Tracking domain: z=[{z_min * 1e3:.3f}, {z_max * 1e3:.3f}] mm "
+        f"(tube end {_z_max_geometric * 1e3:.3f} mm, "
+        f"delta_cathode_chamfer={delta_cathode_chamfer_mm:.3f} mm)"
+    )
 
     t_maps_start = time.time()
-    mode = str(args.phasor_mode).strip().lower()
-    t_phasor_start = time.time()
-    if mode == "reconstruct":
-        i0, i90, _, _ = rg.select_iq_snapshots(t_ns, ez_rms, f_hz)
-        ex_0 = xy["Ex"][:, i0]
-        ex_90 = xy["Ex"][:, i90]
-        ey_0 = xy["Ey"][:, i0]
-        ey_90 = xy["Ey"][:, i90]
+    field_artifact_loaded = None
+    field_artifact_provenance = None
+    phasor_fit_diagnostics = None
+    parity_diagnostics = None
 
-        ey_max_0 = np.max(np.abs(ey_0))
-        ey_max_90 = np.max(np.abs(ey_90))
-        ex_max_0 = np.max(np.abs(ex_0))
-        ex_max_90 = np.max(np.abs(ex_90))
-        e_ref = max(ey_max_0, ey_max_90)
+    if args.field_artifact is None and not bool(args.allow_legacy_mat_fieldmap):
+        raise SystemExit(
+            "No --field-artifact given. The legacy planar-MAT path is retired: it carries no "
+            "magnetic field and is not a qualified production input, so it is no longer used "
+            "by default. Pass --field-artifact "
+            "field_maps/cavity_axisymmetric_m0_rftrack.h5 (or another qualified artifact), or "
+            "pass --allow-legacy-mat-fieldmap to deliberately run the legacy path."
+        )
 
-        ex_phasor = rg.build_iq_phasor(ex_0, ex_90, ex_max_0, ex_max_90, e_ref)
-        ey_phasor = rg.build_iq_phasor(ey_0, ey_90, ey_max_0, ey_max_90, e_ref)
+    if args.field_artifact is not None:
+        field_artifact_loaded = _load_qualified_artifact_for_tracking(
+            args.field_artifact,
+            magnetic_field_mode=str(args.rf_magnetic_field),
+            requested_z_min_m=z_min,
+            requested_z_max_m=z_max,
+            target_power_w=float(args.bl_p_fwd_w),
+            field_tail_policy=str(args.field_tail_policy),
+            requested_aperture_delta_mm=delta_cathode_chamfer_mm,
+        )
+        field_artifact_provenance = _artifact_provenance_record(
+            args.field_artifact, field_artifact_loaded
+        )
+        artifact_field = field_artifact_loaded["field"]
+        f_hz = float(artifact_field.frequency_hz)
+        r_grid = np.asarray(artifact_field.r_m)
+        z_grid = np.asarray(artifact_field.z_m)
+        er_grid = np.asarray(field_artifact_loaded["Er_grid"])
+        ez_grid = np.asarray(field_artifact_loaded["Ez_grid"])
+        bt_grid = field_artifact_loaded["Bt_grid"]
+        bz_grid = field_artifact_loaded["Bz_grid"]
+        ez0_phasor_axis = complex(field_artifact_loaded["Ez0_phasor_axis"])
+        nr = int(r_grid.size)
+        nz = int(z_grid.size)
+        hr = float(artifact_field.hr_m)
+        hz = float(artifact_field.hz_m)
+        dr_um = hr * 1.0e6
+        dz_um = hz * 1.0e6
+        map_z0_m = float(z_grid[0])
+        mode = "artifact"
+        t_phasor_elapsed = 0.0
+        t_interp_elapsed = 0.0
+        outside_hull_fraction = 0.0
+        repaired_hole_fraction = 0.0
+        field_source_label = str(artifact_field.metadata.get("source_solver", "Remcom XFdtd"))
+        # The shaded downstream band means different things for the two artifact variants, and
+        # both carry the same measured_z_max_m, so the label cannot be inferred from the grid.
+        field_tail_label = (
+            "zero-tail control (field forced to zero, not modeled)"
+            if str(field_artifact_loaded["field_tail_policy"]) == "zero-control"
+            else "qualified modeled tail (not solver sampled)"
+        )
+        measured_z_max_m = float(
+            artifact_field.metadata.get("spatial_support", {}).get(
+                "measured_z_max_m", artifact_field.z_m[-1]
+            )
+        )
+        print(
+            "Qualified field artifact loaded with full payload verification:\n"
+            f"  {args.field_artifact}\n"
+            f"  payload_sha256={field_artifact_loaded['artifact'].payload_sha256}\n"
+            f"  RF magnetic field: "
+            f"{'axisymmetric Btheta/Bz from artifact' if field_artifact_loaded['magnetic_field_enabled'] else 'explicitly zeroed control'}",
+            flush=True,
+        )
+        print(
+            "  Artifact owns frequency and field grid; --f_hz/--r_max_m/--dr_um/--dz_um/"
+            "--phasor_mode/--y_cathode_mm are legacy-MAT controls and are not applied.",
+            flush=True,
+        )
+        print(
+            "  Common E/B power normalization: "
+            f"{field_artifact_loaded['source_power_w'] / 1e6:.6g} MW solver source -> "
+            f"{field_artifact_loaded['target_power_w'] / 1e6:.6g} MW requested "
+            f"(amplitude x{field_artifact_loaded['common_field_scale']:.9g})",
+            flush=True,
+        )
+        print(
+            "  Downstream support policy: "
+            f"{field_artifact_loaded['field_tail_policy']} "
+            f"(artifact variant={field_artifact_loaded['artifact_variant']})",
+            flush=True,
+        )
     else:
-        i_crest = int(np.argmax(ez_rms))
-        ex_crest = xy["Ex"][:, i_crest]
-        ey_crest = xy["Ey"][:, i_crest]
-        e_ref = float(np.max(np.abs(ey_crest))) if ey_crest.size else 1.0
-        ex_phasor = rg.build_crest_phasor(ex_crest, scale=e_ref)
-        ey_phasor = rg.build_crest_phasor(ey_crest, scale=e_ref)
-    t_phasor_elapsed = time.time() - t_phasor_start
+        xy = rg.load_fieldmap_mat(str(args.xy_fieldmap), verbose=False)
+        yz = rg.load_fieldmap_mat(str(args.yz_fieldmap), verbose=False)
+        t_xy_ns = np.asarray(xy["time"], dtype=np.float64)
+        t_xy_ns = t_xy_ns - t_xy_ns[0]
+        t_yz_ns = np.asarray(yz["time"], dtype=np.float64)
+        t_yz_ns = t_yz_ns - t_yz_ns[0]
+        if t_xy_ns.size != np.asarray(xy["Ex"]).shape[1]:
+            raise ValueError(
+                "XY field-map timestamp count does not match its field-array time dimension: "
+                f"{t_xy_ns.size} != {np.asarray(xy['Ex']).shape[1]}"
+            )
+        if t_xy_ns.shape != t_yz_ns.shape or not np.allclose(
+            t_xy_ns, t_yz_ns, rtol=0.0, atol=1.0e-12
+        ):
+            print(
+                "Note: XY and YZ field maps do not share an identical time basis; the physical "
+                "XY cavity plane uses its own timestamps for phasor fitting.",
+                flush=True,
+            )
+        cavity_ez_rms = np.sqrt(np.mean(np.asarray(xy["Ey"], dtype=float) ** 2, axis=0))
+        f_hz = float(args.f_hz)
+        x_mm = xy["vertices"][:, 0]
+        y_mm = xy["vertices"][:, 1]
+        x_m = x_mm * 1e-3
+        z_m_signed_plane = (float(args.y_cathode_mm) - y_mm) * 1e-3
 
-    er_vertices = np.sign(x_mm) * ex_phasor
-    ez_vertices = ey_phasor
+        # The legacy cathode position remains tied to the planar map's own PEC boundary.
+        _cathode_check = rg.detect_pec_boundary_along_axis(xy, x_target_mm=0.0)
+        _bracket_lo = _cathode_check["last_open_y_mm"]
+        print(
+            f"Cathode position from field data: last open (vacuum) y={_bracket_lo:.4f} mm, first "
+            f"screened y={_cathode_check['first_shadowed_y_mm']:.4f} mm "
+            f"(drop_ratio={_cathode_check['drop_ratio']:.2e}) | "
+            f"--y_cathode_mm={args.y_cathode_mm:.4f} mm"
+        )
+        if not np.isclose(float(args.y_cathode_mm), _bracket_lo, atol=1.0e-3):
+            raise RuntimeError(
+                f"--y_cathode_mm={args.y_cathode_mm} does not match the field data's own "
+                f"last-open-vacuum grid point ({_bracket_lo:.4f} mm). Pass the matching value."
+            )
 
-    dr_um = float(args.dr_um)
-    dz_um = float(args.dz_um)
-    nr = int(float(args.r_max_m) * 1e6 / dr_um) + 1
-    nz = int((z_max - z_min) * 1e6 / dz_um) + 1
+        mode = str(args.phasor_mode).strip().lower()
+        t_phasor_start = time.time()
+        if mode in ("all_time", "reconstruct"):
+            ex_fit = fit_harmonic_phasor(xy["Ex"], t_xy_ns * 1.0e-9, f_hz, time_axis=1)
+            ey_fit = fit_harmonic_phasor(xy["Ey"], t_xy_ns * 1.0e-9, f_hz, time_axis=1)
+            ex_phasor = ex_fit.phasor
+            ey_phasor = ey_fit.phasor
+            phasor_fit_diagnostics = {
+                "algorithm": "all_time_fixed_frequency_least_squares",
+                "n_samples": int(ex_fit.n_samples),
+                "time_reference_s": float(ex_fit.time_reference_s),
+                "Ex_normalized_rms_residual": float(ex_fit.normalized_rms_residual),
+                "Ey_normalized_rms_residual": float(ey_fit.normalized_rms_residual),
+                "Ex_condition_number": float(ex_fit.condition_number),
+                "Ey_condition_number": float(ey_fit.condition_number),
+            }
+            if mode == "reconstruct":
+                print("Phasor mode 'reconstruct' is an alias for the corrected all-time fit.", flush=True)
+        elif mode == "legacy_iq":
+            i0, i90, _, _ = rg.select_iq_snapshots(t_xy_ns, cavity_ez_rms, f_hz)
+            ex_0, ex_90 = xy["Ex"][:, i0], xy["Ex"][:, i90]
+            ey_0, ey_90 = xy["Ey"][:, i0], xy["Ey"][:, i90]
+            ey_max_0, ey_max_90 = np.max(np.abs(ey_0)), np.max(np.abs(ey_90))
+            ex_max_0, ex_max_90 = np.max(np.abs(ex_0)), np.max(np.abs(ex_90))
+            e_ref = max(ey_max_0, ey_max_90)
+            ex_phasor = rg.build_iq_phasor(ex_0, ex_90, ex_max_0, ex_max_90, e_ref)
+            ey_phasor = rg.build_iq_phasor(ey_0, ey_90, ey_max_0, ey_max_90, e_ref)
+        else:
+            i_crest = int(np.argmax(cavity_ez_rms))
+            ex_phasor = rg.build_crest_phasor(xy["Ex"][:, i_crest])
+            ey_phasor = rg.build_crest_phasor(xy["Ey"][:, i_crest])
+        t_phasor_elapsed = time.time() - t_phasor_start
 
-    r_grid = np.linspace(0.0, float(args.r_max_m), nr)
-    z_grid = np.linspace(z_min, z_max, nz)
-    z_grid[np.argmin(np.abs(z_grid))] = 0.0
-    R, Z = np.meshgrid(r_grid, z_grid)
+        r_m, z_m, er_vertices, ez_vertices, parity_diagnostics = fold_axisymmetric_planar_fields(
+            x_m, z_m_signed_plane, ex_phasor, ey_phasor,
+        )
+        dr_um = float(args.dr_um)
+        dz_um = float(args.dz_um)
+        nr = int(float(args.r_max_m) * 1e6 / dr_um) + 1
+        nz = int((z_max - z_min) * 1e6 / dz_um) + 1
+        r_grid = np.linspace(0.0, float(args.r_max_m), nr)
+        z_grid = np.linspace(z_min, z_max, nz)
+        z_grid[np.argmin(np.abs(z_grid))] = 0.0
+        R, Z = np.meshgrid(r_grid, z_grid)
+        hr = float(r_grid[1] - r_grid[0]) if r_grid.size > 1 else 0.0
+        hz = float(z_grid[1] - z_grid[0]) if z_grid.size > 1 else 0.0
+        pts = np.column_stack([r_m, z_m])
+        t_interp_start = time.time()
+        interp_ctx = rg.build_field_interpolation_context(pts, R, Z)
+        er_grid = rg.interp_cfield(pts, R, Z, er_vertices, ctx=interp_ctx)
+        ez_grid = rg.interp_cfield(pts, R, Z, ez_vertices, ctx=interp_ctx)
+        bt_grid = None
+        bz_grid = None
+        ez0_phasor_axis = rg.find_Ez_axis_phasor_at_z0(ez_grid, z_grid, z0_m=0.0)
+        t_interp_elapsed = time.time() - t_interp_start
+        outside_hull_fraction = interp_ctx.outside_hull_fraction
+        repaired_hole_fraction = interp_ctx.repaired_hole_fraction
+        map_z0_m = z_min
+        field_source_label = "Remcom XFdtd (legacy planar MAT)"
+        field_tail_label = "qualified modeled tail (not solver sampled)"
+        measured_z_max_m = None
 
-    hr = float(r_grid[1] - r_grid[0]) if r_grid.size > 1 else 0.0
-    hz = float(z_grid[1] - z_grid[0]) if z_grid.size > 1 else 0.0
-    pts = np.column_stack([r_m, z_m])
-
-    t_interp_start = time.time()
-    # One Delaunay triangulation of the source vertices, reused for both Er and Ez (real+imag) --
-    # the triangulation/hull test depends only on (pts, R, Z), not on the field values.
-    interp_ctx = rg.build_field_interpolation_context(pts, R, Z)
-    er_grid = rg.interp_cfield(pts, R, Z, er_vertices, ctx=interp_ctx)
-    ez_grid = rg.interp_cfield(pts, R, Z, ez_vertices, ctx=interp_ctx)
-    ez0_phasor_axis = rg.find_Ez_axis_phasor_at_z0(ez_grid, z_grid, z0_m=0.0)
-    t_interp_elapsed = time.time() - t_interp_start
     t_maps_elapsed = time.time() - t_maps_start
-    outside_hull_fraction = interp_ctx.outside_hull_fraction
-    repaired_hole_fraction = interp_ctx.repaired_hole_fraction
+    lambda_m = rg.c / f_hz
 
-    print("Field maps generated:")
+    print("Field maps ready:")
     print(f"  Phasor mode: {mode}")
+    if phasor_fit_diagnostics is not None:
+        print(
+            "  All-time fit residuals: "
+            f"Ex={phasor_fit_diagnostics['Ex_normalized_rms_residual']:.3%}, "
+            f"Ez={phasor_fit_diagnostics['Ey_normalized_rms_residual']:.3%} "
+            f"({phasor_fit_diagnostics['n_samples']} snapshots)"
+        )
+    if parity_diagnostics is not None:
+        print(
+            "  Cylindrical parity projection: "
+            f"Er odd residual={parity_diagnostics['radial_odd_residual']:.3%}, "
+            f"Ez even residual={parity_diagnostics['longitudinal_even_residual']:.3%}, "
+            f"max pair error={parity_diagnostics['pair_max_error_m'] * 1e6:.3f} um"
+        )
     print(f"  Grid size: NR={nr}, NZ={nz} (shape={ez_grid.shape[0]}x{ez_grid.shape[1]})")
     print(f"  Resolution: dr={dr_um:.3f} um, dz={dz_um:.3f} um")
     print(
-        f"  Extents: r=[0.000, {float(args.r_max_m) * 1e3:.3f}] mm, "
-        f"z=[{z_min * 1e3:.3f}, {z_max * 1e3:.3f}] mm"
+        f"  Field extents: r=[{r_grid[0] * 1e3:.3f}, {r_grid[-1] * 1e3:.3f}] mm, "
+        f"z=[{z_grid[0] * 1e3:.3f}, {z_grid[-1] * 1e3:.3f}] mm"
     )
-    print(
-        f"  Interpolation support: outside-native-hull fraction={outside_hull_fraction:.4%} "
-        f"(set to zero field, not extrapolated), repaired-interior-hole fraction={repaired_hole_fraction:.4%}"
-    )
+    if field_artifact_loaded is None:
+        print(
+            f"  Interpolation support: outside-native-hull fraction={outside_hull_fraction:.4%} "
+            f"(set to zero field, not extrapolated), "
+            f"repaired-interior-hole fraction={repaired_hole_fraction:.4%}"
+        )
     print(
         "  Timing: "
         f"phasor={rg.format_duration(t_phasor_elapsed)}, "
@@ -788,7 +1134,12 @@ def main() -> None:
     print(f"Loaded Q={q_loaded:.2f}, delivered power={p_del_w/1e6:.3f} MW")
 
     ez_axis = ez_grid[:, 0]
-    l_eff_m = effective_length_from_abs_ez(z_grid, ez_axis, tail_frac=1e-3)
+    tracking_grid_mask = (z_grid >= z_min - 1.0e-12) & (z_grid <= z_max + 1.0e-12)
+    if np.count_nonzero(tracking_grid_mask) < 2:
+        raise ValueError("fewer than two field-grid planes lie inside the requested tracking domain")
+    l_eff_m = effective_length_from_abs_ez(
+        z_grid[tracking_grid_mask], ez_axis[tracking_grid_mask], tail_frac=1e-3
+    )
     phi_zero_deg = (90.0 - np.rad2deg(np.angle(ez0_phasor_axis))) % 360.0
     phi_crest_deg = (phi_zero_deg + 90.0) % 360.0
     phase_deg_transport = (phi_zero_deg + float(args.emission_phase_start) + float(args.phase_deg)) % 360.0
@@ -802,11 +1153,59 @@ def main() -> None:
     )
     print(f"Emission window: {float(args.emission_phase_range):.1f} deg")
 
-    delta_cathode_chamfer_mm = (
-        float(args.delta_cathode_chamfer_mm)
-        if args.delta_cathode_chamfer_mm is not None
-        else rg.DEFAULT_DELTA_CATHODE_CHAMFER_MM
-    )
+    # Field-map / on-axis-profile figures show only the processed cylindrical fields actually
+    # supplied to RF-Track. The first four positional arguments to field_maps are legacy API
+    # placeholders; that plot intentionally contains no raw solver-axis panels.
+    if bool(args.save_figures):
+        import matplotlib.pyplot as _plt_fm
+
+        figures_dir = output_dir / "figures"
+        if field_artifact_loaded is None:
+            plot_xy, plot_yz, plot_t_ns = xy, yz, t_xy_ns
+            t_crest_ns = (
+                float(t_xy_ns[int(np.argmax(cavity_ez_rms))]) if cavity_ez_rms.size else 0.0
+            )
+        else:
+            plot_xy, plot_yz, plot_t_ns, t_crest_ns = {}, {}, np.asarray([]), 0.0
+        # Under Agg, plt.show() is a no-op that leaves figures open; close between blocks so
+        # neither one inherits the other's figure (see capture_figures' own pre_existing guard).
+        _plt_fm.close("all")
+        with rg.capture_figures(
+            "field_maps", figures_dir,
+            formats=rg.DEFAULT_FIGURE_FORMATS,
+            data={
+                "aperture_R_mm": rg.aperture_radius_profile_mm(z_grid * 1e3, delta_cathode_chamfer_mm),
+                "grid_extent_r_mm": [float(r_grid[0] * 1e3), float(r_grid[-1] * 1e3)],
+                "grid_extent_z_mm": [float(z_grid[0] * 1e3), float(z_grid[-1] * 1e3)],
+                "dr_um": float(hr * 1e6), "dz_um": float(hz * 1e6),
+                "outside_hull_fraction": float(outside_hull_fraction),
+                "repaired_hole_fraction": float(repaired_hole_fraction),
+            },
+        ):
+            rg.field_maps(
+                plot_xy, plot_yz, plot_t_ns, t_crest_ns, r_grid, z_grid, ez_grid, lambda_m,
+                Er_grid=er_grid,
+                Bt_grid=bt_grid,
+                Bz_grid=bz_grid,
+                z_end_m=z_max,
+                measured_z_max_m=measured_z_max_m,
+                aperture_delta_mm=delta_cathode_chamfer_mm,
+                show_colorbar=True,
+                source_label=field_source_label,
+                tail_label=field_tail_label,
+            )
+        _plt_fm.close("all")
+        with rg.capture_figures(
+            "on_axis_field_profile", figures_dir,
+            formats=rg.DEFAULT_FIGURE_FORMATS,
+            data={"z_grid_m": z_grid, "Ez_axis_Vm": ez_axis},
+        ):
+            rg.axis_phase(
+                ez_axis, z_grid, ez0_phasor_axis,
+                float(args.emission_phase_start), float(args.emission_phase_range), lambda_m,
+                z_end_m=z_max,
+            )
+        _plt_fm.close("all")
 
     phase_scan_n = max(3, int(args.phase_scan_n))
     phase_scan_n_part = max(1, int(args.phase_scan_n_part))
@@ -822,7 +1221,7 @@ def main() -> None:
     )
     vol_params_cal = rg.VolumeBuildParams(
         f_hz=f_hz,
-        map_z0_m=z_min,
+        map_z0_m=map_z0_m,
         z_min_m=z_min,
         z_max_m=z_max,
         hr_m=hr,
@@ -861,6 +1260,8 @@ def main() -> None:
         phase_scan_n_part,
         float(args.pz_init_mevc),
         q_total_C=1e-12,
+        Bt_grid=bt_grid,
+        Bz_grid=bz_grid,
     )
     t_phase_scan_elapsed = time.time() - t_phase_scan_start
     print(f"Phase scan elapsed: {rg.format_duration(t_phase_scan_elapsed)}")
@@ -925,7 +1326,7 @@ def main() -> None:
 
     vol_params = rg.VolumeBuildParams(
         f_hz=f_hz,
-        map_z0_m=z_min,
+        map_z0_m=map_z0_m,
         z_min_m=z_min,
         z_max_m=z_max,
         hr_m=hr,
@@ -984,7 +1385,11 @@ def main() -> None:
         time_dependent=True,
     )
 
-    if args.no_screens:
+    if not args.screens_enabled:
+        if args.screens_z or int(args.n_screens) > 0:
+            print(
+                f"Note: --no-screens suppresses the {'--screens_z you also passed' if args.screens_z else f'--n_screens={args.n_screens} you also passed'} -- no screens will be recorded."
+            )
         z_snaps = None
     elif args.screens_z:
         z_snaps = [float(z) for z in args.screens_z]
@@ -992,10 +1397,15 @@ def main() -> None:
         n_screens = max(0, int(args.n_screens))
         if n_screens <= 0:
             z_snaps = None
-        elif n_screens == 1:
-            z_snaps = [0.5 * (float(z_min) + float(z_max))]
         else:
-            z_snaps = np.linspace(float(z_min), float(z_max), n_screens + 2)[1:-1].tolist()
+            # Anchor the LAST screen on the domain end -- the downstream face of the exit tube --
+            # so every run carries a diagnostic at the structure's actual exit. The previous
+            # `linspace(z_min, z_max, n+2)[1:-1]` placed every screen strictly inside, leaving the
+            # final one ~10 mm short of the exit with nothing measured there: `Bout` is a
+            # fixed-time snapshot ~1.4 m downstream (see the openPMD block's own note), so with no
+            # screen at z_max there was no exit-face emittance/energy/transmission anywhere in the
+            # outputs. z_min itself is still excluded (a screen at the cathode measures nothing).
+            z_snaps = np.linspace(float(z_min), float(z_max), n_screens + 1)[1:].tolist()
 
     tracking = rg.TrackingParams(
         phi_deg=float(phase_deg_transport),
@@ -1084,6 +1494,7 @@ def main() -> None:
         emission_iteration_result = rg.run_emission_field_iteration(
             rft, er_grid, ez_grid, ez0_phasor_axis, vol_params, emission,
             iteration_config, phi_deg=float(phase_deg_transport),
+            Bt_grid=bt_grid, Bz_grid=bz_grid,
         )
         print(
             f"Emission Fields Iteration finished in {rg.format_duration(time.time() - t_iter_start)}: "
@@ -1092,12 +1503,33 @@ def main() -> None:
         )
         if not emission_iteration_result.converged:
             print(f"  Reason: {emission_iteration_result.failure_reason}")
-        try:
-            rg.plot_emission_iteration_convergence(emission_iteration_result)
-            rg.plot_emission_iteration_waveforms(emission_iteration_result)
-            rg.plot_emission_iteration_near_cathode(emission_iteration_result)
-        except Exception as exc:
-            print(f"  Warning: iteration figures failed: {exc}")
+        # These three used to be created and then neither saved nor closed. Under the Agg
+        # backend `plt.show()` is a no-op, so they stayed on pyplot's figure stack and the next
+        # `_capture_current_figure` call in save_run_figures picked one up and wrote it out under
+        # a completely unrelated name -- which is why three of the nine figures in every KOA run
+        # are mislabelled emission-iteration plots. Save them under their own names and close.
+        if bool(args.save_figures):
+            import matplotlib.pyplot as _plt
+
+            iteration_figures = {
+                "emission_iteration_convergence": rg.plot_emission_iteration_convergence,
+                "emission_iteration_waveforms": rg.plot_emission_iteration_waveforms,
+                "emission_iteration_near_cathode": rg.plot_emission_iteration_near_cathode,
+            }
+            figures_dir = output_dir / "figures"
+            figures_dir.mkdir(parents=True, exist_ok=True)
+            for fig_name, fig_fn in iteration_figures.items():
+                try:
+                    fig = fig_fn(emission_iteration_result)
+                    if fig is None:
+                        continue
+                    # Shared writer -> same format bundle and .eps size cap as every other
+                    # figure (rf_gun.plotting.figure_io.save_figure_formats).
+                    rg.save_figure_formats(fig, figures_dir, fig_name, dpi=150)
+                    _plt.close(fig)
+                except Exception as exc:
+                    print(f"  Warning: iteration figure {fig_name!r} failed: {exc}")
+            _plt.close("all")
 
         # Large (x,y,t)-and-iteration-resolved arrays go in a compressed NPZ, not run_results.json
         # (guide Sec. 15.3) -- only a scalar summary is recorded in run_results.json below.
@@ -1140,6 +1572,7 @@ def main() -> None:
     elif bool(args.spatial_emission_sampling):
         spatial_source = rg.build_cathode_rf_source(
             rft, er_grid, ez_grid, float(phase_deg_transport), vol_params, emission,
+            Bt_grid=bt_grid, Bz_grid=bz_grid,
         )
         print("Using RF-only spatially-resolved emission sampling (no SC/mirror feedback) for production tracking.")
 
@@ -1156,6 +1589,8 @@ def main() -> None:
         slow_step_warn_s=float(args.slow_step_warn_s),
         rng=rng,
         spatial_source=spatial_source,
+        Bt_grid=bt_grid,
+        Bz_grid=bz_grid,
     )
 
     phase_fmt = rg.EXTENDED_PHASE_FMT
@@ -1183,7 +1618,12 @@ def main() -> None:
         f"k_trailing={acceptance_scan.k_trailing:.2f} (trailing removal, applied) | "
         f"{len(acceptance_scan.trailing_ids)} particle(s) newly tagged backward (trailing)."
     )
-    tags = rg.build_particle_tags(mf, result.lost_table, extra_backward_ids=acceptance_scan.trailing_ids)
+    _backstop_z_min_m = (
+        -float(args.cathode_backstop_thickness_mm) * 1e-3 if bool(args.cathode_backstop_enabled) else None
+    )
+    tags = rg.build_particle_tags(
+        mf, result.lost_table, extra_backward_ids=acceptance_scan.trailing_ids, backstop_z_min_m=_backstop_z_min_m,
+    )
 
     # Save B0 (initial launch state) and Bout (final, forward-going, dynamic-aperture-surviving
     # state) as openPMD-beamphysics HDF5, beside the per-screen HDF5 files in
@@ -1197,6 +1637,14 @@ def main() -> None:
         screen_hdf5_dir = output_dir / "screen_distributions_hdf5"
 
         _which = "good"
+        # NOTE: `Bout` is a fixed-TIME snapshot at `t_max_mm`, not a fixed-z one. Tracking does not
+        # stop at the domain end: past `z_max` there is no field and no aperture, and every
+        # surviving particle keeps drifting until `t_max_mm` (2000 mm/c by default), so a saved
+        # Bout typically sits ~1-1.5 m downstream with a wide z spread -- e.g. a real KOA
+        # study_ii "fine" case named `Bout_sout33.7mm_...h5` holds a beam whose z runs 0.25-1.52 m.
+        # `s_out_m` therefore names the END OF THE MODELLED STRUCTURE (the last z at which
+        # anything acted on the beam), not the position of these particles; the actual z spread is
+        # recorded alongside it below so the name cannot be read as a position.
         s_out_m = float(z_max)
         _save_source = "Bout (final tracking time, dynamic-aperture survivors)"
 
@@ -1206,6 +1654,8 @@ def main() -> None:
         _meta = {
             "run_name": output_dir.name,
             "s_out_m": s_out_m,
+            "s_out_meaning": "end of the modelled structure (domain end), not the z of these particles",
+            "t_max_mm": float(t_max_mm),
             "save_source": _save_source,
             "delta_cathode_chamfer_mm": float(delta_cathode_chamfer_mm),
             "transport_phase_deg": float(phase_deg_transport),
@@ -1241,10 +1691,16 @@ def main() -> None:
         from pmd_beamphysics import ParticleGroup
 
         _pg = ParticleGroup(h5=str(openpmd_h5_path))
+        _z_saved_m = np.asarray(_pg["z"], dtype=float)
         openpmd_exit_beam_summary = {
             "file": str(openpmd_h5_path.resolve()),
             "source": _save_source,
             "s_out_m": s_out_m,
+            "s_out_meaning": "end of the modelled structure (domain end), not the z of these particles",
+            "t_max_mm": float(t_max_mm),
+            "z_saved_min_m": float(np.min(_z_saved_m)) if _z_saved_m.size else float("nan"),
+            "z_saved_mean_m": float(np.mean(_z_saved_m)) if _z_saved_m.size else float("nan"),
+            "z_saved_max_m": float(np.max(_z_saved_m)) if _z_saved_m.size else float("nan"),
             "n_saved": int(_pg.n_particle),
             "total_charge_C": float(_pg.charge),
             "mean_energy_eV": float(_pg["mean_energy"]),
@@ -1253,7 +1709,19 @@ def main() -> None:
         }
         print(f"Saved exit beam to: {openpmd_h5_path.resolve()}")
         print(f"Source                   : {_save_source}")
-        print(f"z of saved distribution  : s_out = {s_out_mm:.3f} mm from cathode (z=0)")
+        print(
+            f"Structure ends at        : s_out = {s_out_mm:.3f} mm from cathode (z=0)"
+        )
+        print(
+            "z of saved distribution  : "
+            + (
+                f"{np.min(_z_saved_m) * 1e3:.1f} to {np.max(_z_saved_m) * 1e3:.1f} mm "
+                f"(mean {np.mean(_z_saved_m) * 1e3:.1f} mm) -- free drift past the structure "
+                f"until t_max_mm={float(t_max_mm):.0f} mm/c"
+                if _z_saved_m.size
+                else "no particles saved"
+            )
+        )
         print(f"Saved                    : {_pg.n_particle}")
         print(f"Saved B0 (as-launched)   : {b0_h5_path.relative_to(output_dir)}")
 
@@ -1319,63 +1787,27 @@ def main() -> None:
             except Exception as exc:
                 print(f"  Warning: sensitivity figure failed: {exc}")
 
-    # Back-bombardment: reconstructed for free from Bout's already-tracked state (no extra
-    # tracking cost -- see rf_gun.back_bombardment's module docstring), so always computed,
-    # independent of --save-figures.
-    back_bombardment_data = rg.compute_back_bombardment(
-        mf,
-        list(result.M_snaps),
-        list(result.z_snaps),
-        q_total_C=float(result.thermo_info.get("Q_total_C", 0.0)),
-        n_macroparticles=int(args.n_particles),
-        r_max_mm=float(args.r_max_m) * 1e3,
-        cathode_radius_mm=cathode_radius_mm,
-        cathode_chamfer_width_mm=float(args.cathode_chamfer_width_mm),
-    )
     back_bombardment_summary: Dict[str, Any] = {
-        "n_behind_cathode": int(back_bombardment_data.n_behind_cathode),
-        "n_valid": int(back_bombardment_data.n_valid),
-        "n_never_reached_a_screen": int(np.sum(back_bombardment_data.n_screens_reached == 0)),
-        "n_cathode_face": int(back_bombardment_data.n_cathode_face),
-        "n_cathode_chamfer": int(back_bombardment_data.n_cathode_chamfer),
-        "n_excluded_geometry": int(back_bombardment_data.n_excluded_geometry),
-        "total_deposited_energy_J": None,
-        "energy_map_file": None,
-        "events_file": None,
         "events_v2_file": None,
         "events_v2_n_events": None,
+        "n_hit_cathode": None,
+        "q_hit_cathode_C": None,
+        "incident_energy_lab6_J": None,
     }
-    # Legacy `legacy_ballistic` write moves to an explicitly-labeled filename so it can keep
-    # coexisting, for comparison, alongside the new v2 schema below -- see the v2 block's own
-    # comment for why the PLAIN `back_bombardment_events.h5` name is reserved for the new schema,
-    # not the legacy one (plan Sec. 2.3/4.2: `resolve_back_bombardment_study_input`'s `load_run`
-    # mode and `run_back_bombardment_macropulse_study`'s own writer both hardcode that plain name
-    # as the v2 file; the legacy writer must not claim it once v2 capture is enabled for this run).
-    back_bombardment_events_path = rg.save_back_bombardment_events_hdf5(
-        output_dir, back_bombardment_data,
-        filename="back_bombardment_events_legacy_v1.h5" if bool(args.cathode_backstop_enabled)
-        else "back_bombardment_events.h5",
-    )
-    if back_bombardment_events_path is not None:
-        back_bombardment_summary["events_file"] = str(back_bombardment_events_path)
 
-    # ---- Back-bombardment v2 event capture (opt-in, Work Package 1 completion) -------------
+    # ---- Back-bombardment event capture (backstop_raycast_v1) ------------------------------
     # BACK_BOMBARDMENT_MACROPULSE_IMPLEMENTATION_PLAN.md Sec. 3.2/4.1/13, addendum Sec. 19.2/19.6.
-    # Deliberately additive and gated behind --cathode_backstop_enabled: the legacy
-    # `rg.compute_back_bombardment`/`rg.save_back_bombardment_events_hdf5` call above is left
-    # functionally untouched (same data, same population) and keeps running by default -- plan
-    # Sec. 3.2's `legacy_ballistic` locator "remains available ... for comparison". Only its
-    # OUTPUT FILENAME moves aside (to `back_bombardment_events_legacy_v1.h5`, above) when v2
-    # capture is enabled, so the PLAIN `back_bombardment_events.h5` name is free for the new
-    # `backstop_raycast_v1` events -- matching `rf_gun.back_bombardment_events.
-    # resolve_back_bombardment_study_input`'s `load_run` mode and `rf_gun.studies.
-    # back_bombardment_macropulse.run_back_bombardment_macropulse_study`'s own writer, which BOTH
-    # hardcode the plain name as the v2 schema's canonical path (plan Sec. 2.3: "writes the same
-    # object to the run directory as back_bombardment_events.h5"). An earlier version of this
-    # script instead wrote v2 events to `back_bombardment_events_v2.h5`, which silently broke
-    # `--source-mode load_run` for exactly these runs (the loader looked for the plain name and
-    # found only the pre-v2-format legacy file there) -- fixed here by reserving the plain name for
-    # v2 and relabeling the legacy output instead, not by teaching the loader a second filename.
+    # `back_bombardment_events.h5` is the canonical path, matching what
+    # `resolve_back_bombardment_study_input`'s `load_run` mode and
+    # `run_back_bombardment_macropulse_study`'s own writer both hardcode.
+    #
+    # The former `legacy_ballistic` reconstruction that used to run alongside this has been
+    # removed. It searched `Bout` for survivors at z<0, but the cathode backstop absorbs exactly
+    # those particles first, so with `--cathode_backstop_enabled` (which every production run
+    # uses) it was structurally guaranteed to return zero -- and it did, in all 53 KOA runs, while
+    # this capture found ~90,000 events in the same runs. Its all-zero result was still being fed
+    # to the figure writer, whose early returns then saved stale emission-iteration figures under
+    # back-bombardment filenames.
     back_bombardment_events_v2_path = None
     if bool(args.cathode_backstop_enabled):
         bb_events_v2 = rg.extract_back_bombardment_events(
@@ -1392,17 +1824,28 @@ def main() -> None:
         back_bombardment_events_v2_path = rg.write_back_bombardment_events_h5(
             output_dir / "back_bombardment_events.h5", bb_events_v2,
         )
+        heats = bb_events_v2.heats_lab6_mask
+        n_hit = int(np.count_nonzero(heats))
+        q_hit = float(np.sum(np.asarray(bb_events_v2.macro_weight_electrons)[heats]) * abs(rg.q_e))
+        e_lab6 = float(np.sum(np.asarray(bb_events_v2.incident_energy_J)[heats]))
         print(
-            f"Back-bombardment v2 (backstop_raycast_v1): {bb_events_v2.n_events} qualified "
-            f"events -> {back_bombardment_events_v2_path.name} (legacy_ballistic output moved to "
-            f"back_bombardment_events_legacy_v1.h5)"
+            f"Back-bombardment (backstop_raycast_v1): {bb_events_v2.n_events} returning events, "
+            f"of which {n_hit} struck LaB6 -> {back_bombardment_events_v2_path.name}"
+        )
+        print(
+            f"  cathode load: {e_lab6*1e6:.4f} uJ per RF period from {q_hit*1e12:.3f} pC "
+            f"({100.0*n_hit/max(bb_events_v2.n_events, 1):.2f}% of returning particles). The rest "
+            "turned around without striking LaB6 -- the annulus outside the 3.2 mm disk is open "
+            "vacuum out to the 5.055 mm cavity bore."
         )
         rg.display_back_bombardment_event_schema(bb_events_v2, h5_path=back_bombardment_events_v2_path)
         back_bombardment_summary["events_v2_file"] = str(back_bombardment_events_v2_path)
         back_bombardment_summary["events_v2_n_events"] = int(bb_events_v2.n_events)
+        back_bombardment_summary["n_hit_cathode"] = n_hit
+        back_bombardment_summary["q_hit_cathode_C"] = q_hit
+        back_bombardment_summary["incident_energy_lab6_J"] = e_lab6
 
     saved_figures: List[str] = []
-    back_bombardment_energy_map = None
     if bool(args.save_figures):
         figures_result = rg.save_run_figures(
             output_dir=output_dir / "figures",
@@ -1417,19 +1860,8 @@ def main() -> None:
             exclude_backward_losses=bool(args.exclude_backward_losses),
             n_macroparticles=int(args.n_particles),
             lost_table=result.lost_table,
-            back_bombardment_data=back_bombardment_data,
-            back_bombardment_cathode_radius_mm=cathode_radius_mm,
         )
         saved_figures = figures_result["saved_figures"]
-        back_bombardment_energy_map = figures_result["back_bombardment_energy_map"]
-
-    # Independent of figures/: the 2D map is data (xedges/yedges/density_J_per_mm2/total_J), not a
-    # rendering of it -- see rf_gun.save_back_bombardment_energy_map. Only produced when
-    # --save-figures also ran (that's currently the only code path that bins the map).
-    back_bombardment_map_path = rg.save_back_bombardment_energy_map(output_dir, back_bombardment_energy_map)
-    if back_bombardment_map_path is not None:
-        back_bombardment_summary["total_deposited_energy_J"] = float(back_bombardment_energy_map["total_J"])
-        back_bombardment_summary["energy_map_file"] = str(back_bombardment_map_path)
 
     screen_phase_space_batch = None
     if bool(args.save_screen_phase_space_batch):
@@ -1503,6 +1935,116 @@ def main() -> None:
     ref_note = "RF-Track may switch to centroid reference if first particle is lost; robust summaries are computed from explicit phase-space arrays."
     ref_warn = bool(result.thermo_info.get("reference_particle_reordered", False))
 
+    _rftrack_module_files = {}
+    for _module_label, _module in (
+        ("python_wrapper", rft),
+        ("compiled_extension", getattr(rft, "_RF_Track", None)),
+    ):
+        _module_file_value = getattr(_module, "__file__", None)
+        if _module_file_value is None:
+            continue
+        _module_file_path = Path(_module_file_value).resolve()
+        if _module_file_path.is_file():
+            _rftrack_module_files[_module_label] = {
+                "path": str(_module_file_path),
+                "sha256": _sha256_file(_module_file_path),
+            }
+    _rftrack_runtime_identity = {
+        "version": str(getattr(rft, "version", "unknown")),
+        "module_files": _rftrack_module_files,
+    }
+
+    if field_artifact_loaded is not None:
+        field_provenance_config = {
+            "input_mode": "qualified_axisymmetric_artifact",
+            "artifact": field_artifact_provenance,
+            "quality": dict(field_artifact_loaded["artifact"].quality),
+            "phasor": {
+                "mode": "preprocessed_artifact",
+                "frequency_hz": f_hz,
+                "convention": "Re(F*exp(+i*2*pi*f*(t-t_ref)))",
+                "component_scaling": (
+                    "one common sqrt(target/source power) factor applied identically to E and B"
+                ),
+                "power_normalization": {
+                    "source_power_w": float(field_artifact_loaded["source_power_w"]),
+                    "target_power_w": float(field_artifact_loaded["target_power_w"]),
+                    "common_field_scale": float(field_artifact_loaded["common_field_scale"]),
+                },
+            },
+            "grid": {
+                "ownership": "artifact",
+                "realized_hr_m": hr,
+                "realized_hz_m": hz,
+                "nr": int(nr),
+                "nz": int(nz),
+                "r_support_m": [float(r_grid[0]), float(r_grid[-1])],
+                "z_support_m": [float(z_grid[0]), float(z_grid[-1])],
+            },
+            "magnetic_field_source": {
+                "status": "artifact_axisymmetric_projection",
+                "requested_mode": str(args.rf_magnetic_field),
+                "enabled": bool(field_artifact_loaded["magnetic_field_enabled"]),
+                "components": ["Btheta_T", "Bz_T"],
+                "zero_control": not bool(field_artifact_loaded["magnetic_field_enabled"]),
+            },
+            "downstream_support": {
+                "requested_policy": str(field_artifact_loaded["field_tail_policy"]),
+                "artifact_variant": str(field_artifact_loaded["artifact_variant"]),
+            },
+        }
+    else:
+        field_provenance_config = {
+            "input_mode": "legacy_planar_mat_compatibility",
+            "source_maps": {
+                tag: {
+                    "path": str(path),
+                    "sha256": _sha256_file(path),
+                    "size_bytes": int(Path(path).stat().st_size),
+                    "n_vertices": int(data["vertices"].shape[0]),
+                    "n_facets": int(data["facets"].shape[0]) if data["facets"] is not None else None,
+                    "edge_length_stats_mm": (
+                        rg.mesh_edge_length_stats(data["vertices"], data["facets"])
+                        if data["facets"] is not None else None
+                    ),
+                    "raw_keys": list(data["keys"]),
+                }
+                for tag, path, data in (
+                    ("xy", args.xy_fieldmap, xy), ("yz", args.yz_fieldmap, yz)
+                )
+            },
+            "phasor": {
+                "mode": str(args.phasor_mode),
+                "frequency_hz": f_hz,
+                "fit": phasor_fit_diagnostics,
+                "component_scaling": (
+                    "historical independent normalization (legacy reproduction only)"
+                    if mode == "legacy_iq" else "none; measured relative component amplitudes preserved"
+                ),
+            },
+            "interpolation": {
+                "method": (
+                    "linear on the source Delaunay triangulation; zero field outside the native "
+                    "convex hull (not extrapolated); KD-tree nearest-neighbor repair only for "
+                    "isolated interior holes"
+                ),
+                "requested_dr_um": dr_um,
+                "requested_dz_um": dz_um,
+                "realized_hr_m": hr,
+                "realized_hz_m": hz,
+                "nr": int(nr),
+                "nz": int(nz),
+                "outside_hull_fraction": outside_hull_fraction,
+                "repaired_hole_fraction": repaired_hole_fraction,
+                "axisymmetric_parity_projection": parity_diagnostics,
+            },
+            "magnetic_field_source": {
+                "status": "none",
+                "reason": "legacy planar MAT inputs do not contain a magnetic field map",
+                "enabled": False,
+            },
+        }
+
     # `run_config.json`: everything this run was set up to do -- every input parameter (cavity/
     # field-map, solver/finesse, cathode/emission, beam-loading, aperture, deflection, screen/
     # particle-count settings) plus the handful of values derived from them before tracking even
@@ -1524,6 +2066,7 @@ def main() -> None:
             "runtime_environment": {
                 "timestamp_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 "rftrack": {
+                    **_rftrack_runtime_identity,
                     "max_number_of_threads": rg.to_json_safe(getattr(rft, "max_number_of_threads", None)),
                     "number_of_threads": rg.to_json_safe(getattr(rft.cvar, "number_of_threads", None)),
                     "thread_policy": (
@@ -1545,62 +2088,34 @@ def main() -> None:
                 "max_screen_particles": diagnostics.max_screen_particles,
                 "subsample_screens_random": diagnostics.subsample_screens_random,
             },
-            "field_provenance": {
-                "source_maps": {
-                    tag: {
-                        "path": str(path),
-                        "sha256": _sha256_file(path),
-                        "size_bytes": int(Path(path).stat().st_size),
-                        "n_vertices": int(data["vertices"].shape[0]),
-                        "n_facets": int(data["facets"].shape[0]) if data["facets"] is not None else None,
-                        "edge_length_stats_mm": (
-                            rg.mesh_edge_length_stats(data["vertices"], data["facets"])
-                            if data["facets"] is not None else None
-                        ),
-                        "raw_keys": list(data["keys"]),
-                    }
-                    for tag, path, data in (("xy", args.xy_fieldmap, xy), ("yz", args.yz_fieldmap, yz))
-                },
-                "phasor": {"mode": str(args.phasor_mode), "frequency_hz": f_hz},
-                "interpolation": {
-                    "method": (
-                        "linear on the source Delaunay triangulation; zero field outside the "
-                        "native convex hull (not extrapolated); KD-tree nearest-neighbor repair "
-                        "only for isolated interior holes"
-                    ),
-                    "requested_dr_um": dr_um,
-                    "requested_dz_um": dz_um,
-                    "realized_hr_m": hr,
-                    "realized_hz_m": hz,
-                    "nr": int(nr),
-                    "nz": int(nz),
-                    "outside_hull_fraction": outside_hull_fraction,
-                    "repaired_hole_fraction": repaired_hole_fraction,
-                },
-                "magnetic_field_source": {
-                    "status": "none",
-                    "reason": (
-                        "raw field-map .mat files expose only TotalField_E_X/Y/Z (confirmed by "
-                        "direct inspection of every top-level .mat key) -- no B/H component is "
-                        "available to measure, so Bt=Bz=0.0 in RF_FieldMap_2d reflects the source "
-                        "data, not an assumption. Results are E-only; treat any transverse-force "
-                        "or emission-field claim that would depend on the missing RF Bphi as "
-                        "unverified against a measured/Maxwell-consistent magnetic map."
-                    ),
-                    "enabled": False,
-                },
-            },
+            "field_provenance": field_provenance_config,
             "cavity": {
                 "f_hz": f_hz,
-                "y_cathode_mm": float(args.y_cathode_mm),
-                "r_max_m": float(args.r_max_m),
-                "dr_um": float(args.dr_um),
-                "dz_um": float(args.dz_um),
+                "y_cathode_mm": (
+                    None if field_artifact_loaded is not None else float(args.y_cathode_mm)
+                ),
+                "r_max_m": float(r_grid[-1]),
+                "dr_um": float(dr_um),
+                "dz_um": float(dz_um),
                 "ext_zmax_m": float(args.ext_zmax),
                 "ext_zmin_m": z_min,
-                "xy_fieldmap": str(args.xy_fieldmap),
-                "yz_fieldmap": str(args.yz_fieldmap),
-                "phasor_mode": str(args.phasor_mode),
+                "z_max_geometric_m": float(_z_max_geometric),
+                "exit_tube_end_mm": float(rg.L_END_MM),
+                "field_artifact": (
+                    str(args.field_artifact) if args.field_artifact is not None else None
+                ),
+                "xy_fieldmap": (
+                    None if field_artifact_loaded is not None else str(args.xy_fieldmap)
+                ),
+                "yz_fieldmap": (
+                    None if field_artifact_loaded is not None else str(args.yz_fieldmap)
+                ),
+                "phasor_mode": mode,
+                "rf_magnetic_field": (
+                    str(args.rf_magnetic_field) if field_artifact_loaded is not None else "none"
+                ),
+                "rf_forward_power_w": float(args.bl_p_fwd_w),
+                "field_tail_policy": str(args.field_tail_policy),
             },
             "cathode_emission": {
                 "r_cathode_mm": float(args.r_cathode_mm),
@@ -1821,8 +2336,6 @@ def main() -> None:
                 str(output_dir / "screen_distributions_hdf5")
                 if (saved_screen_hdf5_paths or openpmd_h5_path is not None) else None
             ),
-            "back_bombardment_energy_map": str(back_bombardment_map_path) if back_bombardment_map_path is not None else None,
-            "beam_properties_csv": None,
             "lost_particles_json": str(lost_path) if lost_path is not None else None,
         },
     )
@@ -1841,6 +2354,11 @@ def main() -> None:
     # (Section 9 acknowledges this explicitly) -- 5% is a conservative placeholder that flags a
     # clearly mismatched grid/domain without over-triggering on normal edge effects.
     _outside_hull_threshold = 0.05
+    _figure_files_for_completion = tuple(
+        path
+        for path in sorted((output_dir / "figures").rglob("*"))
+        if path.is_file()
+    )
     validation_checks: Dict[str, Any] = {
         "phase_calibration": {
             "passed": bool(phase_cal.valid),
@@ -1857,27 +2375,243 @@ def main() -> None:
             "passed": len(_nonfinite_rf) == 0,
             "nonfinite_fields": _nonfinite_rf,
         },
-        "field_interpolation_support": {
+    }
+    if field_artifact_loaded is not None:
+        validation_checks["qualified_field_artifact"] = {
+            "passed": bool(
+                field_artifact_loaded["artifact"].quality.get("status") == "qualified"
+                and field_artifact_loaded["payload_verification"] == "payload"
+            ),
+            "quality_status": field_artifact_loaded["artifact"].quality.get("status"),
+            "payload_verification": field_artifact_loaded["payload_verification"],
+            "payload_sha256": field_artifact_loaded["artifact"].payload_sha256,
+            "tracking_domain_m": field_artifact_loaded["tracking_domain_m"],
+            "artifact_support_m": field_artifact_loaded["artifact_support_m"],
+            "magnetic_field_enabled": field_artifact_loaded["magnetic_field_enabled"],
+        }
+    else:
+        validation_checks["field_interpolation_support"] = {
             "passed": bool(outside_hull_fraction <= _outside_hull_threshold),
             "outside_hull_fraction": float(outside_hull_fraction),
             "threshold": _outside_hull_threshold,
             "threshold_status": "provisional -- not yet set from a pilot convergence study",
-        },
-    }
+        }
     if emission_iteration_result is not None:
         validation_checks["emission_field_iteration_converged"] = {
             "passed": bool(emission_iteration_result.converged),
             "failure_reason": emission_iteration_result.failure_reason,
         }
+    if bool(args.cathode_backstop_enabled):
+        validation_checks["back_bombardment_events_v2_written"] = {
+            "passed": bool(
+                back_bombardment_events_v2_path is not None
+                and back_bombardment_events_v2_path.is_file()
+            ),
+            "path": (
+                str(back_bombardment_events_v2_path)
+                if back_bombardment_events_v2_path is not None
+                else None
+            ),
+            "required_schema_version": "back_bombardment_events_v2",
+        }
+    if bool(args.save_openpmd_beam):
+        validation_checks["requested_openpmd_beams_written"] = {
+            "passed": bool(
+                openpmd_h5_path is not None
+                and openpmd_h5_path.is_file()
+                and b0_h5_path is not None
+                and b0_h5_path.is_file()
+            ),
+            "bout_path": str(openpmd_h5_path) if openpmd_h5_path is not None else None,
+            "b0_path": str(b0_h5_path) if b0_h5_path is not None else None,
+        }
+    if bool(args.save_screen_hdf5):
+        _expected_screen_count = _requested_screen_count(args)
+        validation_checks["requested_screen_hdf5_written"] = {
+            "passed": bool(
+                len(result.z_snaps) == _expected_screen_count
+                and len(saved_screen_hdf5_paths) == _expected_screen_count
+                and all(path.is_file() for path in saved_screen_hdf5_paths)
+            ),
+            "expected_count": int(_expected_screen_count),
+            "tracked_count": int(len(result.z_snaps)),
+            "written_count": int(len(saved_screen_hdf5_paths)),
+        }
+    if bool(args.save_figures):
+        _required_figure_pngs = {
+            "field_maps.png",
+            "on_axis_field_profile.png",
+            "screen_spectra.png",
+            "emission_history.png",
+        }
+        if _requested_screen_count(args) > 0:
+            _required_figure_pngs.update(
+                {
+                    "initial_phase_space_x_px.png",
+                    "beam_moments_evolution.png",
+                    "beam_twiss_evolution.png",
+                }
+            )
+        if bool(args.emission_field_iteration):
+            _required_figure_pngs.update(
+                {
+                    "emission_iteration_convergence.png",
+                    "emission_iteration_waveforms.png",
+                    "emission_iteration_near_cathode.png",
+                }
+            )
+        _written_figure_names = {path.name for path in _figure_files_for_completion}
+        _missing_figure_pngs = sorted(_required_figure_pngs - _written_figure_names)
+        validation_checks["requested_figures_written"] = {
+            "passed": not _missing_figure_pngs,
+            "file_count": int(len(_figure_files_for_completion)),
+            "required_pngs": sorted(_required_figure_pngs),
+            "missing_pngs": _missing_figure_pngs,
+        }
+    if bool(args.save_lost_particles):
+        validation_checks["requested_lost_particle_diagnostics_written"] = {
+            "passed": bool(lost_path is not None and lost_path.is_file()),
+            "path": str(lost_path) if lost_path is not None else None,
+        }
+    if bool(args.emission_field_iteration):
+        validation_checks["requested_emission_iteration_data_written"] = {
+            "passed": bool(
+                emission_iteration_npz_path is not None
+                and emission_iteration_npz_path.is_file()
+            ),
+            "path": (
+                str(emission_iteration_npz_path)
+                if emission_iteration_npz_path is not None
+                else None
+            ),
+        }
     validation_report = rg.build_validation_report(validation_checks)
     validation_path = rg.save_validation_report(output_dir, validation_checks)
     if validation_report["status"] == "ok":
-        (output_dir / ".run_complete").write_text(datetime.now(timezone.utc).isoformat() + "\n")
+        canonical_config_payload = rg.to_json_safe({
+            "arguments": {
+                key: value for key, value in vars(args).items()
+                if key != "output"
+            },
+            "resolved": {
+                "frequency_hz": float(f_hz),
+                "grid_shape": [int(nz), int(nr)],
+                "hr_m": float(hr),
+                "hz_m": float(hz),
+                "z_min_m": float(z_min),
+                "z_max_m": float(z_max),
+                "field_map_z0_m": float(map_z0_m),
+                "field_support_z_m": [float(z_grid[0]), float(z_grid[-1])],
+                "rf_magnetic_field_enabled": bool(bt_grid is not None),
+                "rf_forward_power_w": float(args.bl_p_fwd_w),
+                "transport_phase_deg": float(phase_deg_transport),
+                "phasor_mode_effective": (
+                    "all_time" if mode in ("all_time", "reconstruct") else mode
+                ),
+            },
+        })
+        canonical_config_digest = _canonical_payload_sha256(canonical_config_payload)
+
+        field_artifact_value = getattr(args, "field_artifact", None)
+        if field_artifact_value is not None:
+            field_artifact_digest = str(field_artifact_provenance["file_sha256"])
+            field_identity = {
+                "kind": "qualified_field_artifact",
+                "path": field_artifact_provenance["path"],
+                "file_sha256": field_artifact_digest,
+                "payload_sha256": field_artifact_provenance["payload_sha256"],
+                "payload_verification": field_artifact_provenance["payload_verification"],
+                "source_sha256": field_artifact_provenance["source_sha256"],
+                "processing_config_sha256": field_artifact_provenance[
+                    "processing_config_sha256"
+                ],
+                "rf_magnetic_field_mode": str(args.rf_magnetic_field),
+                "rf_magnetic_field_enabled": bool(
+                    field_artifact_loaded["magnetic_field_enabled"]
+                ),
+                "source_power_w": float(field_artifact_loaded["source_power_w"]),
+                "target_power_w": float(field_artifact_loaded["target_power_w"]),
+                "common_field_scale": float(field_artifact_loaded["common_field_scale"]),
+                "field_tail_policy": str(field_artifact_loaded["field_tail_policy"]),
+                "artifact_variant": str(field_artifact_loaded["artifact_variant"]),
+            }
+        else:
+            field_artifact_digest = None
+            field_identity = {
+                "kind": "legacy_planar_source_pair",
+                "xy_sha256": _sha256_file(args.xy_fieldmap),
+                "yz_sha256": _sha256_file(args.yz_fieldmap),
+            }
+        field_input_digest = _canonical_payload_sha256(field_identity)
+        required_outputs = {
+            "run_config": {
+                "file": run_config_path.name,
+                "sha256": _sha256_file(run_config_path),
+            },
+            "run_results": {
+                "file": run_results_path.name,
+                "sha256": _sha256_file(run_results_path),
+            },
+            "validation": {
+                "file": validation_path.name,
+                "sha256": _sha256_file(validation_path),
+            },
+        }
+        if back_bombardment_events_v2_path is not None:
+            required_outputs["back_bombardment_events"] = {
+                "file": back_bombardment_events_v2_path.name,
+                "sha256": _sha256_file(back_bombardment_events_v2_path),
+                "schema_version": "back_bombardment_events_v2",
+            }
+        _already_bound_outputs = {
+            str(record["file"]) for record in required_outputs.values()
+        }
+        for _output_path in sorted(output_dir.rglob("*")):
+            if not _output_path.is_file() or _output_path.name in {
+                ".run_complete",
+                "resource_usage.txt",
+            }:
+                continue
+            _relative_output = _output_path.resolve().relative_to(
+                output_dir.resolve()
+            ).as_posix()
+            if _relative_output in _already_bound_outputs:
+                continue
+            required_outputs[f"file:{_relative_output}"] = {
+                "file": _relative_output,
+                "sha256": _sha256_file(_output_path),
+            }
+        rg.atomic_write_json(
+            completion_marker_path,
+            {
+                "schema_version": 2,
+                "stage": "transport",
+                "status": "complete",
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "run_family": str(args.run_family),
+                "scan_tags": [str(value) for value in (args.scan_tags or [])],
+                "validation_status": "ok",
+                "validation_file": validation_path.name,
+                "run_config_file": run_config_path.name,
+                "run_config_sha256": required_outputs["run_config"]["sha256"],
+                "canonical_config": canonical_config_payload,
+                "canonical_config_sha256": canonical_config_digest,
+                "field_artifact_sha256": field_artifact_digest,
+                "field_artifact_payload_sha256": (
+                    field_artifact_provenance["payload_sha256"]
+                    if field_artifact_provenance is not None else None
+                ),
+                "field_input_sha256": field_input_digest,
+                "field_identity": field_identity,
+                "required_outputs": required_outputs,
+            },
+        )
     else:
         print(f"VALIDATION FAILED: {validation_report['failed_checks']} -- see {validation_path.name}")
 
     t_sim_elapsed = time.time() - t_sim_start
-    print(f"\nRun complete, simulation time: {rg.format_duration(t_sim_elapsed)}")
+    completion_label = "Run complete" if validation_report["status"] == "ok" else "Run finished with validation failure"
+    print(f"\n{completion_label}, simulation time: {rg.format_duration(t_sim_elapsed)}")
     print(f"Validation: {validation_report['status']} ({validation_path.name})")
     n0 = int(m0.shape[0]) if m0.ndim == 2 else 0
     if n0 > 0 and len(result.M_snaps) > 0:
@@ -1901,14 +2635,14 @@ def main() -> None:
         print(f"Saved openPMD exit beam: {openpmd_h5_path.relative_to(output_dir)}")
     if saved_figures:
         print(f"Saved {len(saved_figures)} figure files (.png/.eps) to figures/")
-    if back_bombardment_map_path is not None:
-        print(f"Saved back-bombardment energy map: {back_bombardment_map_path.name}")
     if screen_phase_space_batch is not None:
         print(f"Saved cinematic phase-space frames: {int(screen_phase_space_batch.get('frame_count', 0))}")
     if saved_screen_hdf5_paths:
         print(f"Saved {len(saved_screen_hdf5_paths)} per-screen HDF5 files")
     if lost_path is not None:
         print(f"Saved lost-particle diagnostics: {lost_path.name}")
+    if validation_report["status"] != "ok":
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

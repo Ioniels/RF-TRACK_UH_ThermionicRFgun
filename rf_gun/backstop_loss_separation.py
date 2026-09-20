@@ -69,6 +69,99 @@ import numpy as np
 #: outside that regime.
 DEFAULT_Z_SLACK_M = 1.5e-3
 
+#: Inward radial tolerance [mm] for deciding that a loss row sits ON the dynamic radial aperture
+#: R(z). The test is deliberately ONE-SIDED (`r >= R(z) - tol`): a particle cannot be inside solid
+#: material, so any row at or outside the wall is an aperture absorption however far the last step
+#: overshot, and only rows recorded just *inside* the boundary need a tolerance at all.
+#:
+#: Calibrated the same way as DEFAULT_Z_SLACK_M above, from the 1650 K / 0 A production run:
+#:   * rows the ray-cast could not place at all (i.e. genuine aperture losses) sit at an inward
+#:     gap R(z)-r of 0.0004-0.094 mm (p1-p99); RF-Track records the absorption at the last step
+#:     before the crossing, so the residual is bounded by one radial step.
+#:   * rows that legitimately reach the LaB6 cathode sit at an inward gap of 0.96-2.41 mm (p1-p99).
+#: 0.15 mm is ~1.6x the largest observed absorption residual and ~6x below the closest genuine
+#: cathode row, so the two populations are separated with an order of magnitude of headroom.
+#: Verified: at this value no LaB6 row is reclassified and the unclassified fraction falls from
+#: 8.951% to 0.022% (gate: 1%). Re-check it if `dt_mm`, the field-map z-grid, or the aperture
+#: profile changes materially -- at 1.0 mm it starts stealing genuine cathode rows.
+DEFAULT_APERTURE_MATCH_TOLERANCE_MM = 0.15
+
+
+def identify_aperture_wall_losses(
+    x_mm: np.ndarray,
+    y_mm: np.ndarray,
+    z_mm: np.ndarray,
+    *,
+    delta_mm: float = 0.0,
+    tolerance_mm: float = DEFAULT_APERTURE_MATCH_TOLERANCE_MM,
+) -> np.ndarray:
+    """Boolean mask: `True` where a loss row was absorbed by the dynamic radial aperture `R(z)`.
+
+    WHY THIS EXISTS. `identify_backstop_loss_candidates` is deliberately radius-blind: it accepts
+    any `Pz < 0` row inside `[-thickness, +z_slack]`, and `DEFAULT_Z_SLACK_M` is 1.5 mm so that a
+    genuine backstop absorption whose recorded Z overshot the cathode plane is not missed. But the
+    cathode-side chamfer of `rf_gun.aperture.aperture_radius_profile_mm` opens from R = 2.53 mm at
+    z = 0 to R = 5.13 mm at z = 1.5 mm -- i.e. it lives inside exactly that z band. Every
+    backward-going particle absorbed on that chamfer therefore also satisfies the backstop test,
+    and was being ray-cast onto the (fictitious, flat) holder annulus at z = 0 as though it had
+    reached the cathode plane.
+
+    Measured on the 1650 K / 0 A production run, that mis-assignment covered 40.8% of all captured
+    events and 49.1% of the returned energy: 50% of everything labelled `holder` and 86% of
+    everything labelled `unknown` was sitting on the aperture cone, not on the cathode. The LaB6
+    zones were unaffected (0.00% of `cathode_flat`/`cathode_bevel` rows lie on the aperture), which
+    is why the cathode heat load itself survived the bug intact.
+
+    A row on the aperture needs no ray-cast at all: its loss point IS its impact point, on the
+    cavity wall (`SURFACE_CAVITY_WALL`). Positions are in MILLIMETRES, cathode-frame, matching the
+    RF-Track loss table's own units.
+    """
+    from .aperture import aperture_radius_profile_mm
+
+    x = np.asarray(x_mm, dtype=float)
+    y = np.asarray(y_mm, dtype=float)
+    z = np.asarray(z_mm, dtype=float)
+    r = np.hypot(x, y)
+    R = np.asarray(aperture_radius_profile_mm(z, float(delta_mm)), dtype=float)
+    # One-sided: at or beyond the wall (see DEFAULT_APERTURE_MATCH_TOLERANCE_MM). The z > 0 guard
+    # keeps genuine backstop rows behind the cathode plane out of this classification entirely.
+    return np.isfinite(R) & np.isfinite(r) & (z > 0.0) & (r >= R - float(tolerance_mm))
+
+
+def aperture_inward_normal(
+    x_mm: np.ndarray,
+    y_mm: np.ndarray,
+    z_mm: np.ndarray,
+    *,
+    delta_mm: float = 0.0,
+    dz_mm: float = 1.0e-4,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Unit normal pointing from vacuum INTO the aperture wall, matching this project's
+    `normal_convention = "inward_vacuum_to_solid"`.
+
+    The wall is the surface `F(r, z) = r - R(z) = 0` with solid at `r > R(z)`, so the inward
+    normal is `(r_hat - R'(z) z_hat) / sqrt(1 + R'^2)`. `R'` is evaluated by central difference --
+    the chamfer is piecewise-smooth and `R'` jumps at the joins, but the resulting normal is only
+    used for an incidence angle, where a one-cell error at a join is immaterial.
+    """
+    from .aperture import aperture_radius_profile_mm
+
+    x = np.asarray(x_mm, dtype=float)
+    y = np.asarray(y_mm, dtype=float)
+    z = np.asarray(z_mm, dtype=float)
+    r = np.hypot(x, y)
+    safe_r = np.where(r > 0.0, r, 1.0)
+    ur_x = np.where(r > 0.0, x / safe_r, 0.0)
+    ur_y = np.where(r > 0.0, y / safe_r, 0.0)
+
+    R_hi = np.asarray(aperture_radius_profile_mm(z + dz_mm, float(delta_mm)), dtype=float)
+    R_lo = np.asarray(aperture_radius_profile_mm(z - dz_mm, float(delta_mm)), dtype=float)
+    dRdz = (R_hi - R_lo) / (2.0 * dz_mm)
+    dRdz = np.where(np.isfinite(dRdz), dRdz, 0.0)
+
+    norm = np.sqrt(1.0 + dRdz**2)
+    return ur_x / norm, ur_y / norm, -dRdz / norm
+
 
 def identify_backstop_loss_candidates(
     lost_table: np.ndarray,

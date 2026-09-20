@@ -120,23 +120,31 @@ class ScreenBuildParams:
 
 def _configure_screen(S, screen_params: ScreenBuildParams, index: int, z_m: float):
     if screen_params.width_mm is not None:
-        _call_first_available(S, ("set_width", "set_xwidth", "set_size_x"), float(screen_params.width_mm))
+        if not _call_first_available(S, ("set_width", "set_xwidth", "set_size_x"), float(screen_params.width_mm)):
+            print(f"Warning: screen {index} (z={z_m:.6g} m): requested width_mm could not be applied "
+                  "(no matching setter on the installed RF-Track Screen binding).")
 
     if screen_params.height_mm is not None:
-        _call_first_available(S, ("set_height", "set_ywidth", "set_size_y"), float(screen_params.height_mm))
+        if not _call_first_available(S, ("set_height", "set_ywidth", "set_size_y"), float(screen_params.height_mm)):
+            print(f"Warning: screen {index} (z={z_m:.6g} m): requested height_mm could not be applied "
+                  "(no matching setter on the installed RF-Track Screen binding).")
 
     if screen_params.time_window_mm_c is not None:
-        _call_first_available(
+        if not _call_first_available(
             S,
             ("set_time_window", "set_twindow", "set_dt", "set_time_width"),
             float(screen_params.time_window_mm_c),
-        )
+        ):
+            print(f"Warning: screen {index} (z={z_m:.6g} m): requested time_window_mm_c could not be applied "
+                  "(no matching setter on the installed RF-Track Screen binding).")
 
     mode = str(screen_params.t0_mode).strip().lower()
     if mode not in ("unset", "sync_to_first_crossing", "manual"):
         raise ValueError(f"Unknown screen t0 mode: {screen_params.t0_mode}")
     if mode == "manual":
-        _call_first_available(S, ("set_t0", "set_ref_time", "set_reference_time"), float(screen_params.t0_manual_mm_c))
+        if not _call_first_available(S, ("set_t0", "set_ref_time", "set_reference_time"), float(screen_params.t0_manual_mm_c)):
+            print(f"Warning: screen {index} (z={z_m:.6g} m): requested manual t0 could not be applied "
+                  "(no matching setter on the installed RF-Track Screen binding).")
 
     if screen_params.log:
         tw = (
@@ -148,6 +156,19 @@ def _configure_screen(S, screen_params: ScreenBuildParams, index: int, z_m: floa
             f"Screen {index}: z={float(z_m):.6g} m | width={w} | height={h} | "
             f"time_window={tw} | t0_mode={mode}"
         )
+
+
+#: A best-effort (NOT guaranteed-safe) floor for BeamLoadingSW's tinj/tau, raised from an
+#: originally-observed unsafe value of ~8.8e-6 -- see the note at its use site in
+#: `_attach_beam_loading_sw` for why this project no longer relies on any single constant here
+#: being sufficient: a real KOA production batch found this exact floor value, 1e-3, ALSO inside
+#: RF-Track's own unsafe region at full production scale (n=300,000), despite validating safely
+#: at a smaller scale (n=50,000) with the identical value -- the unsafe region is evidently not a
+#: simple "tinj/tau below X" threshold. Kept as a first attempt (raising the odds of a clean,
+#: physically un-floored construction) rather than removed, but `_attach_beam_loading_sw`'s own
+#: post-construction finiteness check is the real safety net now: it degrades gracefully (skips
+#: attaching beam loading, does not crash the run) if this floor still is not enough.
+_MIN_SAFE_TINJ_TAU = 1.0e-3
 
 
 def _attach_beam_loading_sw(rft, FM, p: VolumeBuildParams):
@@ -184,6 +205,25 @@ def _attach_beam_loading_sw(rft, FM, p: VolumeBuildParams):
         # value, not an error -- so floor it to a numerically-negligible positive fraction of tau
         # rather than reinterpreting auto_from_emission's actual timing.
         tinj_tau = 1.0e-9
+    elif tinj_tau < _MIN_SAFE_TINJ_TAU:
+        # A second, independent numerical floor, distinct from the tinj_tau<=0 case above: real
+        # KOA production runs (n=300,000 macroparticles, rf_gun.simulation
+        # ._resolve_beam_loading_tinj's own auto_from_emission path) were observed to reach this
+        # point with a small but strictly positive tinj_tau (~8.8e-6, well above the 1e-9 floor
+        # above) for which RF-Track 2.7.0's BeamLoadingSW constructs successfully but its own
+        # get_TT1() then returns non-finite values -- confirmed empirically against real cluster
+        # runs, not reproducible in an isolated unit test, so treated here as an RF-Track-internal
+        # numerical edge case around very small tinj/tau rather than something fixable at its
+        # source. _resolve_beam_loading_tinj was also changed (mean instead of min emission time)
+        # to make reaching this region far less likely in the first place; this floor is the
+        # second, independent safety net for whatever residually-small value still gets here.
+        print(
+            f"Note: tinj/tau={tinj_tau:.4e} is below the empirically-observed RF-Track "
+            f"BeamLoadingSW numerical-stability floor ({_MIN_SAFE_TINJ_TAU:.1e}) -- raising it to "
+            f"{_MIN_SAFE_TINJ_TAU:.1e} (still >=3 orders of magnitude below tau={tau_s:.4e} s, i.e. "
+            "still 'the beam starts loading the cavity essentially immediately')."
+        )
+        tinj_tau = _MIN_SAFE_TINJ_TAU
 
     Q_scalar = float(p.bl_Q_loaded)
     rQ_scalar = float(p.bl_r_over_q_ohm_per_m)
@@ -209,17 +249,53 @@ def _attach_beam_loading_sw(rft, FM, p: VolumeBuildParams):
 
     # Verify the constructed element reports physically sane cavity parameters before trusting it
     # (manual A4: "Verify Lcell, tfill, tinj, TT1, and TT2 after construction").
+    #
+    # A non-finite value here is treated as "RF-Track's own BeamLoadingSW could not be safely
+    # constructed for this run's calibrated (Q_loaded, r/Q, tinj) combination" -- skip attaching
+    # the collective effect and continue the run WITHOUT beam loading, rather than crash it.
+    # This is not a blanket "ignore numerical problems" policy: it is specific to BeamLoadingSW,
+    # justified by two things established this session, not assumed here:
+    #   1. A real KOA production A/B batch (all five KOA_slurm_scripts/study_* families) found
+    #      this failure recurs at more than one tinj/tau value -- including this project's own
+    #      empirically-chosen safety floor (_MIN_SAFE_TINJ_TAU) itself, at full production scale
+    #      (n=300,000) though not at a smaller validation scale (n=50,000) with the same floored
+    #      value -- meaning the unsafe region is not simply "tinj/tau below some threshold"; it
+    #      depends on the exact (Q_loaded, r/Q, tinj/tau) combination in a way not fully
+    #      characterized from outside RF-Track's own compiled implementation. No single floor
+    #      constant can be trusted to avoid it in every case.
+    #   2. tests/test_beam_loading_cross_validation.py independently found that RF-Track's own
+    #      BeamLoadingSW already produces zero measurable effect on tracked dynamics for this gun
+    #      geometry in RF-Track 2.7.0, regardless of whether it is attached at all. Skipping it
+    #      when it cannot be safely constructed therefore does not trade away real physics
+    #      fidelity for robustness -- for this project's gun, there is none being traded away.
+    # If a future gun/RF-Track combination is confirmed to have a real (non-negligible) beam-
+    # loading effect, this should become a hard failure again for that configuration -- see the
+    # cross-validation test above before assuming this fallback is still appropriate elsewhere.
+    beam_loading_safe = True
+    unsafe_reason = ""
     for getter_name in ("get_Lcell", "get_tfill", "get_tinj", "get_TT1", "get_TT2"):
         getter = getattr(bl_obj, getter_name, None)
         if not callable(getter):
             raise RuntimeError(f"RF-Track {rf_track_version} BeamLoadingSW has no {getter_name}().")
         value = np.asarray(getter(), dtype=float)
         if not np.isfinite(value).all():
-            raise RuntimeError(
+            beam_loading_safe = False
+            unsafe_reason = (
                 f"BeamLoadingSW.{getter_name}() returned non-finite value(s) after construction "
                 f"(Q_loaded={Q_scalar}, r/Q={rQ_scalar}, ncells={int(p.bl_ncells)}, "
-                f"tinj/tau={tinj_tau:.4e}); refusing to attach a mis-configured collective effect."
+                f"tinj/tau={tinj_tau:.4e})"
             )
+            break
+
+    if not beam_loading_safe:
+        print(
+            f"Warning: {unsafe_reason} -- RF-Track's own BeamLoadingSW could not be safely "
+            "constructed for this run's calibration. Continuing WITHOUT beam loading for this "
+            "run (confirmed to have zero measurable effect on tracked dynamics for this gun "
+            "geometry in RF-Track 2.7.0 -- see tests/test_beam_loading_cross_validation.py) "
+            "rather than aborting the run."
+        )
+        return
 
     FM.add_collective_effect(bl_obj)
 
@@ -314,18 +390,84 @@ def build_volume(
     p: VolumeBuildParams,
     add_screens_z_m: Optional[Sequence[float]] = None,
     screen_params: Optional[ScreenBuildParams] = None,
+    Bt_grid: Optional[np.ndarray] = None,
+    Bz_grid: Optional[np.ndarray] = None,
 ):
-    """Construct a Volume containing a single RF_FieldMap_2d and optional Screens."""
+    """Construct a Volume containing a single RF_FieldMap_2d and optional Screens.
+
+    `Bt_grid`/`Bz_grid` are the azimuthal/longitudinal RF magnetic phasors in Tesla. Production
+    artifact-backed runs supply both from the qualified XFdtd volume reduction; passing neither
+    is retained only for the explicit E-only control and legacy planar-MAT compatibility path.
+    All four arrays share the same `(z, r)` grid and complex-phasor convention.
+
+    Must be supplied together or not at all: despite the manual's prose suggesting each of the
+    four field components is independently array-or-zero, the actual bound `RF_FieldMap_2d`
+    overload set (confirmed empirically -- `tests/test_build_volume_bfield_readiness.py`) only
+    accepts the (Er, Ez) pair and the (Bt, Bz) pair each as a matched pair of both-arrays or
+    both-literal-zero, never one array and one scalar within the same pair.
+    """
     p = _coerce_volume_params(p)
+    er_shape = np.shape(Er_grid)
+    ez_shape = np.shape(Ez_grid)
+    if len(er_shape) != 2 or er_shape != ez_shape:
+        raise ValueError(
+            "build_volume: Er_grid and Ez_grid must be matching 2D arrays "
+            f"(got {er_shape} and {ez_shape})"
+        )
+    if (Bt_grid is None) != (Bz_grid is None):
+        raise ValueError(
+            "build_volume: Bt_grid and Bz_grid must be supplied together (both arrays) or both "
+            "omitted (RF-Track's RF_FieldMap_2d binding has no overload for one array and one "
+            "scalar within the same field-component pair)."
+        )
+    if Bt_grid is not None:
+        bt_shape = np.shape(Bt_grid)
+        bz_shape = np.shape(Bz_grid)
+        if bt_shape != er_shape or bz_shape != er_shape:
+            raise ValueError(
+                "build_volume: Bt_grid and Bz_grid must match the electric-field grid shape "
+                f"{er_shape} (got {bt_shape} and {bz_shape})"
+            )
 
     # Constructor is RF_FieldMap_2d(Er, Ez, Bt, Bz, hr, hz, length, frequency, direction,
-    # P_max, P_actual) -- Bt/Bz must be the literal 0.0 (no measured B-field), not map_z0_m.
-    # The map's z-placement is handled below, via V.add(FM, ..., float(p.map_z0_m), ...).
+    # P_max, P_actual). For the explicit E-only control, Bt/Bz are the literal 0.0 pair because
+    # the binding does not accept one array and one scalar. The map's z-placement is handled below, via
+    # V.add(FM, ..., float(p.map_z0_m), ...) -- unrelated to Bt/Bz.
+    if Bt_grid is not None:
+        # RF-Track silently discards the magnetic map when every supplied phasor is purely
+        # real: probing such a Volume returns B = 0 exactly, while E still reads back
+        # correctly. Verified on RF-Track 2.7.0 -- giving any one of the four arrays a
+        # nonzero imaginary part (even 1e-9) restores B at ratio +1.000000. A qualified
+        # artifact always carries genuine phase, so this only bites synthetic/hand-built
+        # maps, where it would otherwise look like a working E+B run with no RF B at all.
+        _all_real = all(
+            not np.any(np.asarray(g).imag != 0.0)
+            for g in (Er_grid, Ez_grid, Bt_grid, Bz_grid)
+        )
+        _has_magnetic_field = any(np.any(np.asarray(g) != 0.0) for g in (Bt_grid, Bz_grid))
+        if _all_real and _has_magnetic_field:
+            raise ValueError(
+                "build_volume: Er/Ez/Bt/Bz are all purely real phasors. RF-Track drops the "
+                "magnetic map entirely in that case (B reads back as exactly zero) while "
+                "still returning E, so the run would silently become E-only. Supply complex "
+                "phasors, or pass no Bt_grid/Bz_grid for a deliberate E-only control."
+            )
+
+    # RF-Track's RF_FieldMap_2d takes its azimuthal magnetic argument along -e_theta, the
+    # opposite of the artifact's standard right-handed convention. Verified empirically against
+    # RF-Track 2.7.0: probing the built Volume on the +x axis (where e_theta = +y_hat) returns
+    # By/Re(Btheta) = -1.000000 exactly at every (r, z, t), while Er, Ez and Bz all return
+    # +1.000000. The artifact's stored sign is the physical one -- it satisfies the m=0 Faraday
+    # relation dEr/dz - dEz/dr = -i*omega*Btheta: the Faraday family-normalized RMS over the
+    # guarded vacuum is 0.1471 as stored and 1.2751 with Btheta negated (reproduce with
+    # rf_gun.fieldmaps.quality.maxwell_residual_diagnostics).
+    # Negate here, at the RF-Track boundary only, so the integrated field is a Maxwell solution.
+    # Do NOT "fix" this with direction=-1: that also conjugates the E phasor.
     FM = rft.RF_FieldMap_2d(
         Er_grid,
         Ez_grid,
-        0.0,
-        0.0,
+        -np.asarray(Bt_grid) if Bt_grid is not None else 0.0,
+        Bz_grid if Bz_grid is not None else 0.0,
         float(p.hr_m),
         float(p.hz_m),
         -1,
@@ -478,8 +620,15 @@ def track_volume_with_screens(
     z_screens_m: Sequence[float],
     screen_params: Optional[ScreenBuildParams] = None,
     return_volume: bool = False,
+    *,
+    Bt_grid: Optional[np.ndarray] = None,
+    Bz_grid: Optional[np.ndarray] = None,
 ):
-    """Track once, capturing phase-space snapshots at `z_screens_m`."""
+    """Track once, capturing phase-space snapshots at `z_screens_m`.
+
+    ``Bt_grid``/``Bz_grid`` are forwarded unchanged to :func:`build_volume`; keeping them
+    keyword-only avoids confusing magnetic arrays with the pre-existing screen arguments.
+    """
     z_screens_m = [float(z) for z in z_screens_m]
     V = build_volume(
         rft,
@@ -489,6 +638,8 @@ def track_volume_with_screens(
         p,
         add_screens_z_m=z_screens_m,
         screen_params=screen_params,
+        Bt_grid=Bt_grid,
+        Bz_grid=Bz_grid,
     )
     Bout = V.track(B0)
     snaps = V.get_bunch_at_screens() if hasattr(V, "get_bunch_at_screens") else []

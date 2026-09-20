@@ -179,6 +179,20 @@ class CathodeGeometry:
     cathode_length_mm: float = DEFAULT_CATHODE_LENGTH_MM
     insertion_offset_mm: float = 0.0
     holder_outer_radius_mm: float | None = None
+    #: Is the annulus beyond `bevel_outer_radius_mm` at the cathode plane SOLID (a holder face a
+    #: returning electron can strike), or VACUUM?
+    #:
+    #: As-built it is vacuum: the LaB6 disk is 2.8 mm across the flat and 3.2 mm across the bevel,
+    #: and the gap out to the cavity nose bore is open. A returning electron in that annulus does
+    #: not land on anything at z=0 -- it simply passes the cathode plane. Modelling it as a solid
+    #: flat holder face (the previous default, out to `holder_outer_radius_mm` = 4.6 mm) invented
+    #: impacts that never happen and inflated the cathode-region energy budget: on the 1650 K / 0 A
+    #: production run it absorbed 19,698 rays carrying 25.4 uJ per RF period.
+    #:
+    #: `holder_outer_radius_mm` is retained regardless -- it is the physical holder object's extent
+    #: for the thermal/COMSOL domain and for plot annotation, which is a different question from
+    #: whether its face is exposed to the vacuum at z=0.
+    holder_face_is_solid: bool = False
 
     def __post_init__(self) -> None:
         if not (self.flat_radius_mm > 0.0):
@@ -427,11 +441,13 @@ class CathodeGeometry:
             best_t = np.where(improves, t_safe, best_t)
             best_surface = np.where(improves, np.uint8(surf_code), best_surface)
 
-        # Flat face and holder placeholder: both the z=0 plane, distinguished only by radius band.
+        # Flat face and (optionally) the holder placeholder: both the z=0 plane, distinguished
+        # only by radius band. The holder face is vacuum as-built -- see `holder_face_is_solid`.
         with np.errstate(divide="ignore", invalid="ignore"):
             t_plane = np.where(uz != 0.0, -z0 / np.where(uz != 0.0, uz, 1.0), np.nan)
         _consider(t_plane, int(SURFACE_CATHODE_FLAT))
-        _consider(t_plane, int(SURFACE_HOLDER))
+        if self.holder_face_is_solid:
+            _consider(t_plane, int(SURFACE_HOLDER))
 
         # Bevel cone: z(t) + tan(theta)*(R(t) - flat_radius_mm) = 0, R(t) = hypot(x(t), y(t)) >= 0.
         # Squaring both sides to remove R(t)'s square root gives a quadratic in t with two roots;

@@ -28,9 +28,10 @@ exactly which sources backed a given run (matching the provenance-recording styl
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass, field
+import warnings
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import yaml
@@ -94,6 +95,10 @@ class ScalarPropertyDataset:
     uncertainty: dict[str, Any]
     reference: PropertyReference
     notes: str = ""
+    #: Upper `unit_x` bound for `extrapolation == "linear_to_limit"`: the PHYSICAL limit beyond
+    #: which the material no longer exists in the modelled phase (for LaB6, its melting point),
+    #: not the last tabulated knot. Required for that mode, ignored by every other mode.
+    extrapolation_limit_x: float | None = None
 
     def __post_init__(self) -> None:
         self.x = np.asarray(self.x, dtype=float)
@@ -129,10 +134,47 @@ class ScalarPropertyDataset:
                 )
         elif self.extrapolation == "clamp":
             T = np.clip(T, lo, hi)
+        elif self.extrapolation == "linear_to_limit":
+            # Below the table: still forbidden. Continuing a Debye-type curve downwards off its
+            # last knot is not safe, and nothing in this project queries below the tables.
+            if np.any(T < lo):
+                bad = np.unique(T[T < lo]).tolist()
+                raise ValueError(
+                    f"{self.dataset_id}: query value(s) {bad} {self.unit_x} lie below the valid "
+                    f"range [{lo}, {hi}] {self.unit_x}; downward extrapolation is not permitted "
+                    f"for this dataset (status={self.status!r})."
+                )
+            limit = self.extrapolation_limit_x
+            if limit is None:
+                raise ValueError(
+                    f"{self.dataset_id}: extrapolation='linear_to_limit' requires "
+                    f"'extrapolation_limit_x' to be set."
+                )
+            # Past the PHYSICAL limit (melting, for LaB6) the modelled phase no longer exists.
+            # This is a genuine physics failure and must stay hard -- unlike running off the end
+            # of a fitted table, which is only a data-coverage limit.
+            if np.any(T > limit):
+                bad = np.unique(T[T > limit]).tolist()
+                raise ValueError(
+                    f"{self.dataset_id}: query value(s) {bad} {self.unit_x} exceed the physical "
+                    f"limit {limit} {self.unit_x} for this material (melting/phase change); the "
+                    f"solid-phase property model is not defined there."
+                )
+            above = T > hi
+            if np.any(above):
+                warnings.warn(
+                    f"{self.dataset_id}: {int(np.count_nonzero(above))} query value(s) above the "
+                    f"tabulated range [{lo}, {hi}] {self.unit_x} (max "
+                    f"{float(np.max(T[above])):.1f}); linearly continuing the last tabulated "
+                    f"segment up to the physical limit {limit} {self.unit_x}. Treat results in "
+                    f"this band as extrapolated.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
         else:
             raise NotImplementedError(
                 f"{self.dataset_id}: extrapolation mode {self.extrapolation!r} is not "
-                f"implemented; only 'forbidden' and 'clamp' are supported."
+                f"implemented; only 'forbidden', 'clamp' and 'linear_to_limit' are supported."
             )
 
         if self.interpolation != "pchip":
@@ -143,6 +185,14 @@ class ScalarPropertyDataset:
             )
         interpolator = PchipInterpolator(self.x, self.y, extrapolate=False)
         result = interpolator(T)
+
+        if self.extrapolation == "linear_to_limit":
+            # PchipInterpolator(extrapolate=False) yields NaN past the last knot; fill that band
+            # by continuing the slope of the final tabulated segment.
+            above = T > hi
+            if np.any(above):
+                slope = (self.y[-1] - self.y[-2]) / (self.x[-1] - self.x[-2])
+                result = np.where(above, self.y[-1] + slope * (T - hi), result)
 
         return result if original.ndim > 0 else float(result[0])
 
@@ -157,6 +207,9 @@ class ScalarPropertyDataset:
             "unit_y": self.unit_y,
             "interpolation": self.interpolation,
             "extrapolation": self.extrapolation,
+            "extrapolation_limit_x": (
+                None if self.extrapolation_limit_x is None else float(self.extrapolation_limit_x)
+            ),
             "status": self.status,
             "uncertainty": dict(self.uncertainty),
             "reference": self.reference.to_manifest_dict(),
@@ -266,6 +319,18 @@ def load_property_dataset_yaml(path: Path) -> ScalarPropertyDataset:
             f"got {x.tolist()}"
         )
 
+    if raw["extrapolation"] == "linear_to_limit":
+        if raw.get("extrapolation_limit_x") is None:
+            raise ValueError(
+                f"{path}: extrapolation 'linear_to_limit' requires an 'extrapolation_limit_x' "
+                f"key (the material's physical limit, e.g. its melting point)"
+            )
+        if float(raw["extrapolation_limit_x"]) <= float(x.max()):
+            raise ValueError(
+                f"{path}: extrapolation_limit_x {raw['extrapolation_limit_x']} must lie above "
+                f"the last tabulated point {float(x.max())}"
+            )
+
     ref_raw = raw["reference"]
     for ref_key in ("key", "title", "year"):
         if ref_key not in ref_raw:
@@ -292,6 +357,10 @@ def load_property_dataset_yaml(path: Path) -> ScalarPropertyDataset:
         unit_y=unit_y,
         interpolation=raw["interpolation"],
         extrapolation=raw["extrapolation"],
+        extrapolation_limit_x=(
+            None if raw.get("extrapolation_limit_x") is None
+            else float(raw["extrapolation_limit_x"])
+        ),
         status=raw["status"],
         uncertainty=dict(raw["uncertainty"]),
         reference=reference,

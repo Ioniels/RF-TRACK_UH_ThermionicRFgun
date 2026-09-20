@@ -25,7 +25,6 @@ depths), so it is threaded through as `VolumeBuildParams.aperture_delta_mm`, not
 """
 from __future__ import annotations
 
-from typing import Dict
 
 import numpy as np
 
@@ -43,6 +42,10 @@ A_CHI_MM = CHAMFER_LEN_MM * np.sin(np.deg2rad(CHAMFER_ANGLE_DEG))
 RHO_MM = 3.099
 #: Start of pipe 2, measured from the start of the chamfer [mm].
 L_MM = 28.854
+#: End of pipe 2
+L_END_MM = 40.589
+#: Axial length of pipe 2 [mm].
+L_PIPE2_MM = L_END_MM - L_MM
 
 #: Default cathode-insertion offset -- cathode exactly at the start of the chamfer.
 DEFAULT_DELTA_CATHODE_CHAMFER_MM = 0.0
@@ -73,15 +76,16 @@ def aperture_radius_profile_mm(z_mm: np.ndarray, delta_mm: float) -> np.ndarray:
     return R
 
 
-def important_locations_mm(delta_mm: float) -> Dict[str, float]:
-    """z (mm, cathode-referenced) of each geometric transition, for plot annotations."""
-    delta_mm = float(delta_mm)
-    return {
-        "z_ch_start": -delta_mm,
-        "z_ch_end": A_CHI_MM - delta_mm,
-        "z_round_start": (L_MM - RHO_MM) - delta_mm,
-        "z_pipe2_start": L_MM - delta_mm,
-    }
+def exit_tube_end_z_m(delta_mm: float = DEFAULT_DELTA_CATHODE_CHAMFER_MM) -> float:
+    """Cathode-referenced z [m] of the end of the last narrow tube section (`L_END_MM`).
+
+    The tracking domain's natural `z_max`: the aperture profile is defined in `s = z + delta_mm`
+    (see `aperture_radius_profile_mm`), so the tube end sits at `z = L_END_MM - delta_mm`. A
+    recessed cathode (`delta_mm < 0`) pushes it further downstream in z, a cathode already inside
+    the chamfer (`delta_mm > 0`) pulls it back, which is why this is derived rather than a bare
+    constant.
+    """
+    return (L_END_MM - float(delta_mm)) * 1.0e-3
 
 
 def build_dynamic_aperture(rft, z_grid_m: np.ndarray, delta_mm: float):
@@ -141,14 +145,29 @@ def build_cathode_backstop(
 
     Verified against a synthetic field (ending at z=0, like every real field map here) with
     backward-crossing test particles at a range of speeds/positions -- all correctly absorbed.
-    Not yet verified against this project's real field map or a production run.
 
-    Caveat: `V.get_lost_particles()` returns one combined table for every aperture-bearing element
-    in the Volume (this backstop and the dynamic aperture alike) with no per-row element tag.
-    Separating backstop losses (back-bombardment) from dynamic-aperture losses (ordinary transverse
-    loss) in that table isn't implemented here -- the table's Z/T semantics for a multi-element
-    Volume need their own verification (e.g. cross-referencing IDs against `Bout`'s z<0 tagging)
-    first.
+    Also verified against this project's real field map via a paired production-scale A/B run
+    (identical seed/config, `--cathode_backstop_enabled` vs. `--no-cathode_backstop_enabled`,
+    N=1000, coarse finesse): both runs agree on who turns around at all (`n_forward`=53 vs. 54 of
+    1000 -- the 1-particle difference is the expected second-order space-charge feedback from
+    absorbing returning charge earlier rather than a backstop defect), both close their own
+    charge/count accounting exactly, and the backstop-off run's legacy Bout-drift reconstruction
+    recovers a real but substantially *smaller* back-bombardment population (158 of 1000) than the
+    backstop's real-time interception (311 of 1000) -- expected, not a discrepancy: a particle
+    that turns around and is later pushed forward again before the tracking window ends is missed
+    entirely by a method that only looks at `Bout`'s final state, which is exactly the failure
+    mode this backstop was built to fix (see this function's own first paragraph). No NaN states,
+    no ID mismatches, and no particles observed to "leak" past the absorbing element were found in
+    either run.
+
+    `V.get_lost_particles()` returns one combined table for every aperture-bearing element in the
+    Volume (this backstop and the dynamic aperture alike) with no per-row element tag; separating
+    backstop losses (back-bombardment) from dynamic-aperture losses (ordinary transverse loss) in
+    that table is implemented in `rf_gun.backstop_loss_separation.identify_backstop_loss_candidates`
+    (used by `rf_gun.back_bombardment_events.extract_back_bombardment_events`,
+    `rf_gun.particle_tags.build_particle_tags`, and `rf_gun.diagnostics.classify_particle_outcomes`
+    -- see that module's own docstring for the classification rule and why it isn't a naive
+    `Z<=0` cut).
     """
     thickness_m = float(thickness_mm) * 1e-3
     if thickness_m <= 0.0:

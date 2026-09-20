@@ -89,6 +89,7 @@ def plot_emission_iteration_convergence(result: Any):
     status = "converged" if result.converged else f"not converged ({result.failure_reason})"
     fig.suptitle(f"Emission Fields Iteration convergence -- {status}")
     plt.show()
+    return fig
 
 
 def plot_emission_iteration_waveforms(result: Any, x_index: int = 0, y_index: int = 0):
@@ -160,6 +161,7 @@ def plot_emission_iteration_waveforms(result: Any, x_index: int = 0, y_index: in
     status = "converged" if result.converged else f"not converged ({result.failure_reason})"
     fig.suptitle(f"Emission Fields Iteration waveforms -- {status}")
     plt.show()
+    return fig
 
 
 def plot_emission_iteration_near_cathode(result: Any):
@@ -244,6 +246,7 @@ def plot_emission_iteration_near_cathode(result: Any):
         ax.set_aspect("equal")
 
     plt.show()
+    return fig
 
 
 def plot_emission_iteration_submodel_comparison(cases: Any):
@@ -367,3 +370,4 @@ def plot_emission_iteration_submodel_comparison(cases: Any):
     fig.suptitle("Emission Fields Iteration -- submodel comparison")
 
     plt.show()
+    return fig

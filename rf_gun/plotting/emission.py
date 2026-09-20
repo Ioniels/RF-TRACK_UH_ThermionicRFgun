@@ -84,7 +84,7 @@ def plot_emission_history(
 
     if J_t is not None:
         J_cm2 = np.asarray(J_t) * 1e-4
-        ln1 = axes[1].plot(t_ns, J_cm2, lw=1.9, color="tab:blue", label=r"$J(t)$")
+        axes[1].plot(t_ns, J_cm2, lw=1.9, color="tab:blue", label=r"$J(t)$")
         axes[1].set_ylabel(r"$J\,(\mathrm{A\,cm^{-2}})$")
 
         j_finite = J_cm2[np.isfinite(J_cm2)]

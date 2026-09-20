@@ -174,6 +174,15 @@ class BackBombardmentHeatSource:
     total_incident_energy_J: float
     total_deposited_energy_J: float
     model: str = "BB0_TIO"
+    #: Energy that landed in a square bin the centre-in-disk thermal mask omits and was moved
+    #: to the nearest represented cathode cell. Conserved, but a boundary discretisation
+    #: artefact -- recorded so its size can be judged rather than assumed negligible.
+    rim_reassigned_energy_J_total: float = 0.0
+    rim_reassigned_event_count: int = 0
+    #: Energy dropped because the event carried a non-finite hit position. Never placed in a
+    #: cell: binning a NaN silently pins it to one fixed corner cell.
+    non_finite_position_energy_J_total: float = 0.0
+    non_finite_position_event_count: int = 0
     density_used_kg_m3: float = 0.0
     n_events_included: int = 0
     n_events_excluded: int = 0
@@ -206,7 +215,11 @@ def validate_energy_closure(
     total_escaping = (
         source.escaping_energy_geometric_J_total + source.escaping_energy_below_tio_validity_J_total
     )
-    closure_sum = total_deposited + total_escaping
+    # Energy from events with a non-finite hit position is deliberately never binned. It is a
+    # real sink and must appear in the balance explicitly, otherwise closure fails with a
+    # misleading message that points at the deposition physics instead of the bad input.
+    total_unplaceable = float(source.non_finite_position_energy_J_total)
+    closure_sum = total_deposited + total_escaping + total_unplaceable
     denom = max(abs(total_incident), 1e-30)
     rel_err = abs(closure_sum - total_incident) / denom
     if rel_err > rtol:
@@ -216,6 +229,8 @@ def validate_energy_closure(
             f"deposited={total_deposited:.9e} J, "
             f"escaping_geometric={source.escaping_energy_geometric_J_total:.9e} J, "
             f"escaping_below_tio_validity={source.escaping_energy_below_tio_validity_J_total:.9e} J, "
+            f"non_finite_position={total_unplaceable:.9e} J "
+            f"({source.non_finite_position_event_count} events), "
             f"closure_sum={closure_sum:.9e} J, "
             f"relative_error={rel_err:.3e} (rtol={rtol:.1e}). "
             "See rf_gun.back_bombardment_deposition module docstring for the expected achieved "
@@ -676,8 +691,12 @@ def _build_bb0_tio_heat_source(
     R_floor_um = float(electron_deposition.range_um(tio_validity_floor_keV, rho_kg_m3=rho_used))
 
     # Lateral grid: NxN cells over [-bevel_outer_radius, +bevel_outer_radius] in both x and y (plan
-    # Sec. 6.2/10.2), cells outside the physical disk masked out (never populated, since no event
-    # can land there, but the mask is exposed for later plotting/masking convenience).
+    # Sec. 6.2/10.2). The thermal finite-volume domain uses the conventional centre-in-disk mask.
+    # A physical hit close to the circular rim can nevertheless fall in a Cartesian cell whose
+    # centre is just outside that mask. Such a cell is not assembled by the thermal solver. Below,
+    # those edge hits are conservatively reassigned to the nearest active cell centre. This is an
+    # O(dx) boundary discretisation and, unlike silently ignoring outside-mask tensor entries,
+    # preserves the deposited energy exactly.
     R_max_m = float(geometry.bevel_outer_radius_mm) * 1.0e-3
     n = int(xy_grid_n)
     if n < 1:
@@ -689,11 +708,20 @@ def _build_bb0_tio_heat_source(
     xx, yy = np.meshgrid(centers, centers, indexing="ij")
     rr_mm = np.hypot(xx, yy) * 1.0e3
     cathode_footprint_mask = rr_mm <= float(geometry.bevel_outer_radius_mm)
+    active_lateral_indices = np.argwhere(cathode_footprint_mask)
+    if active_lateral_indices.size == 0:  # defensive; n>=1 and R_max>0 make this unlikely
+        raise ValueError("The cathode footprint contains no active lateral cells.")
+    active_x_m = centers[active_lateral_indices[:, 0]]
+    active_y_m = centers[active_lateral_indices[:, 1]]
 
     layer_thickness_m = np.diff(layer_boundaries_um) * 1.0e-6
     q_layer_J = np.zeros((n, n, n_layers), dtype=float)
     escaping_geometric_total = 0.0
     escaping_below_floor_total = 0.0
+    rim_reassigned_total = 0.0
+    rim_reassigned_count = 0
+    non_finite_position_total = 0.0
+    non_finite_position_count = 0
 
     for i in idx_lab6:
         K_i_keV = K_eV[i] / 1000.0
@@ -717,11 +745,33 @@ def _build_bb0_tio_heat_source(
             E_grid_keV=E_grid_keV,
         )
 
+        # A non-finite hit position cannot be binned: searchsorted(edges, nan) lands past the
+        # end and clips to a fixed corner cell, so the event's whole energy would be deposited
+        # in one arbitrary place. Account it separately instead of misplacing it.
+        if not (np.isfinite(x_hit[i]) and np.isfinite(y_hit[i])):
+            non_finite_position_total += float(incident_energy_J[i])
+            non_finite_position_count += 1
+            continue
+
         ix = int(np.clip(np.searchsorted(edges, x_hit[i], side="right") - 1, 0, n - 1))
         iy = int(np.clip(np.searchsorted(edges, y_hit[i], side="right") - 1, 0, n - 1))
+        if not cathode_footprint_mask[ix, iy]:
+            rim_reassigned_total += float(np.sum(deposited_J))
+            rim_reassigned_count += 1
+            # The event is on LaB6, but its square bin is one of the cut cells omitted by the
+            # centre-in-disk thermal mask. Use the actual hit position to select the closest
+            # represented cathode cell.
+            distance2 = (active_x_m - x_hit[i]) ** 2 + (active_y_m - y_hit[i]) ** 2
+            nearest = active_lateral_indices[int(np.argmin(distance2))]
+            ix, iy = int(nearest[0]), int(nearest[1])
         q_layer_J[ix, iy, :] += deposited_J
         escaping_geometric_total += esc_geom_J
         escaping_below_floor_total += esc_floor_J
+
+    # The thermal solver assembles only cells selected by cathode_footprint_mask, so every joule
+    # passed to it must live in that domain.
+    if np.any(q_layer_J[~cathode_footprint_mask, :] != 0.0):  # pragma: no cover - construction guard
+        raise RuntimeError("Internal error: deposited energy remains outside the cathode footprint mask.")
 
     state_ids = np.unique(np.asarray(events.state_id)[mask_lab6]).astype(np.int32)
 
@@ -736,6 +786,10 @@ def _build_bb0_tio_heat_source(
         escaping_energy_geometric_J_total=float(escaping_geometric_total),
         escaping_energy_below_tio_validity_J_total=float(escaping_below_floor_total),
         excluded_non_lab6_energy_J_total=excluded_non_lab6_energy_J_total,
+        rim_reassigned_energy_J_total=float(rim_reassigned_total),
+        rim_reassigned_event_count=int(rim_reassigned_count),
+        non_finite_position_energy_J_total=float(non_finite_position_total),
+        non_finite_position_event_count=int(non_finite_position_count),
         total_incident_energy_J=total_incident_energy_J,
         total_deposited_energy_J=float(np.sum(q_layer_J)),
         model="BB0_TIO",

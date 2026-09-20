@@ -14,10 +14,10 @@ aperture, using **RF-Track**.
 - Emission can be sampled jointly in space and time, (x,y,t), from the real local RF field at the
   cathode (and, optionally, from a non-uniform cathode temperature profile T(x,y) — e.g. a
   back-bombardment/laser-heating pattern) rather than assumed uniform over the emitting disk.
-- The emitted bunch is accelerated by the cavity's RF field, reconstructed from measured 2D field
-  maps (an r-z cavity view and an x-z waveguide/iris view) by a shared-time-basis phasor fit that
-  preserves each component's measured relative amplitude/phase (see "Field and RF-Track
-  correctness" below).
+- The emitted bunch is accelerated by a compact, qualified axisymmetric E+B artifact prepared
+  once from the cathode-centred 3D Remcom XFdtd E/H volume. The out-of-core treatment fits every
+  saved time sample on one RF basis, converts H to B in vacuum, diagnoses azimuthal modes, and
+  exports the cylindrical m=0 fields used by RF-Track (see "XFdtd field-map preparation" below).
 - Space charge (an explicit PIC engine, with cathode mirror charges) and beam loading (the
   cavity's own R/Q, calibrated from a phase scan) are wired to act on the bunch during transport
   via RF-Track's real `BeamLoadingSW` collective effect — **though a real cross-validation found
@@ -36,22 +36,30 @@ aperture, using **RF-Track**.
   over a configurable RF macropulse, using a validated v2 ray-cast event capture and a Cartesian
   asymmetric thermal solver (see "Back-bombardment and macropulse heating study" below).
 
-Two ways to run the same physics, producing the same kind of output:
+Two ways to run the same tracking physics, producing the same kind of output:
 
 - **`UH_gun_tracking_demo.ipynb`** — the interactive notebook, for exploring a single run.
 - **`run_thermionic_tm010.py`** — a command-line script for scripted runs or SLURM parameter scans.
 
-Both entry points resolve the same shared `rf_gun` pipeline (field preparation → RF-only phase
-calibration → optional emission-field self-consistency → transport → classification → output/
-validation), so a given set of physical settings produces the same physics from either one.
+For code ownership, notebook use, reusable diagnostics and development checks,
+see the [repository guide](docs/repository_guide.md). Expanded notebook equations
+are in the [physics reference](docs/notebook_physics_reference.md).
+
+The expensive source-map treatment is deliberately separate: **`XFdtd_field_map_preprocessing.ipynb`**
+documents the analysis and **`prepare_xfdtd_fieldmap.py`** creates the immutable artifact. Both
+tracking entry points then resolve the same shared `rf_gun` pipeline (verified artifact load →
+RF-only phase calibration → optional emission-field self-consistency → transport → classification
+→ output/validation), so a given artifact and set of physical settings produce the same physics.
 
 ## Scientific scope: validated vs. exploratory
 
 | Capability | Status | Notes |
 |---|---|---|
-| RF field phasor reconstruction | Validated | Shared-time-basis least-squares fit, `phasor_check` diagnostics, no independent per-component renormalization. |
-| Field interpolation outside native support | Validated | Zero field outside the source mesh's convex hull; isolated interior holes repaired via KD-tree nearest lookup only. Diagnostics recorded in `run_config.json`. |
-| RF magnetic field (Bphi) | **Not available** | Source `.mat` maps carry only `TotalField_E_X/Y/Z` — no measured B/H component exists to include. Results are E-only; see "Known limitations." |
+| XFdtd E/H volume reduction | Qualified artifact gate | All E and H snapshots are fitted on one fixed-frequency basis in bounded slabs; H is converted to B only in the guarded vacuum mask. Source, processing and payload digests are recorded and verified before production loading. |
+| RF field outside measured support | Qualified modal extension | The common six-component volume ends at 32.9488 mm. Its below-cutoff pipe tail passes endpoint, decay, phase and missing-voltage gates before the explicitly marked extension to the 40.589 mm tracking end. |
+| RF magnetic field (Btheta/Bz) | Available in production | The new XFdtd volume supplies H. Production uses its cylindrical m=0 B projection with `--rf-magnetic-field artifact`; `zero` is an explicit E-only control. |
+| Absolute RF normalization | Explicit common E/B scaling | The solver fields are recorded at 1.8 MW. Tracking scales every E and B phasor by the same `sqrt(P_target/1.8 MW)` factor; the default and KOA baseline explicitly use 1.0 MW, consistent with the delivered-power and R/Q calculation. |
+| Cylindrical-symmetry approximation | Declared production policy | E and B azimuthal spectra are reported; B is noticeably less axisymmetric. Non-m=0 content is diagnostic, not a qualification veto, and RF-Track still receives only the m=0 projection. |
 | Dynamic transverse aperture R(z) | Validated | Enforced live by RF-Track's own `Aperture_1d`, identical between notebook and script. |
 | Space charge + cathode mirror charge | Validated | Explicit fresh `SpaceCharge_PIC_FreeSpace` engine per run; mirror-charge unit tests and mesh-convergence tests pass, though the *peak* near-cathode field is only mesh/scale-converged to order-of-magnitude (see `rf_gun/emission_iteration.py`'s `field_probe_method` docstring). |
 | RF-Track `BeamLoadingSW` | **Attached correctly, but measured to have no effect** | Constructor uses the sole documented RF-Track 2.7 signature and is verified after construction; a real A/B cross-validation on this gun's geometry found it changes tracked dynamics by an amount indistinguishable from zero (`tests/test_beam_loading_cross_validation.py`). |
@@ -63,6 +71,7 @@ validation), so a given set of physical settings produces the same physics from 
 | Macropulse heating (`L2_one_way`/`top_hat`) | Exploratory | One qualified RF-period source scaled over an idealized top-hat envelope; no temperature-to-emission or cavity feedback, no measured fill/decay waveform exists yet. |
 | Cathode/holder geometry for back-bombardment | Placeholder | Flat holder boundary; heating claims are restricted to the validated LaB6 footprint and the unknown/holder fraction is reported and gated. |
 | Total hemispherical emissivity | Provisional | `DEFAULT_TOTAL_HEMISPHERICAL_EMISSIVITY = 0.8`, a literature order-of-magnitude value, not a measured LaB6 dataset. |
+| LaB6 `cp`/`k` above the tables | Extrapolated with a warning | Both continue their last tabulated segment from 2000 K to the 2483 K melting point (`extrapolation: linear_to_limit`), warning each time; past melting both still fail hard, since the solid-phase model genuinely stops being defined there. Before this, a <0.3 K overshoot past the last knot killed all 10 KOA Study IV macropulse cases. |
 | Mount thermal boundary | Named simplification | Adiabatic (zero contact conductance) by default; a uniform `contact_h_W_m2K` is a declared simplification, not a claim of azimuthal symmetry. |
 
 Absolute cathode temperatures, back-bombardment power, and any quantity depending on the items
@@ -73,16 +82,16 @@ absolute values.
 ## Conventions
 
 - **Coordinates:** the cathode emitting surface is `z = 0`; `z > 0` is the downstream/vacuum side
-  the beam is accelerated into. Transverse `x`, `y` are Cartesian (not assumed axisymmetric) at the
-  cathode, even though the RF field map itself is axisymmetric.
+  the beam is accelerated into. The XFdtd-to-beam transform and cathode-centred origin are stored
+  in the artifact. Transverse `x`, `y` remain Cartesian for particles and cathode physics; only the
+  RF field supplied to RF-Track is projected to cylindrical m=0.
 - **Electron charge:** `q = -1` (elementary charge sign convention used throughout RF-Track
   `Bunch6dT` construction); `rf_gun.constants.q_e` is the positive elementary charge magnitude.
-- **RF phasor:** a complex phasor `E(r,z)` such that the instantaneous field at absolute phase
-  `phi` (degrees) is `Re{E(r,z) * exp(j*deg2rad(phi))}`; every component (`Er`, `Ez`, real and
-  imaginary parts) shares one fitted time basis (see "Field and RF-Track correctness").
-- **Radial field sign:** `Er = sign(x) * Ex` on the XY sensor plane, so a positive `Er` points away
-  from the axis at `x>0` and toward it at `x<0`, matching a physically continuous radial field
-  through `x=0`.
+- **RF phasor:** the artifact uses `Re(F exp(+i 2 pi f (t-t_ref)))`; every E and H component is
+  fitted at the same frequency/reference time before cylindrical projection, preserving their
+  relative amplitude and phase.
+- **Cylindrical vectors:** positive `Er` points away from the axis and positive `Btheta` follows
+  the right-handed beam-frame convention. Axis regularity is enforced (`Er=Btheta=0` at `r=0`).
 - **Deflection current polarity:** `Bx(z) = B_pk_per_A_T * I`; a positive `deflection_current_A`
   gives a positive `Bx`, with `sign` following `I` directly (`rf_gun.deflection_field`).
 - **Surface-normal convention (back-bombardment):** `n_in` points from vacuum into the struck
@@ -95,17 +104,30 @@ absolute values.
 
 ## Field and RF-Track correctness
 
-- **Phasor reconstruction** (`rf_gun.phasor.build_iq_phasor`/`build_crest_phasor`): fits `Er`/`Ez`
-  (real and imaginary) on one shared time basis, never independently renormalizing a component to
-  its own peak — preserving the measured `Er/Ez` ratio. `phasor_check` reports peak/RMS
-  reconstruction error, phase lag, and independent frequency estimates (FFT, zero-crossing,
-  sinusoid fit) as a diagnostic, not merely a plot.
-- **Interpolation** (`rf_gun.phasor.build_field_interpolation_context`/`interp_cfield`): the source
-  Delaunay triangulation and hull-membership test are built once and reused across every field
-  component sharing a grid. Outside the native convex hull the field is exactly zero (never
-  nearest-neighbor-extrapolated).
-- **Magnetic field:** the raw `.mat` sensor files expose only `TotalField_E_X/Y/Z` (confirmed by
-  direct inspection of every top-level key) — no B/H component in these files for now.
+- **Phasor reconstruction:** the XFdtd reducer fits all saved E and H samples at the solver drive
+  frequency on one shared convention, without per-component peak normalization. Residual, drift
+  and phase diagnostics are stored in the artifact report.
+- **Vacuum and metal:** staggered Yee components are collocated before projection. The analytic
+  aperture plus guard cells define the vacuum-quality region; fields are zero in metal, and H is
+  converted to B with `B=mu0 H` only for vacuum samples.
+- **Axisymmetry:** Fourier-mode diagnostics retain the evidence that the magnetic field is less
+  axisymmetric than the electric field. This is shown in the preprocessing notebook, while the
+  production contract deliberately exports only cylindrical-vector m=0 (`Er`, `Ez`, `Btheta`,
+  `Bz`) for RF-Track.
+- **Artifact integrity:** `run_thermionic_tm010.py --field-artifact ...` accepts only a `qualified`
+  artifact, verifies its complete payload digest, and takes the frequency, r/z mesh, aperture
+  profile and E/B phasors from it. `--rf-magnetic-field zero` is retained solely as a controlled
+  E-only comparison. The ordinary loader additionally requires the `modal` tail variant; a
+  zero-tail artifact is accepted only with explicit `--field-tail-policy zero-control`.
+- **Power normalization:** the artifact preserves the solver's absolute 1.8 MW normalization.
+  `--rf-forward-power-w` applies one common square-root power factor to `Er`, `Ez`, `Btheta`, and
+  `Bz`. The same requested forward power is then used for delivered-power and BeamLoadingSW/R/Q
+  calibration, preventing field amplitudes and reported RF parameters from referring to different
+  powers. The historical `--bl_p_fwd_w` spelling remains a compatibility alias.
+- **Legacy path retired:** omitting `--field-artifact` is now a hard error. The planar `.mat`
+  files contain E only and are not a qualified input, so falling back to them silently would
+  produce an E-only run against unqualified data. `--allow-legacy-mat-fieldmap` is the explicit
+  opt-in if that path is ever needed.
 - **`BeamLoadingSW`:** constructed with the single documented RF-Track 2.7 constructor,
   `BeamLoadingSW(SWS, Q, r_Q, Ncells, mass, q, tinj)`.
 - **Volume element ordering:** `V.set_s0()`/`set_s1()` are called before the dynamic
@@ -113,6 +135,59 @@ absolute values.
 - **RF-only phase calibration** (`rf_gun.simulation.run_phase_scan`,
   `rf_gun.rf_params.PhaseCalibrationResult`): the calibration source is genuinely on-axis and cold
   (`x=y=px=py=0` for every particle, negligible charge — `build_bunch_on_axis_cold`).
+
+## XFdtd field-map preparation
+
+> `docs/upgrade_2026_09_axisymmetric_eb.md` records what this upgrade changed, which earlier
+> results it invalidates, and what is still open. Read it before comparing against any result
+> produced under `KOA results/`.
+
+The raw `field_maps/cavity_E_H_full_volume.h5` file is 24.8 GB, so neither production tracking
+nor the main notebook reads it. The dedicated preprocessing code streams bounded slabs, extracts
+important cross-sections, fits the E/H time series, checks mesh/origin/orientation, Maxwell and
+axis regularity diagnostics, quantifies azimuthal modes, applies the physical-vacuum mask, and
+writes `field_maps/cavity_axisymmetric_m0_rftrack.h5` atomically with source/configuration/payload
+digests.
+
+```bash
+python prepare_xfdtd_fieldmap.py \
+  --source field_maps/cavity_E_H_full_volume.h5 \
+  --output field_maps/cavity_axisymmetric_m0_rftrack.h5 \
+  --tail-policy modal \
+  --fill-correction single-pole --fill-start-time-ns 0
+```
+
+The common six-component measured support ends at `z=32.9488 mm`, 7.6402 mm before the physical
+tracking end. This is already deep in the exit-pipe evanescent tail: at the endpoint the maxima are
+0.1431% of the map peak for E and 0.0207% for B, while time-averaged energy per unit length is
+`4.02e-8` of its peak. The fitted decay length is 1.052860 mm versus 1.053112 mm for below-cutoff
+circular-waveguide TM01 (`R^2=0.9999694`); the qualified modal extension to `z=40.589 mm` adds
+approximately 0.0113% of the measured on-axis voltage integral. The archived v1 values
+were 0.1965 kV and 1736.56 kV; the current JSON report contains the updated amplitudes. The extension is
+explicitly marked in provenance, and a zero-tail artifact can be written in the same source pass
+for a regression control. That control cannot be selected accidentally: production defaults
+require artifact variant `modal`; tracking the control requires `--field-tail-policy zero-control`
+and its distinct digest.
+
+**The exported frames are not a converged solution.** Raw traces confirm approximately
+0.25% amplitude growth per RF cycle. The original 2.127810x multiplier assumed an ideal
+step-driven cavity and used the run end instead of the phasor reference time. Correcting the
+reference alone gives 2.098003x; using signed E/H amplitude growth gives **2.087319x** in the
+full-source rebuild. The active maps therefore have **1.903% lower field amplitude** than the
+previous corrected maps. This remains a provisional model, not an independently measured
+steady-state calibration. Previous artifacts are preserved in `field_maps/fill_audit_v1_archive/`.
+
+`--fill-correction auto` now preserves the samples and produces an analysis-only artifact for
+this transient. Select `--fill-correction single-pole --fill-start-time-ns 0` to make the existing
+approximation explicit, or `--fill-correction off` for a raw-amplitude tracking control. The
+notebook shares the same treatment. Policy, assumptions and applied factor enter the processing
+digest. The nominal 1.8 MW port-power convention remains unverified. See
+[the fill audit](docs/field_map_fill_audit.md) for evidence and reproduction commands.
+
+`XFdtd_field_map_preprocessing.ipynb` presents the source metadata, cross-sections, time fit,
+E-versus-B symmetry spectra, quality checks, selected m=0 maps and artifact round trip. In
+particular it preserves the magnetic non-axisymmetry as a visible diagnostic; it does not change
+the declared axisymmetric RF-Track production approximation.
 
 ## Self-consistent cathode emission
 
@@ -205,6 +280,23 @@ absolute values.
 - The cathode mirror models a single conducting plane at the cathode, not conducting boundary
   conditions on the rest of the cavity (chamfer, main wall, exit nose, pipe 2) — the dynamic
   aperture is a particle-loss geometry, not a Poisson boundary condition.
+- The tracking domain ends at the downstream face of the last narrow tube section
+  (`rf_gun.aperture.L_END_MM = 40.589 mm` from the start of the chamfer, shifted by
+  `--delta_cathode_chamfer_mm`; `rf_gun.aperture.exit_tube_end_z_m`). This is where the modelled
+  structure stops, so it is where `Bout`/`s_out` and the last screen sit. It replaces an earlier
+  `λ/4 + 7.5 mm = 33.742 mm` rule, which had no geometric meaning and stopped every run 6.8 mm
+  short of the real exit. `--z_max` overrides it; `--ext_zmax` (default 0) extends past it, and
+  the runner warns when either does, since beyond that face there is no channel for the field map
+  to represent and the dynamic aperture keeps applying a tube radius that no longer exists.
+  The measured six-component XFdtd volume itself ends at 32.9488 mm; production artifacts bridge
+  only the remaining 7.6402 mm with the qualified, provenance-marked evanescent modal tail
+  described above.
+- With `--n_screens N`, the last screen sits exactly on that face, so every run carries an
+  exit-face diagnostic. `Bout` does **not**: it is a fixed-*time* snapshot at `--t_max_mm`
+  (default 2000 mm/c), and tracking does not stop at the domain end — surviving particles drift
+  field-free to roughly 1–1.5 m. Use the last screen, not `Bout`, for exit-beam emittance, energy
+  spread and transmission; `s_out_m` in the openPMD metadata names the end of the structure, not
+  the position of the particles in the file.
 - An emission model gives the material's *available* supply current; the self-consistent fields
   (via the Emission Fields Iteration) determine how much of it is actually extracted and
   transported. A strongly virtual-cathode-limited regime may need online emission inside RF-Track's
@@ -216,12 +308,12 @@ absolute values.
 
 ## Environment and installation
 
-- Python 3.12 (the tracked venv was built with `python3.12 -m venv .venv`).
+- Python 3.12 in the local `.venv`; the environment itself is not versioned.
 - RF-Track 2.7.0, from PyPI: `pip install rf-track==2.7.0` (CERN-licensed; requires the PyPI index
   to be reachable/authorized for your account). `python -c "import RF_Track; print(RF_Track.version)"`
   should print `2.7.0` after activation.
-- Remaining dependencies: `pip install numpy scipy matplotlib pandas h5py ipykernel ipywidgets
-  pytest openpmd-beamphysics pyyaml tqdm psutil requests`.
+- Project, notebook and test dependencies: `python -m pip install -e '.[notebook,test]'`.
+  `pyproject.toml` declares the NumPy 2.x minimum and includes the material datasets in builds.
 - `RF_TRACK_NO_UPDATE_CHECK=1` and an explicit `RF_TRACK_NUMBER_OF_THREADS` are recommended
   environment variables for batch/cluster use (`rf_gun.config.set_thread_environment` sets the
   latter, plus matching `OMP`/`OPENBLAS`/`MKL`/`NUMEXPR` thread variables, consistently for every
@@ -234,22 +326,38 @@ absolute values.
 ├── .gitignore
 ├── README.md
 ├── UH_gun_tracking_demo.ipynb
+├── pyproject.toml                         # packaging + pytest testpaths/pythonpath settings
+├── XFdtd_field_map_preprocessing.ipynb    # dedicated 24.8 GB volume analysis/qualification
+├── prepare_xfdtd_fieldmap.py              # out-of-core H5 -> qualified compact artifact
 ├── run_thermionic_tm010.py                # thin CLI: single-configuration production run
 ├── run_back_bombardment_macropulse.py     # thin CLI: back-bombardment/macropulse study
-├── KOA_slurm_scripts/                     # the five production array-job scripts (see below)
+├── verify_koa_run.py                      # fail-closed completion/identity gate for the launchers
+├── docs/
+│   ├── field_map_pipeline.md              # artifact contract, tail policy, fill correction
+│   └── upgrade_2026_09_axisymmetric_eb.md # what the E+B upgrade changed and what it invalidates
+├── tools/                                 # standalone studies; nothing in production depends on them
+│   ├── thermal_bin_convergence.py         # 20/10/5 ns thermal macro-bin convergence pilot
+│   └── build_grid_convergence_artifacts.py  # builds the Study I field-grid artifact ladder
+├── KOA_slurm_scripts/                     # the six production array-job scripts (see below)
 │   ├── study_i_medium_field_grid.slurm
 │   ├── study_i_bis_fine_field_grid.slurm
 │   ├── study_ii_finesse.slurm
 │   ├── study_iii_temperature.slurm
+│   ├── study_iii_bis_temperature_1500_1700K.slurm
 │   └── study_iv_deflection_macropulse.slurm
 ├── field_maps/
-│   ├── XYplanarSensorData.mat
-│   └── YZplanarSensorData.mat
-├── tests/                       # pytest suite (untracked locally, see "Running tests")
+│   ├── cavity_E_H_full_volume.h5           # local 24 GB XFdtd source, not tracked
+│   ├── cavity_axisymmetric_m0_rftrack.h5   # generated qualified tracking artifact
+│   ├── cavity_axisymmetric_m0_zero_tail_control.h5  # explicit zero-tail A/B control
+│   ├── uncorrected_control/                # same reduction without the fill correction
+│   ├── grid_convergence/                   # Study I ladder (empty until built; see tools/)
+│   └── XYplanarSensorData.mat / YZplanarSensorData.mat  # retired legacy E-only inputs
+├── tests/                       # pytest regression and physics-quality suite
 └── rf_gun/
     ├── config.py                   # connects to RF-Track, thread-environment setup
     ├── constants.py                # physical constants, unit conversions
     ├── helpers.py                  # small numeric/formatting utilities
+    ├── fieldmaps/                  # RF-Track-independent H5 reduction/quality/artifact code
     ├── rf_params.py                # R/Q, delivered power, effective length, PhaseCalibrationResult
     ├── field_io.py                 # reads field maps, mesh statistics
     ├── phasor.py                   # RF phasor construction, interpolation, phasor_check
@@ -286,24 +394,24 @@ absolute values.
 ```
 
 `.venv/` (the Python environment, including the compiled RF-Track binding) and local-only/generated
-folders (`outputs/`, `Koa outputs/`, `analysis_Koa/`, `manual_references/`, `archive/`, `logs/`,
+folders (`outputs/`, `KOA results/`, `Koa outputs/`, `analysis_Koa/`, `manual_references/`,
+`archive/`, `logs/`,
 `Upgrade_history/`) are intentionally outside this layout — see `.gitignore`.
 
 ## Core workflow
 
-1. Load the XY/YZ field maps and compute envelope diagnostics.
-2. Build the shared-time-basis RF phasor and interpolate it onto an (r, z) grid (zero outside the
-   native convex hull).
-3. Run the RF-only phase scan (on-axis, cold source; every other physics switch off) to calibrate
+1. Load and fully digest-verify the qualified compact field artifact; its frequency, mesh,
+   aperture profile, modal-tail provenance, and m=0 E/B phasors are immutable run inputs.
+2. Run the RF-only phase scan (on-axis, cold source; every other physics switch off) to calibrate
    effective voltage and R/Q; abort if the calibration is not valid.
-4. Optionally run the Emission Fields Iteration self-consistency study near the cathode.
-5. Build the thermionic bunch (on-axis, or jointly in (x,y,t) — see "Self-consistent cathode
+3. Optionally run the Emission Fields Iteration self-consistency study near the cathode.
+4. Build the thermionic bunch (on-axis, or jointly in (x,y,t) — see "Self-consistent cathode
    emission" above) and track it through RF-Track (space charge and cathode mirror charges, beam
    loading, and the deflection magnet are each independently switchable; the dynamic transverse
    aperture is always enforced).
-6. Tag particles forward/backward/lost and compute one final per-screen and whole-beam
+5. Tag particles forward/backward/lost and compute one final per-screen and whole-beam
    classification, reused by every downstream count/plot/output.
-7. Save figures, per-screen and exit-beam distributions, and validate the run before writing a
+6. Save figures, per-screen and exit-beam distributions, and validate the run before writing a
    completion marker (see "Output schema and provenance" below).
 
 ## Back-bombardment and macropulse heating study
@@ -408,26 +516,48 @@ script: pass `--output`, or let it auto-name the same way). Inside:
   screen (full, unfiltered phase space). There is no separate `openpmd/` directory and no
   `beam_data.npz` — those were retired as redundant duplicates of exactly this content.
 - `figures/` — every diagnostic figure, each with its underlying data saved alongside so a figure
-  can be reproduced later without re-running the simulation.
+  can be reproduced later without re-running the simulation. Each figure is written as `.png`
+  (always) and `.eps` (only if the render comes in at or under 15 MB —
+  `rf_gun.plotting.figure_io.EPS_MAX_BYTES`). The EPS backend is pure vector, so a
+  many-particle scatter or a fine field-map pcolormesh produces a file tens of MB large and slow
+  to open, for no gain over the PNG; those are skipped with a note in the log, and the PNG is
+  written regardless. Every figure in the project goes through one writer
+  (`rf_gun.plotting.figure_io.save_figure_formats`), so this rule holds for the notebook, both
+  runner scripts and the screen-frame batch alike.
 - `run_config.json` — every input parameter (cavity/field-map, solver/finesse, cathode/emission,
   beam-loading, aperture, deflection, screen/particle-count settings) plus the values derived from
   them before tracking starts (grid sizes, phase-scan crest, `Veff`, `R/Q`, effective length, and
-  `field_provenance`: source map hashes/mesh stats, phasor/interpolation diagnostics, and the
-  E-only magnetic-field-source status) — no per-particle or per-time-sample data anywhere in it.
+  `field_provenance`: artifact file/payload/source/processing digests, quality report, support,
+  grid ownership and selected artifact/zero magnetic-field mode) — no per-particle or
+  per-time-sample data anywhere in it.
 - `run_results.json` — everything the run *found*: `R/Q`/`Veff` actually used, peak current and
   current density, the beam-property curves vs `z` (transmission, Twiss, beam size — one row per
   screen), particle classification, aperture and back-bombardment summaries, the exit-beam
   summary, and the paths to every other output file.
 - `validation.json` — a machine-readable pass/fail report: phase-calibration validity, particle-ID
   uniqueness in `Bout`, finiteness of every derived RF parameter, the field-interpolation
-  outside-hull fraction against a threshold, and (when run) Emission Fields Iteration convergence.
-  `status` is `"ok"` only if every check passed.
-- `.run_complete` — written **only** when `validation.json`'s status is `"ok"`; its absence means
-  at least one physics/validation gate failed, regardless of whether the process otherwise exited
-  without a Python exception. SLURM scripts check for this file and fail the job if it is missing.
-- `back_bombardment_energy_map.npz` / `back_bombardment_events.h5` — the legacy far-downstream
-  reconstruction (see "Back-bombardment and macropulse heating study" above for the canonical v2
-  path, which supersedes this for production heating claims).
+  outside-hull fraction against a threshold, requested B0/Bout, screen, figure, lost-particle and
+  event products, and (when run) Emission Fields Iteration convergence/data. `status` is `"ok"`
+  only if every applicable check passed.
+- `.run_complete` — structured completion record written **only** when `validation.json`'s status
+  is `"ok"`; schema v2 binds the run family/tags, canonical configuration, field file and payload
+  identities, E/B power scaling and tail policy, plus SHA-256 digests of every file present in the
+  completed run bundle (including `run_config.json`, `run_results.json`, `validation.json`, the v2
+  event HDF5, figures, distributions and diagnostics). Scheduler-owned `resource_usage.txt` is the
+  one scripted-run exception because `/usr/bin/time` finishes it only after the driver exits; it is
+  deliberately excluded from the marker. The scripted entry point also binds
+  its complete parser-resolved request. The notebook has no CLI parser, so it records its explicit
+  notebook identity/tags and canonical hardcoded/derived parameter digest instead; it uses the same
+  required-output and field-identity hash contract. Its absence means at least one
+  physics/validation gate failed, regardless of whether the process otherwise exited without a
+  Python exception. SLURM scripts validate the record and every bound output with
+  `verify_koa_run.py`; a plain timestamp, malformed/older schema, changed artifact, changed
+  code/configuration, or altered/missing output is never accepted as complete.
+- `back_bombardment_events.h5` — the canonical, marker-bound v2 cathode-backstop/ray-cast event
+  source consumed by `--source-mode load_run` and the macropulse study.
+- `back_bombardment_energy_map.npz` — the optional legacy far-downstream reconstruction retained
+  for comparison only; it is not a production heating source and is not part of the completion
+  contract.
 - `lost_particle_diagnostics.json` — particles RF-Track reports as lost during tracking.
 - `emission_iteration.npz` — when `--emission-field-iteration` is on: the full (x,y,t)-resolved
   field/current history across outer iterations (too large for `run_results.json`, which instead
@@ -438,37 +568,122 @@ plus `os.replace`), so a killed/crashed write can never leave a half-written fil
 identical in shape from either entry point. `run_dir` is recorded as given (not resolved to an
 absolute, machine-specific path), so metadata stays portable across machines/accounts.
 
-## Field-grid resolution vs. solver finesse
+The production script/SLURM path is the only automatic-resume path. The interactive notebook never
+uses an existing marker as a cache hit: it requires a newly created, previously nonexistent run
+directory, invalidates the marker before tracking, and writes a fresh schema-v2 record only after
+all current validation gates and required outputs exist. Thus both entry points fail closed, while
+only the scripted path compares a saved parser/scheduler/code identity before deciding to skip work.
 
-These are two independent axes, and neither overrides the other:
+## Field-artifact resolution vs. solver finesse
 
-- **Field-grid resolution** (`--dr_um`/`--dz_um`, default `4.0`/`13.0`): the physical spacing of
-  the interpolated `(r,z)` field grid. An explicit value always wins; selecting a `--finesse` tier
-  never touches it (`rf_gun.finesse_presets.finesse_preset_dict` deliberately excludes these keys).
+These remain independent, but the field mesh is now fixed before tracking:
+
+- **Field-artifact resolution** (`prepare_xfdtd_fieldmap.py --dr-um/--dz-um`): the physical
+  spacing of the compact `(r,z)` E/B artifact. Production tracking uses that grid verbatim.
+  Runner flags `--dr_um`/`--dz_um` apply only to the legacy planar-MAT compatibility path and are
+  ignored when `--field-artifact` is supplied.
 - **Solver finesse** (`--finesse {extra_fine,fine,medium,coarse}`): every *numerical-integration*
   resolution setting at once — field-map integration step counts, ODE tolerance, and the
   space-charge/beam-loading/phase-scan solver step sizes. A trade between run time and numerical
-  precision, independent of field-grid resolution and of every physical setting (particle/screen
+  precision, independent of artifact resolution and of every physical setting (particle/screen
   counts, cathode temperature, cavity R/Q, deflection current, which physics is switched on).
-  `coarse` matches the notebook's defaults; the notebook has the equivalent `NOTEBOOK_FINESSE_TIER`
+  `medium` matches the notebook's defaults; the notebook has the equivalent `NOTEBOOK_FINESSE_TIER`
   variable near the top of its configuration cell.
 
 ## KOA SLURM production suite
 
-`KOA_slurm_scripts/` contains five array-job scripts, each calling the same
+`KOA_slurm_scripts/` contains six array-job scripts, each calling the same
 `run_thermionic_tm010.py` "everything ON except deflection" production profile (RF field with the
 validated phase calibration, physical aperture + cathode backstop with v2 event capture, fresh-PIC
 space charge, cathode mirror charge, `BeamLoadingSW` attached, the converged Emission Fields
 Iteration source, screens, full HDF5/JSON output, and figures) and overriding only the study
-variable(s), at `N_PARTICLES=300000` and a common `--seed 42`:
+variable(s), at `N_PARTICLES=300000` and a common `--seed 42`. Studies II-IV pass the checked
+`cavity_axisymmetric_m0_rftrack.h5` with `--rf-magnetic-field artifact`; override its location
+with `RFTRACK_FIELD_ARTIFACT`. Studies I/I-bis instead require one qualified artifact per actual
+mesh under `RFTRACK_FIELD_ARTIFACT_DIR`:
 
-| Script | Array | Varies | Finesse | Field grid |
+| Script | Array | Varies | Finesse | Field artifact |
 |---|---|---|---|---|
-| `study_i_medium_field_grid.slurm` | 0-9 | `dr_um`/`dz_um` (geometric ladder, index 1 = current default) | medium | varies (the study variable) |
-| `study_i_bis_fine_field_grid.slurm` | 0-9 | same ladder | fine | varies |
-| `study_ii_finesse.slurm` | 0-3 | `coarse,medium,fine,extra_fine` | varies (the study variable) | fixed 4/13um |
-| `study_iii_temperature.slurm` | 0-20 | `T_K = 1600 + 10*task_id` (1600-1800K) | fine | fixed 4/13um |
-| `study_iv_deflection_macropulse.slurm` | 0-9 | deflection current (0.0-1.0A, 10 equal steps) | fine | fixed 4/13um |
+| `study_i_medium_field_grid.slurm` | 0-9 | artifact field-grid ladder | medium | distinct resolution-matched artifact per task |
+| `study_i_bis_fine_field_grid.slurm` | 0-9 | artifact field-grid ladder | fine | distinct resolution-matched artifact per task |
+| `study_ii_finesse.slurm` | 0-3 | `coarse,medium,fine,extra_fine` | varies (the study variable) | fixed qualified artifact |
+| `study_iii_temperature.slurm` | 0-20 | `T_K = 1600 + 10*task_id` (1600-1800K) | fine | fixed qualified artifact |
+| `study_iii_bis_temperature_1500_1700K.slurm` | 0-20 | `T_K = 1500 + 10*task_id` (1500-1700K) | fine | fixed qualified artifact |
+| `study_iv_deflection_macropulse.slurm` | 0-9 | deflection current (0.0-1.0A, 10 equal steps) | fine | fixed qualified artifact |
+
+The old per-run `--dr_um/--dz_um` tracking controls are retired: an immutable artifact owns its
+mesh. Study I/I-bis therefore map every task to
+`field_maps/grid_convergence/cavity_axisymmetric_m0_dr<DR>um_dz<DZ>um_rftrack.h5` (base directory
+overridable with `RFTRACK_FIELD_ARTIFACT_DIR`) and perform full qualification/payload verification
+plus an exact check of the stored `r/z` spacing before creating an output directory. A missing or
+wrongly spaced task artifact fails rather than running duplicate physics under a different label.
+
+**Paths.** The scripts assume this KOA install, and nothing else in the repo does:
+
+```
+/home/nbidault/rf-track/                              repo root
+/home/nbidault/rf-track/run_thermionic_tm010.py       transport driver
+/home/nbidault/rf-track/run_back_bombardment_macropulse.py
+/home/nbidault/rf-track/verify_koa_run.py              completion/identity verifier
+/home/nbidault/rf-track/rf_gun/                       the Python package
+/home/nbidault/rf-track/KOA_slurm_scripts/            the scripts themselves
+/home/nbidault/rf-track/field_maps/cavity_axisymmetric_m0_rftrack.h5
+/home/nbidault/venvs/rftrack/bin/activate             the virtualenv
+```
+
+Override with `RFTRACK_REPO_DIR` / `RFTRACK_VENV_ACTIVATE` to run from a clone anywhere else, and
+with `RFTRACK_FIELD_ARTIFACT` when the qualified artifact is stored elsewhere. The
+root is located by searching `$SLURM_SUBMIT_DIR`, its parent, then that default path, accepting
+only a directory holding **both** `run_thermionic_tm010.py` and `rf_gun/__init__.py`; `$REPO_DIR`
+is then prepended to `PYTHONPATH` so `import rf_gun` never depends on the working directory. It
+cannot be derived from the script's own path — SLURM executes a spooled copy on the compute node,
+so `$0` points into `/var/spool/slurmd/`, and `SLURM_SUBMIT_DIR` is the only submit-side location
+SLURM preserves.
+
+**Reading the `.err` file.** RF-Track writes several alarming-but-benign lines to stderr from its
+C++ side — most notably `error: autophase failed to find an on-crest accelerating phase.` Under
+Jupyter these are invisible (IPython does not capture an extension module's C-level fd 2), so they
+appear for the first time when SLURM captures fd 2 into a `.err` file, and read as a crashed run.
+They are not: **every one of the 53 completed runs in the first KOA batch emitted that autophase
+line as the first line of its `.err` file and finished normally.** It is RF-Track's own crest
+finder, whose result this project never uses — the field map's phase and reference time are set
+explicitly (`FM.set_phid()` + `FM.set_t0(0.0)`) from the run's own RF-only phase-scan calibration.
+`run_thermionic_tm010.py` now prints a labelled note to stderr at startup so it lands directly
+above the lines it explains. **A run's success signal is `.run_complete` in its output directory,
+not the contents of `.err`.**
+
+**Work function — every script uses the same treatment.** Each passes `--phi_eff_ev`, resolved at
+submit time from `rf_gun.work_function_models.LIU_2017_PHI_EFF_EV` (2.66 eV — Liu et al. 2017,
+single-crystal LaB6(100), this repo's recommended baseline) rather than duplicating a literal,
+together with `--work-function-temperature-model linear_tcwf` (Model 1: that anchor carried across
+temperature by Bulyga & Solonovich's TCWF slope, α = 1.8e-4 eV/K about T_ref = 1773 K). The T-model
+overrides the scalar at run time and takes its own `phi_ref_eV` from the very same constant, so the
+two agree by construction and `--phi_eff_ev` survives in `run_config.json` as the recorded
+zero-slope anchor. Over the operating window: 2.611 eV at 1500 K, 2.629 at 1600, 2.638 at 1650,
+2.647 at 1700 — i.e. ×1.46 down to ×1.09 the emitted current of a flat 2.66 eV.
+
+This matters because `run_thermionic_tm010.py`'s own `--phi_eff_ev` default is **2.1 eV**, which is
+not anchored to anything here, and at 1650 K it gives ~51× the emitted current density of 2.66 eV
+(~420 A/cm² off the 1.4 mm flat face, roughly 40× what LaB6 actually delivers). Every KOA batch
+predating this change silently inherited that default, so results in `outputs/runs/study_i*`,
+`study_ii_*`, `study_iii_temperature/` and `study_iv_*` are 2.1 eV constant-φ runs and are **not**
+comparable case-for-case against anything produced afterwards. Change the work-function treatment
+in all six scripts or none — mixing them silently breaks cross-study comparability.
+
+Study III-bis is the temperature scan re-run over the physically realistic LaB6 window at the
+corrected work function (~1.6 A/cm² at 1500 K to ~18.7 A/cm² at 1700 K). It is not a subset of
+Study III's output despite the overlapping 1600–1700 K range — only the temperature window and the
+work function differ, but the latter changes the emitted charge by ~51×.
+
+Study IV's stage 1 is resumable so a failed stage 2 can be retried without repeating hours of
+tracking. Reuse requires an exact match of all current parser-resolved transport arguments,
+run-family/stable scan tags, git/code and RF-Track identity, field file/payload, magnetic/tail
+modes, common power normalization, validation, and hashed required outputs. Stage 2 has its own
+atomic structured marker binding its fully resolved thermal request and output hashes to the exact
+transport marker/config/event-HDF5 hashes. A changed event file, thermal bin, material setting,
+transport, or code therefore invalidates reuse. The existing
+`study_iv_deflection_macropulse/` tree is 2.1 eV and predates the artifact identity, so it will be
+rejected — move it aside or point the study at a fresh subtree before resubmitting.
 
 Study IV additionally enables the deflection UserField and forces single-threaded tracking for
 every current including 0A (the element stays attached at zero amplitude, isolating current
@@ -478,13 +693,19 @@ separate subdirectory so it cannot overwrite the transport stage's own event fil
 Every script:
 
 - resolves the repository from `SLURM_SUBMIT_DIR` (or fails clearly) rather than a hardcoded path;
+- checks that its selected qualified field artifact exists before activating the expensive run,
+  passes it explicitly, and lets the runner verify qualification and the complete payload digest;
 - activates a documented, overridable venv path (`RFTRACK_VENV_ACTIVATE`) and fails loudly if
   RF-Track is not importable, rather than silently proceeding;
 - validates `SLURM_ARRAY_TASK_ID` before indexing into any per-case list;
 - prints scheduler IDs, resolved case parameters, Python/RF-Track/numpy versions, git commit and
-  clean/dirty state, hostname, and the thread environment before doing any heavy work;
-- writes a unique, deterministic case directory and refuses to overwrite one that already has a
-  `.run_complete` (or, for Study IV's second stage, `.macropulse_complete`) marker;
+  clean/dirty state, a content digest of the active simulation code/launcher, hostname, and the
+  thread environment before doing any heavy work; those identities are persisted in run tags;
+- passes the selected forward power explicitly (`RFTRACK_RF_FORWARD_POWER_W`, default 1 MW) so
+  both field scaling and beam-loading calibration use one visible value;
+- writes a unique, deterministic case directory and skips it only after `verify_koa_run.py`
+  establishes an exact structured-marker identity match. Legacy/plain/malformed/stale markers and
+  pre-existing incomplete directories fail closed and are never overwritten automatically;
 - captures wall time and peak resident memory via `/usr/bin/time -v` into
   `<run_dir>/resource_usage.txt`;
 - fails the SLURM job (non-zero exit) if the expected completion marker is missing, so a
@@ -495,16 +716,22 @@ body runs): run `mkdir -p logs outputs/runs` once before submitting any of these
 
 **The resource requests (`--cpus-per-task`, `--mem`, `--time`) and array concurrency limits
 (`%N`) in every script are placeholders.** They have not been tuned against real KOA pilot runs
-(this repository has no cluster access to do so) — measure your own from one coarse pilot, the
-current 4/13um pilot, and the one finer 3.2/10.4um pilot before submitting a full array, and update
-the scripts with real values. Study IV's `--thermal-bin-ns` (10ns initial production target) is
+(this repository has no cluster access to do so) — measure your own from representative tracking
+pilots before submitting a full array, and update the scripts with real values. Field-artifact
+mesh convergence is a separate preprocessing-plus-tracking comparison as described above. Study
+IV's `--thermal-bin-ns` (10ns initial production target) is
 similarly unvalidated for this study until the mandatory 20/10/5ns pilot convergence comparison
 described in that script's header comment has been run.
 
 Quick single-configuration validation run (not a SLURM script):
 
 ```bash
-python run_thermionic_tm010.py --preset quick
+python run_thermionic_tm010.py \
+  --field-artifact field_maps/cavity_axisymmetric_m0_rftrack.h5 \
+  --rf-magnetic-field artifact \
+  --field-tail-policy modal \
+  --rf-forward-power-w 1.0e6 \
+  --preset quick
 ```
 
 Full option list: `python run_thermionic_tm010.py --help` /
@@ -530,8 +757,24 @@ nonzero *configured* current never produces a plotted (nonzero-looking) field.
 
 ## Known limitations
 
-- **E-only RF field.** No measured or independently-derived magnetic map exists for this cavity;
-  all results omit the RF azimuthal `Bphi`. See "Field and RF-Track correctness."
+- **Axisymmetric RF approximation.** The new volume contains E and H, but the magnetic field is
+  noticeably less axisymmetric than the electric field. Production deliberately tracks the m=0
+  `Er/Ez/Btheta/Bz` projection; discarded modes remain quantified in the preprocessing report and
+  notebook, rather than being silently treated as zero.
+- **Modeled downstream field tail.** The final 7.6402 mm to the 40.589 mm structure end is not in
+  the supplied volume. The production artifact uses a qualified below-cutoff modal extension from
+  the already small field at 32.9488 mm; its approximately 0.0113% contribution to the
+  measured on-axis total is small but modeled, and the zero-tail artifact remains the required
+  regression control.
+- **Absolute field amplitude rests on a provisional fill model.** The saved four-cycle window
+  establishes local growth, but not the actual drive history, Q or final amplitude. The current
+  explicit step model corrects the original epoch and drift-definition errors; it remains
+  conditional. Nonlinear emission, capture and heating mean that relative beam trends can also
+  change with the assumed gradient. A converged, power-calibrated source would retire this.
+- **Tangential-E surface artefact beyond the cathode edge.** For r greater than about 2 mm — in
+  the cathode-to-holder annular gap, outside the 1.6 mm LaB6 edge — `z=0` is not a conductor
+  plane, so the one-sided surface limit is the wrong model there and leaves a spurious tangential
+  field. The emission and back-bombardment surfaces (r <= 1.6 mm) are unaffected.
 - **`BeamLoadingSW` has no measured effect** on tracked dynamics for this gun geometry in this
   RF-Track 2.7.0 binding (confirmed by direct A/B cross-validation). The element is attached
   correctly per the documented API; the finding is about the binding's behavior, not this
@@ -550,6 +793,9 @@ nonzero *configured* current never produces a plotted (nonzero-looking) field.
   information — neither the PIC-probe nor the analytic-image method is mesh/scale-converged for
   the peak near-cathode field.
 - **KOA SLURM resource sizing** is unvalidated placeholder data (see "KOA SLURM production suite").
+- **Stored `KOA results/` predate this upgrade** and were produced on RF-Track 2.7.1. They are
+  superseded rather than a baseline: see `docs/upgrade_2026_09_axisymmetric_eb.md` section 5.
+  Baselines must be local-vs-local.
 
 ## Running tests
 
@@ -570,6 +816,20 @@ event capture/macropulse study validation gates (including the unknown-surface-f
 check), the frozen-source physics attribution helper's structural guarantees, spatially-resolved
 emission sampling, roughness, and momentum sampling. Field-map-dependent tests are skipped
 automatically when `field_maps/` is not present.
+
+The E+B upgrade added coverage for the RF magnetic-field sign convention at the RF-Track boundary
+(`test_rf_magnetic_sign_convention.py`), the fill-transient extrapolation
+(`test_fill_transient_correction.py`), the Yee on-plane surface stencil, fail-closed quality-status
+resolution, relative-path handling in the completion verifier, rim/non-finite deposition
+accounting, and a guard against missing glyphs in the field-map figure. The fill audit adds
+reference-time, signed-growth, model-policy and repeated-scaling checks. Current local status:
+**506 passed, none skipped**. Both notebooks are clean; their previous executed copies were archived.
+The cleanup also checks concurrent JSON writes, shared hashing and matching tail controls;
+legacy-schema tests now create portable fixtures instead of requiring an old local run.
+See the [cleanup record](docs/repository_cleanup.md) for validation scope and preserved backups.
+
+Keep source, tests, packaging metadata and documentation together when committing changes.
+Generated outputs, environments and local audit copies are excluded through `.gitignore`.
 
 ## References
 

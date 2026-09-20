@@ -6,7 +6,8 @@ independent_variable: temperature_K
 temperature_K: [1300, 1400, 1600, 1800, 2000]
 value_W_m_K: [55.5, 51.5, 46.5, 43.0, 40.0]
 interpolation: pchip
-extrapolation: forbidden
+extrapolation: linear_to_limit
+extrapolation_limit_x: 2483  # K, LaB6 melting point
 status: provisional_digitization
 
 uncertainty:
@@ -27,3 +28,10 @@ notes: >
   LaB6_k_Sun_JNST2192728_2023.yaml/.csv, ending at 55.6 W/m/K at 1273 K vs. this dataset's
   55.5 W/m/K at 1300 K) to form the LaB6_UH_recommended_v1 composite k(T) via a single PCHIP fit
   over the combined array (see lab6.py's _build_lab6_k_composite_dataset()).
+
+  Above the last tabulated knot (2000 K) this dataset is linearly continued to the LaB6
+  melting point (2483 K, Kowalczyk & Madey PRST-AB 17, 120402 (2014)). NOTE this continuation
+  is more aggressive than the cp one: k is still falling at ~-1.5 W/m/K per 100 K at the end
+  of the table, so the value at 2483 K (~32.8 W/m/K) is ~18% below the last knot. Monotone
+  and physically plausible, but treat any result that depends on k above 2000 K as carrying
+  materially larger uncertainty than the tabulated band.

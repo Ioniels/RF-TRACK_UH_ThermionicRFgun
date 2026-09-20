@@ -19,7 +19,7 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 import numpy as np
 
 from .constants import KB_EV_PER_K
-from .emission_models import EMISSION_MODEL_NAMES, delta_phi_schottky_eV, evaluate_emission_model
+from .emission_models import delta_phi_schottky_eV, evaluate_emission_model
 
 
 def rd_schottky_analytic_sensitivities(F_Vpm: np.ndarray, T_K: float, phi_eV: float) -> Dict[str, np.ndarray]:

@@ -1,8 +1,14 @@
-"""Field map loading utilities."""
+"""Legacy planar-MAT field-map utilities.
+
+The production E/B path is the bounded XFdtd-volume reduction in :mod:`rf_gun.fieldmaps`, which
+writes a qualified cylindrical artifact consumed directly by tracking. ``load_fieldmap_mat`` is
+kept only so historical electric-only planar runs remain reproducible; it is not the place to
+interpret or preprocess the current volume data.
+"""
+from typing import Sequence
+
 import numpy as np
 import scipy.io
-
-from .phasor import interp_cfield
 
 
 def mesh_edge_length_stats(vertices: np.ndarray, facets: np.ndarray) -> dict:
@@ -79,4 +85,83 @@ def load_fieldmap_mat(filename, verbose=False):
         "Ez": Ez,
         "raw_keys": list(mat_raw.keys()),
         "keys": list(mat.keys()),
+    }
+
+
+def detect_pec_boundary_along_axis(
+    fieldmap: dict,
+    *,
+    x_target_mm: float = 0.0,
+    field_components: Sequence[str] = ("Ex", "Ey"),
+    zero_floor_ratio: float = 1.0e-4,
+) -> dict:
+    """Locate a PEC (perfectly-conducting) boundary crossing along a planar field map's own
+    y-axis at a fixed `x_target_mm` -- e.g. the cathode's emitting face, which XFdtd's solver
+    represents as a metal disk that fully screens the field on its far side (see this project's
+    `Y_CATHODE_MM`/`--y_cathode_mm`: the field-map y-coordinate assumed to be the cathode plane).
+
+    Method: at the mesh column nearest `x_target_mm`, take `max(abs(component))` over every time
+    sample and every requested component (`field_components`, default `("Ex", "Ey")`) as one
+    scalar field-magnitude value per native y-grid row. A field-free (PEC-shadowed) region reads
+    at the solver's own numerical noise floor -- many orders of magnitude below the open/vacuum
+    region -- so the transition is found as the sharpest single-step drop in `log(magnitude)`
+    across consecutive y rows, not a fixed absolute threshold (a fixed threshold would need
+    re-tuning for a field map with different absolute field scale).
+
+    Returns a dict: `x_actual_mm` (the mesh column actually used), `y_mm`/`magnitude` (the full
+    sorted per-row arrays, for inspecting or plotting the transition), `last_open_y_mm`/
+    `first_shadowed_y_mm` (the two native grid rows bracketing the boundary -- the true PEC
+    surface lies somewhere in this interval; the field map's own y-resolution there is
+    `first_shadowed_y_mm - last_open_y_mm`, and no finer position is resolvable from this data
+    alone), `midpoint_y_mm` (a defensible point estimate absent finer grid resolution), and
+    `drop_ratio` (`magnitude[first_shadowed] / magnitude[last_open]`, near-zero for a genuine PEC
+    crossing -- a small value here vs. `zero_floor_ratio` is what confirms this is a real boundary
+    and not just an ordinary field gradient).
+
+    Raises `ValueError` if the column has fewer than 2 rows, or if no drop steeper than
+    `zero_floor_ratio` is found anywhere along the column (i.e. there is no PEC boundary crossing
+    at this `x_target_mm` in this field map -- e.g. `x_target_mm` misses the emitting disk's
+    footprint entirely, or the field map genuinely has no such boundary).
+    """
+    x_mm = np.asarray(fieldmap["vertices"], dtype=float)[:, 0]
+    y_mm = np.asarray(fieldmap["vertices"], dtype=float)[:, 1]
+    ux = np.unique(x_mm)
+    x_actual_mm = float(ux[np.argmin(np.abs(ux - float(x_target_mm)))])
+    mask = np.isclose(x_mm, x_actual_mm, atol=1.0e-6)
+    if np.sum(mask) < 2:
+        raise ValueError(
+            f"detect_pec_boundary_along_axis: column x={x_actual_mm!r} mm has fewer than 2 rows "
+            "-- cannot locate a boundary crossing."
+        )
+
+    magnitude = np.zeros(int(np.sum(mask)), dtype=float)
+    for name in field_components:
+        comp = np.asarray(fieldmap[name], dtype=float)[mask, :]
+        magnitude = np.maximum(magnitude, np.max(np.abs(comp), axis=1))
+
+    order = np.argsort(y_mm[mask])
+    y_sorted = y_mm[mask][order]
+    mag_sorted = magnitude[order]
+
+    with np.errstate(divide="ignore"):
+        log_mag = np.log(np.maximum(mag_sorted, np.finfo(float).tiny))
+    drop = -np.diff(log_mag)  # positive where magnitude falls from row i to row i+1
+    i = int(np.argmax(drop))
+    ratio = float(mag_sorted[i + 1] / mag_sorted[i]) if mag_sorted[i] > 0.0 else 0.0
+    if ratio > float(zero_floor_ratio):
+        raise ValueError(
+            f"detect_pec_boundary_along_axis: no drop steeper than zero_floor_ratio="
+            f"{zero_floor_ratio!r} found along x={x_actual_mm!r} mm (sharpest drop ratio was "
+            f"{ratio!r} at y={y_sorted[i]!r}->{y_sorted[i + 1]!r} mm) -- no PEC boundary crossing "
+            "detected at this x."
+        )
+
+    return {
+        "x_actual_mm": x_actual_mm,
+        "y_mm": y_sorted,
+        "magnitude": mag_sorted,
+        "last_open_y_mm": float(y_sorted[i]),
+        "first_shadowed_y_mm": float(y_sorted[i + 1]),
+        "midpoint_y_mm": float(0.5 * (y_sorted[i] + y_sorted[i + 1])),
+        "drop_ratio": ratio,
     }

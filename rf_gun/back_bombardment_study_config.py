@@ -17,6 +17,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .aperture import DEFAULT_CATHODE_BACKSTOP_THICKNESS_MM
+from .backstop_loss_separation import DEFAULT_APERTURE_MATCH_TOLERANCE_MM
 from .cathode_geometry import CathodeGeometry
 
 
@@ -224,6 +225,14 @@ class BackBombardmentCaptureConfig:
     require_inward_momentum: bool = True
     max_unknown_surface_fraction: float = 0.01
     backstop_thickness_mm: float = DEFAULT_CATHODE_BACKSTOP_THICKNESS_MM
+    #: Rows absorbed on the dynamic radial aperture R(z) are cavity-wall losses, not cathode
+    #: returns, and are recorded at their own loss point as SURFACE_CAVITY_WALL instead of being
+    #: ray-cast onto the flat holder annulus. Set False only to reproduce pre-fix behaviour.
+    separate_aperture_wall_losses: bool = True
+    #: Must match `VolumeBuildParams.aperture_delta_mm` for the run being analysed, otherwise the
+    #: R(z) used here is not the R(z) the particles were actually absorbed on.
+    aperture_delta_mm: float = 0.0
+    aperture_match_tolerance_mm: float = DEFAULT_APERTURE_MATCH_TOLERANCE_MM
 
 
 @dataclass(frozen=True)

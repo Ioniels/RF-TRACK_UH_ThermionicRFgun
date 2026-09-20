@@ -1,0 +1,103 @@
+{
+  "backup": "archive/repo_cleanup_20260915T003018Z/source_before_cleanup.tar.gz",
+  "modified_existing_source_files": [
+    ".gitignore",
+    "README.md",
+    "UH_gun_tracking_demo.ipynb",
+    "XFdtd_field_map_preprocessing.ipynb",
+    "docs/field_map_fill_audit.md",
+    "prepare_xfdtd_fieldmap.py",
+    "pyproject.toml",
+    "rf_gun/back_bombardment.py",
+    "rf_gun/back_bombardment_events.py",
+    "rf_gun/beam_loading_envelope.py",
+    "rf_gun/cathode_fields.py",
+    "rf_gun/constants.py",
+    "rf_gun/diagnostics.py",
+    "rf_gun/emission_sensitivity.py",
+    "rf_gun/fieldmaps/__init__.py",
+    "rf_gun/fieldmaps/artifact.py",
+    "rf_gun/fieldmaps/comparison.py",
+    "rf_gun/fieldmaps/xfdtd_h5.py",
+    "rf_gun/io.py",
+    "rf_gun/materials/base.py",
+    "rf_gun/materials/lab6.py",
+    "rf_gun/plotting/back_bombardment.py",
+    "rf_gun/plotting/emission.py",
+    "rf_gun/plotting/fields.py",
+    "rf_gun/work_function_models.py",
+    "run_thermionic_tm010.py",
+    "tests/test_back_bombardment_events.py",
+    "tests/test_cathode_fields.py",
+    "tests/test_deflection_field.py",
+    "tests/test_emission_iteration.py",
+    "tests/test_fieldmaps_workflow.py",
+    "tests/test_main_notebook_marker_contract.py",
+    "tests/test_mirror_mesh_convergence.py",
+    "tests/test_mirror_tolerance_convergence.py",
+    "tests/test_run_back_bombardment_macropulse_cli.py",
+    "tests/test_thermal.py",
+    "verify_koa_run.py"
+  ],
+  "new_source_files": [
+    "docs/notebook_physics_reference.md",
+    "docs/repository_cleanup.md",
+    "docs/repository_guide.md",
+    "rf_gun/fieldmaps/assessment.py",
+    "rf_gun/fieldmaps/tracking.py",
+    "rf_gun/provenance.py",
+    "rf_gun/studies/mirror_field.py",
+    "tests/__init__.py",
+    "tests/helpers.py",
+    "tests/test_provenance_io.py"
+  ],
+  "notebooks": {
+    "UH_gun_tracking_demo.ipynb": {
+      "bytes_before": 4502576,
+      "bytes_after": 110932,
+      "code_cells_before": 24,
+      "code_cells_after": 29,
+      "max_code_cell_lines_before": 469,
+      "max_code_cell_lines_after": 184
+    },
+    "XFdtd_field_map_preprocessing.ipynb": {
+      "bytes_before": 37524,
+      "bytes_after": 36644,
+      "code_cells_before": 13,
+      "code_cells_after": 13,
+      "max_code_cell_lines_before": 121,
+      "max_code_cell_lines_after": 80
+    }
+  },
+  "notebook_execution": [
+    {
+      "notebook": "XFdtd_field_map_preprocessing.ipynb",
+      "executed_code_cells": 13,
+      "mode": "review all cells"
+    },
+    {
+      "notebook": "UH_gun_tracking_demo.ipynb",
+      "executed_code_cells": 14,
+      "mode": "startup through field diagnostics; SAVE_DATA=False"
+    }
+  ],
+  "packaging": {
+    "wheel": "uh_rf_gun-0.1.0-py3-none-any.whl",
+    "material_files_in_wheel": 11,
+    "build_backend": "system setuptools 68.1.2 via build_meta, offline; environment dependencies unchanged"
+  },
+  "validation": {
+    "pytest": {
+      "passed": 506,
+      "skipped": 0,
+      "failed": 0,
+      "elapsed_s": 93.14
+    },
+    "pyflakes": "passed: package, tools, tests, entry-point scripts and notebook code",
+    "active_field_payloads": "all four unchanged and verified",
+    "shared_assessment": "reproduces active factor, four measured fields, qualification and tail metrics",
+    "installed_wheel_material_load": "passed outside source checkout",
+    "exact_function_body_duplicates_ge_6_lines": 0,
+    "python_files_scanned": 141
+  }
+}

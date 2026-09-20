@@ -164,32 +164,6 @@ def effective_length_from_abs_ez(z_m: np.ndarray, Ez_complex: np.ndarray, tail_f
     return float(z_high - z_low)
 
 
-def veff_from_phase_scan_pz(pz_mean_MeV_c: np.ndarray, pz0_MeV_c: float, me_MeV: float = ME_MEV) -> float:
-    """Effective accelerating voltage [V]: the peak kinetic-energy gain (relativistic, from
-    `pz0_MeV_c` to each phase-scan point's `pz_mean_MeV_c`) over the phase scan, in eV numerically
-    (MeV gain * 1e6). `me_MeV` defaults to this project's own `constants.ME_MEV` so every call site
-    agrees on the electron mass rather than each supplying its own literal.
-
-    Raises `ValueError` if `pz_mean_MeV_c` is empty or entirely non-finite -- a phase scan where
-    every test particle was lost cannot calibrate a voltage, and silently calling `np.max` on an
-    all-NaN array (which numpy accepts, returning NaN with only a warning) is exactly how a failed
-    scan used to propagate `Veff=NaN` into R/Q, beam loading, and saved run metadata unnoticed.
-    Prefer `veff_from_phase_calibration` when a full `PhaseCalibrationResult` is available -- it
-    additionally requires the crest to be a resolved (bracketed) local maximum, not merely finite.
-    """
-    pz_mean_MeV_c = np.asarray(pz_mean_MeV_c, dtype=float)
-    finite = np.isfinite(pz_mean_MeV_c)
-    if not np.any(finite):
-        raise ValueError(
-            "veff_from_phase_scan_pz: pz_mean_MeV_c has no finite points (every scan particle was "
-            "lost or otherwise non-finite) -- cannot calibrate an effective voltage."
-        )
-    Wk_mean = np.sqrt(pz_mean_MeV_c[finite] ** 2 + me_MeV**2) - me_MeV
-    Wk0 = np.sqrt(pz0_MeV_c**2 + me_MeV**2) - me_MeV
-    dW_max_MeV = float(np.max(Wk_mean - Wk0))
-    return dW_max_MeV * 1e6
-
-
 def veff_from_phase_calibration(result: "PhaseCalibrationResult", me_MeV: float = ME_MEV) -> float:
     """Effective accelerating voltage [V] from a validated `PhaseCalibrationResult`'s crest.
 

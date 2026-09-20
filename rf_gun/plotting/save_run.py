@@ -9,17 +9,11 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from ..back_bombardment import BackBombardmentData
 from ..constants import c, ME_MEV
+from .figure_io import DEFAULT_FIGURE_FORMATS, normalize_formats, save_figure_formats
 from ..particle_tags import ParticleTags, build_particle_tags, ID_COL, lost_ids_from_lost_table
 from ..beam_properties import compute_beam_properties, transmission_curves
 from .style import COLOR_LOST, COLOR_NEUTRAL, COLOR_PRIMARY, COLOR_SECONDARY
-from .back_bombardment import (
-    plot_back_bombardment_energy_density,
-    plot_back_bombardment_phase_space,
-    plot_back_bombardment_power_density_vs_time,
-    plot_back_bombardment_screen_reach,
-)
 from .emission import plot_emission_history, plot_j_vs_n
 from .evolution import plot_beam_moments_evolution, plot_beam_twiss_evolution
 from .phase_space import (
@@ -37,22 +31,27 @@ PHASE_SPACE_COLUMNS = ["x_mm", "px_MeV_c", "y_mm", "py_MeV_c", "z_mm", "pz_MeV_c
 _EXTENDED_EXTRA_COLUMNS = ["id", "t_mm_c", "E_MeV", "K_MeV"]
 
 
-def _save_figure(fig, output_dir: Path, stem: str, *, formats: Sequence[str] = ("png", "eps")) -> list[str]:
-    saved: list[str] = []
-    fmts = [str(fmt).strip().lower() for fmt in formats if str(fmt).strip()]
-    if not fmts:
-        fmts = ["png"]
-    for fmt in fmts:
-        out_path = output_dir / f"{stem}.{fmt}"
-        if fmt == "png":
-            fig.savefig(out_path, dpi=300, bbox_inches="tight")
-        else:
-            fig.savefig(out_path, format=fmt, bbox_inches="tight")
-        saved.append(out_path.name)
-    return saved
+def _save_figure(
+    fig,
+    output_dir: Path,
+    stem: str,
+    *,
+    formats: Sequence[str] = DEFAULT_FIGURE_FORMATS,
+) -> list[str]:
+    """Write one figure in every requested format, subject to the .eps size cap.
+
+    See `rf_gun.plotting.figure_io.save_figure_formats`: an oversized .eps is skipped and reported,
+    never written, and never at the expense of the .png.
+    """
+    return save_figure_formats(fig, output_dir, stem, formats=formats, dpi=300)
 
 
-def _capture_current_figure(save_name: str, output_dir: Path, *, formats: Sequence[str] = ("png", "eps")) -> list[str]:
+def _capture_current_figure(
+    save_name: str,
+    output_dir: Path,
+    *,
+    formats: Sequence[str] = DEFAULT_FIGURE_FORMATS,
+) -> list[str]:
     """Save whatever figure the preceding plot call left open -- or nothing, cleanly, if it left
     none. Several plotting functions in this project (`plot_j_vs_n` when the emission law isn't
     "unified"; every `plot_back_bombardment_*` when there's no particle with a physically
@@ -156,12 +155,24 @@ def capture_figures(
     original_show = plt.show
     counter = {"i": 0}
 
+    fmts = normalize_formats(formats)
+    # Figures already on pyplot's stack when this block is entered belong to some earlier plot
+    # call, not to this one. Under an interactive/inline backend there are never any (that
+    # backend's own `show()` destroys them), but under Agg -- i.e. every SLURM run --
+    # `plt.show()` is a no-op that leaves every figure open, so a helper that ends in `plt.show()`
+    # hands its figure to the *next* `capture_figures` block, which then writes it out under that
+    # block's name. Observed live: `on_axis_field_profile.png` came out as a second copy of the
+    # field-map figure, with the real Ez(z) sweep pushed to `on_axis_field_profile_1.png`.
+    # Skipping the pre-existing numbers keeps each block's output its own.
+    pre_existing = set(plt.get_fignums())
+
     def _patched_show(*args, **kwargs):
         for num in plt.get_fignums():
+            if num in pre_existing:
+                continue
             fig = plt.figure(num)
             suffix = "" if counter["i"] == 0 else f"_{counter['i']}"
-            for fmt in formats:
-                fig.savefig(out_dir / f"{name}{suffix}.{fmt}", dpi=dpi, bbox_inches="tight")
+            save_figure_formats(fig, out_dir, f"{name}{suffix}", formats=fmts, dpi=dpi)
             counter["i"] += 1
         return original_show(*args, **kwargs)
 
@@ -477,30 +488,21 @@ def save_run_figures(
     n_macroparticles: int | None = None,
     mass_MeV: float = ME_MEV,
     lost_table: np.ndarray | None = None,
-    back_bombardment_data: BackBombardmentData | None = None,
-    back_bombardment_cathode_radius_mm: float | None = None,
+    backstop_z_min_m: float | None = None,
 ) -> dict[str, Any]:
     """Generate and save a standard figure bundle for one run.
 
     `tags` (`rf_gun.particle_tags.ParticleTags`) drives every figure in this bundle -- pass one
     built via `build_particle_tags` (from `Bout` plus RF-Track's own lost-particle table) so this
     bundle's tagging is identical to any other output (JSON summaries, the notebook) built from
-    the same run. If not supplied, falls back to backward-tagging only (from `Bout`'s own
-    reliable absolute z/pz), with no lost tagging. The beam-properties table and transmission
+    the same run. If not supplied, falls back to `build_particle_tags(Bout_M, lost_table,
+    backstop_z_min_m=backstop_z_min_m)` -- pass `backstop_z_min_m` too in that case, or backstop
+    captures will fall into `lost_ids` instead of `backward_ids` (see that function's docstring).
+    The beam-properties table and transmission
     curves are always computed on the forward-going + dynamic-aperture-surviving population,
     matching `rf_gun.beam_properties.compute_beam_properties`.
 
-    `back_bombardment_data` (from `rf_gun.compute_back_bombardment`), when given, adds the 4
-    back-bombardment figures (phase space, screen reach, cathode energy-density map, power
-    density vs time -- matching the notebook's back-bombardment cell) to the bundle;
-    `back_bombardment_cathode_radius_mm` is required alongside it: the power-density figure uses
-    it to normalize deposited energy by the cathode's nominal area, and the energy-density map
-    uses it to fix the map's (x, y) range to the cathode's own footprint and draw its boundary.
-
-    Returns `{"saved_figures": [...], "back_bombardment_energy_map": {...} | None}` -- the energy
-    map is the exact dict `plot_back_bombardment_energy_density` returned (`xedges`, `yedges`,
-    `density_J_per_mm2`, `total_J`), for the caller to persist independently (see
-    `rf_gun.save_back_bombardment_energy_map`) since it's per-bin array data, not a figure.
+    Returns `{"saved_figures": [...]}`.
     """
     import matplotlib.pyplot as plt
 
@@ -512,7 +514,7 @@ def save_run_figures(
     Bout_M = np.array(Bout.get_phase_space(phase_fmt, "all"), copy=True)
 
     if tags is None:
-        tags = build_particle_tags(Bout_M, lost_table)
+        tags = build_particle_tags(Bout_M, lost_table, backstop_z_min_m=backstop_z_min_m)
 
     if M_snaps:
         M_exit = np.asarray(M_snaps[-1], dtype=float)
@@ -576,26 +578,4 @@ def save_run_figures(
         saved += _save_figure(fig_cls, output_dir, "initial_class_conditioned_histograms")
         plt.close(fig_cls)
 
-    back_bombardment_energy_map: dict[str, Any] | None = None
-    if back_bombardment_data is not None:
-        plot_back_bombardment_phase_space(back_bombardment_data)
-        saved += _capture_current_figure("back_bombardment_phase_space", output_dir)
-
-        plot_back_bombardment_screen_reach(back_bombardment_data, M_snaps, z_snaps)
-        saved += _capture_current_figure("back_bombardment_screen_reach", output_dir)
-
-        back_bombardment_energy_map = plot_back_bombardment_energy_density(
-            back_bombardment_data, cathode_radius_mm=float(back_bombardment_cathode_radius_mm),
-        )
-        saved += _capture_current_figure("back_bombardment_energy_density", output_dir)
-
-        plot_back_bombardment_power_density_vs_time(
-            back_bombardment_data,
-            cathode_radius_mm=float(back_bombardment_cathode_radius_mm),
-        )
-        saved += _capture_current_figure("back_bombardment_power_density_vs_time", output_dir)
-
-    return {
-        "saved_figures": saved,
-        "back_bombardment_energy_map": back_bombardment_energy_map,
-    }
+    return {"saved_figures": saved}

@@ -7,13 +7,7 @@ import numpy as np
 
 from ..aperture import aperture_radius_profile_mm
 from ..deflection_field import DEFAULT_B_PK_PER_A_T, DEFAULT_W_MM, DEFAULT_Z_P_MM, b0_deflection_T
-from .style import (
-    DEFAULT_PLOT_STYLE,
-    PlotStyleConfig,
-    add_aperture_curve,
-    add_reference_lines,
-    get_recentered_diverging_cmap,
-)
+from .style import DEFAULT_PLOT_STYLE, PlotStyleConfig, add_aperture_curve, add_reference_lines
 
 
 def field_maps(
@@ -27,108 +21,78 @@ def field_maps(
     lambda_m: float,
     *,
     Er_grid: Optional[np.ndarray] = None,
+    Bt_grid: Optional[np.ndarray] = None,
+    Bz_grid: Optional[np.ndarray] = None,
     z_end_m: Optional[float] = None,
+    measured_z_max_m: Optional[float] = None,
     aperture_delta_mm: Optional[float] = None,
     style: PlotStyleConfig | None = None,
     show_colorbar: bool = True,
     density_cmap=None,
     xy_percentile: float = 65.0,
+    phase_deg: float = 0.0,
+    source_label: str = "Remcom XFdtd",
+    tail_label: str = "qualified modeled tail (not solver sampled)",
 ):
-    """Plot raw field maps (top row: r-z cavity view, x-z waveguide/iris view) and the RF-Track
-    (r, z) grid (bottom, one full-width panel per field component), each with its own colorbar.
+    """Plot the processed axisymmetric fields actually supplied to RF-Track.
 
-    Both field components are signed, so top-row panels use a diverging colormap (`RdBu_r`). The
-    cavity view (`ax_xy`) uses a tighter normalization (`xy_percentile`, default 65th percentile
-    of |value|) than the waveguide view (98.5th percentile), since most of its structure sits at
-    lower field magnitude; values beyond that range are clipped to a darker off-scale color
-    instead of saturating (see `get_recentered_diverging_cmap`).
+    ``xy``, ``yz``, ``t_ns`` and ``t_crest`` remain positional only for compatibility with older
+    notebook/script calls; raw solver-axis panels are deliberately no longer plotted.  Mixing
+    those panels with the transformed RF-Track fields obscured that they use different coordinate
+    conventions and, more importantly, could show a component that was not used for tracking.
 
-    `aperture_delta_mm`, when given, overlays the dynamic aperture's R(z) profile (see
-    `rf_gun.aperture.aperture_radius_profile_mm`) as +/-R(z) curves on both bottom panels -- this
-    is the field map RF-Track actually uses, so it's the natural place to show the physical
-    channel it's paired with during tracking.
+    Complex E and B phasors are evaluated at one common ``phase_deg``.  ``Ez``/``Bz`` are extended
+    evenly across the signed-radius display, while transverse ``Er``/``Bt`` are extended oddly,
+    giving the physical Cartesian cut implied by an axisymmetric vector field.  B is displayed in
+    mT and E in MV/m so each panel has a readable, explicitly independent color scale. When
+    ``measured_z_max_m`` is supplied, the downstream modeled continuation is shaded and labelled
+    on every panel so it cannot be mistaken for solver-sampled volume data.
     """
     import matplotlib.pyplot as plt
-    import matplotlib.tri as mtri
     import matplotlib.colors as colors
 
+    del xy, yz, t_ns, t_crest, xy_percentile  # retained compatibility-only arguments
     style = DEFAULT_PLOT_STYLE if style is None else style
     cmap_diverging = plt.get_cmap("RdBu_r") if density_cmap is None else density_cmap
-    cmap_xy = get_recentered_diverging_cmap(base="RdBu_r")
+    phase = np.exp(1j * np.deg2rad(float(phase_deg)))
 
-    i_snap = int(np.argmin(np.abs(t_ns - t_crest)))
+    ez = np.asarray(Ez_grid)
+    if ez.ndim != 2:
+        raise ValueError(f"field_maps: Ez_grid must be 2D, got shape {ez.shape}")
+    for name, grid in (("Er_grid", Er_grid), ("Bt_grid", Bt_grid), ("Bz_grid", Bz_grid)):
+        if grid is not None and np.shape(grid) != ez.shape:
+            raise ValueError(f"field_maps: {name} shape {np.shape(grid)} does not match Ez_grid {ez.shape}")
 
-    has_er = Er_grid is not None
-    n_bottom_rows = 2 if has_er else 1
-    # constrained_layout reserves space for each panel's own colorbar without overlapping the axes.
-    fig = plt.figure(figsize=(14, 7.5 + 3.6 * n_bottom_rows), constrained_layout=True)
-    gs = fig.add_gridspec(1 + n_bottom_rows, 2, width_ratios=[1.0, 1.10], height_ratios=[0.92] + [1.15] * n_bottom_rows)
+    panels = [(ez, +1, r"E_z", 1.0e-6, "MV/m")]
+    if Er_grid is not None:
+        panels.append((np.asarray(Er_grid), -1, r"E_r", 1.0e-6, "MV/m"))
+    if Bt_grid is not None:
+        panels.append((np.asarray(Bt_grid), -1, r"B_\theta", 1.0e3, "mT"))
+    if Bz_grid is not None:
+        panels.append((np.asarray(Bz_grid), +1, r"B_z", 1.0e3, "mT"))
 
-    verts_xy = xy["vertices"]
-    tri_xy = xy["facets"]
-    Ux = verts_xy[:, 0]
-    Vy = verts_xy[:, 1]
-    Fx = np.asarray(xy["Ez"])[:, i_snap]
-
-    triang_xy = mtri.Triangulation(Ux, Vy, triangles=tri_xy)
-    ax_xy = fig.add_subplot(gs[0, 0])
-    ax_xy.set_aspect("equal", adjustable="box")
-    ax_xy.set_xlabel(r"$r$ (mm)", fontsize=12)
-    ax_xy.set_ylabel(r"$z$ (mm)", fontsize=12)
-    ax_xy.tick_params(labelsize=10)
-
-    verts_yz = yz["vertices"]
-    tri_yz = yz["facets"]
-    Uy = verts_yz[:, 1]
-    Vz = verts_yz[:, 2]
-    Fy = np.asarray(yz["Ez"])[:, i_snap]
-
-    triang_yz = mtri.Triangulation(Vz, Uy, triangles=tri_yz)
-    ax_yz = fig.add_subplot(gs[0, 1])
-
-    vmax_xy = float(np.percentile(np.abs(Fx), xy_percentile)) if Fx.size else 1.0
-    vmax_xy = vmax_xy if vmax_xy > 0 else 1.0
-    norm_xy = colors.Normalize(vmin=-vmax_xy, vmax=vmax_xy)
-
-    vmax_yz = float(np.percentile(np.abs(Fy), 98.5)) if Fy.size else 1.0
-    vmax_yz = vmax_yz if vmax_yz > 0 else 1.0
-    norm_yz = colors.Normalize(vmin=-vmax_yz, vmax=vmax_yz)
-
-    cf_xy = ax_xy.tripcolor(triang_xy, Fx, cmap=cmap_xy, norm=norm_xy, shading="gouraud")
-    cf_yz = ax_yz.tripcolor(triang_yz, Fy, cmap=cmap_diverging, norm=norm_yz, shading="gouraud")
-    ax_yz.set_aspect("equal", adjustable="box")
-    ax_yz.set_xlabel(r"$x$ (mm)", fontsize=12)
-    ax_yz.set_ylabel(r"$z$ (mm)", fontsize=12)
-    ax_yz.tick_params(labelsize=10)
-    if bool(show_colorbar):
-        fig.colorbar(cf_xy, ax=ax_xy, location="right", pad=0.02, fraction=0.046, extend="both").set_label(
-            r"$\Re(E_z)$ (V/m)", fontsize=11
-        )
-        fig.colorbar(cf_yz, ax=ax_yz, location="right", pad=0.02, fraction=0.046).set_label(
-            r"$\Re(E_z)$ (V/m)", fontsize=11
-        )
-
-    x_lo, x_hi = np.percentile(Ux, [0.5, 99.5])
-    y_lo_xy, y_hi_xy = np.percentile(Vy, [0.5, 99.5])
-    x_lo_yz, x_hi_yz = np.percentile(Vz, [0.5, 99.5])
-    z_lo_yz, z_hi_yz = np.percentile(Uy, [0.5, 99.5])
-
-    ax_xy.set_xlim(float(x_lo), float(x_hi))
-    ax_xy.set_ylim(float(y_lo_xy), float(y_hi_xy))
-    ax_yz.set_xlim(float(x_lo_yz), float(x_hi_yz))
-    ax_yz.set_ylim(float(z_lo_yz), float(z_hi_yz))
-
-    fig.suptitle(
-        "EM FDTD Solver (Remcom - XFdtd) field maps: cavity, iris and waveguide (no electron beam)",
-        fontsize=13,
+    n_panels = len(panels)
+    fig, axes = plt.subplots(
+        n_panels, 1, figsize=(13.5, 3.5 * n_panels + 1.0), constrained_layout=True,
+        squeeze=False,
     )
+    axes = axes[:, 0]
 
-    r_neg = -r_grid[::-1]
-    r_full = np.concatenate([r_neg, r_grid[1:]])
-    Ez_full = np.concatenate([Ez_grid[:, ::-1], Ez_grid[:, 1:]], axis=1)
+    # Exclude r=0 from the reflected half so the actual on-axis sample appears exactly once.
+    r_neg = -r_grid[:0:-1]
+    r_full = np.concatenate([r_neg, r_grid])
     extent_full = [z_grid[0] * 1e3, z_grid[-1] * 1e3, r_full[0] * 1e3, r_full[-1] * 1e3]
 
     z_end_mm = float(z_end_m) * 1e3 if z_end_m is not None else None
+    measured_z_max_mm = (
+        float(measured_z_max_m) * 1e3 if measured_z_max_m is not None else None
+    )
+    if measured_z_max_mm is not None and not (
+        extent_full[0] - 1.0e-9 <= measured_z_max_mm <= extent_full[1] + 1.0e-9
+    ):
+        raise ValueError(
+            "field_maps: measured_z_max_m must lie inside the displayed z-grid support"
+        )
     lambda_quarter_mm = lambda_m / 4 * 1e3
     aperture_r_mm = (
         aperture_radius_profile_mm(z_grid * 1e3, float(aperture_delta_mm))
@@ -136,14 +100,29 @@ def field_maps(
         else None
     )
 
-    def _bottom_panel(ax, field_full, title, cmap, norm, cbar_label):
+    def _panel(ax, field_grid, parity, symbol, scale, unit):
+        at_phase = np.real(np.asarray(field_grid) * phase) * scale
+        field_full = np.concatenate([parity * at_phase[:, :0:-1], at_phase], axis=1)
+        # A low percentile is the right default for panels whose amplitude is spread over the
+        # domain, but it destroys panels like B_z whose content is a thin, high-amplitude wall
+        # layer over a near-zero bulk: the 98.5th percentile there sat ~67x below the true
+        # maximum, so the only visible feature was uniform saturation. Take the gentler of a
+        # high percentile and the true maximum, and say so on the panel when clipping remains.
+        abs_full = np.abs(field_full)
+        peak = float(np.max(abs_full)) if abs_full.size else 1.0
+        vmax = float(np.percentile(abs_full, 99.5)) if abs_full.size else 1.0
+        if not (np.isfinite(vmax) and vmax > 0.0):
+            vmax = 1.0
+        if np.isfinite(peak) and peak > 0.0 and peak < 20.0 * vmax:
+            vmax = peak          # no pathological outlier: show the component honestly
+        clipped = np.isfinite(peak) and peak > 1.001 * vmax
         im = ax.imshow(
-            np.real(field_full.T),
+            field_full.T,
             aspect="auto",
             origin="lower",
             extent=extent_full,
-            cmap=cmap,
-            norm=norm,
+            cmap=cmap_diverging,
+            norm=colors.Normalize(vmin=-vmax, vmax=vmax),
         )
         add_reference_lines(
             ax,
@@ -154,45 +133,59 @@ def field_maps(
         )
         if aperture_r_mm is not None:
             add_aperture_curve(ax, z_grid * 1e3, aperture_r_mm)
+        if measured_z_max_mm is not None and measured_z_max_mm < extent_full[1] - 1.0e-9:
+            ax.axvspan(
+                measured_z_max_mm,
+                extent_full[1],
+                facecolor="white",
+                edgecolor="0.25",
+                hatch="////",
+                alpha=0.24,
+                linewidth=0.0,
+                label=str(tail_label),
+                zorder=3,
+            )
+            ax.axvline(
+                measured_z_max_mm,
+                color="0.2",
+                ls="--",
+                lw=1.0,
+                label="measured-volume end",
+                zorder=4,
+            )
         ax.axhline(0, color="black", ls=":", lw=0.8, alpha=0.4)
         ax.set_xlabel(r"$z$ (mm)", fontsize=12)
-        ax.set_ylabel(r"$r$ (mm)", fontsize=12)
-        ax.set_title(title, fontsize=13)
+        ax.set_ylabel(r"signed radius (mm)", fontsize=12)
+        clip_note = (
+            rf"; colour clipped at {vmax:.3g} {unit}, peak {peak:.3g} {unit}" if clipped else ""
+        )
+        ax.set_title(
+            rf"Field used by RF-Track: $\Re\{{{symbol}\,e^{{i\phi}}\}}$ at "
+            rf"$\phi={float(phase_deg):.1f}^\circ${clip_note}",
+            fontsize=13,
+        )
         ax.tick_params(labelsize=10)
         if bool(show_colorbar):
-            fig.colorbar(im, ax=ax, location="right", pad=0.015, fraction=0.025).set_label(cbar_label, fontsize=11)
+            fig.colorbar(im, ax=ax, location="right", pad=0.015, fraction=0.025).set_label(
+                rf"$\Re({symbol})$ ({unit})", fontsize=11,
+            )
         handles, labels = ax.get_legend_handles_labels()
         if handles:
             ax.legend(handles, labels, loc="lower right", frameon=True, facecolor="white", framealpha=0.75, fontsize=9)
         return im
 
-    # Ez is signed, like Er below it -- use the same diverging colormap and a symmetric
-    # (zero-centered) normalization rather than a sequential density colormap (which would neither
-    # show sign nor be centered on zero; see `rf_gun.plotting.style`'s module docstring for the
-    # density-vs-signed-field colormap distinction this project draws).
-    vmax_ez = float(np.percentile(np.abs(np.real(Ez_full)), 98.5)) if Ez_full.size else 1.0
-    vmax_ez = vmax_ez if vmax_ez > 0 else 1.0
-    ax_rf_ez = fig.add_subplot(gs[1, :])
-    _bottom_panel(
-        ax_rf_ez, Ez_full, r"Field map used by RF-Track: $\Re(E_z)$", cmap_diverging,
-        colors.Normalize(vmin=-vmax_ez, vmax=vmax_ez), r"$\Re(E_z)$ (V/m)",
+    for ax, panel in zip(axes, panels):
+        _panel(ax, *panel)
+
+    fig.suptitle(
+        # cmr10 (the Computer-Modern face selected in plotting/style.py) has no U+2014
+        # glyph, so an em-dash here renders as a missing-character box. Use a colon.
+        f"EM FDTD Solver ({source_label}) field maps used by RF-Track: axisymmetric projection",
+        fontsize=14,
     )
 
-    if has_er:
-        Er_full = np.concatenate([Er_grid[:, ::-1], Er_grid[:, 1:]], axis=1)
-        vmax_er = float(np.percentile(np.abs(np.real(Er_full)), 98.5)) if Er_full.size else 1.0
-        vmax_er = vmax_er if vmax_er > 0 else 1.0
-        ax_rf_er = fig.add_subplot(gs[2, :])
-        _bottom_panel(
-            ax_rf_er,
-            Er_full,
-            r"RF-Track grid: $\Re(E_r)$",
-            cmap_diverging,
-            colors.Normalize(vmin=-vmax_er, vmax=vmax_er),
-            r"$\Re(E_r)$ (V/m)",
-        )
-
     plt.show()
+    return fig
 
 
 def axis_phase(

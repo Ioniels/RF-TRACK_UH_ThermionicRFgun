@@ -89,6 +89,7 @@ from ..back_bombardment_events import (
     write_back_bombardment_events_h5,
 )
 from ..back_bombardment_study_config import BackBombardmentStudyConfig
+from ..back_bombardment_events import QUALITY_FLAG_ID_JOIN_FAILED
 from ..cathode_geometry import SURFACE_UNKNOWN
 from ..comsol_io import ComsolComparison, ComsolThermalResult, compare_python_comsol_thermal
 from ..io import to_json_safe
@@ -335,7 +336,8 @@ def validate_back_bombardment_study(study: BackBombardmentMacropulseStudy) -> No
          level (module docstring); a mismatch here means the study's OWN configuration claims a
          feedback loop ran that this code base cannot actually run, a basic self-consistency guard
          against a future caller accidentally mislabeling a run (plan Sec. 10.2).
-      5. The fraction of qualified events with `surface_code == SURFACE_UNKNOWN` does not exceed
+      5. The fraction of qualified events that could not be classified for NUMERICAL reasons
+         (failed ID join / non-finite incidence on a row claiming a surface) does not exceed
          `study.config.capture.max_unknown_surface_fraction`. `extract_back_bombardment_events`
          only *warns* about this at capture time (it does not know whether its caller is an
          exploratory or production run); this is the point where it becomes fatal.
@@ -359,17 +361,30 @@ def validate_back_bombardment_study(study: BackBombardmentMacropulseStudy) -> No
             "configuration is mislabeled relative to what was actually computed."
         )
 
-    surface_code = np.asarray(study.study_input.events.surface_code)
-    n_events = int(surface_code.size)
-    unknown_frac = float(np.mean(surface_code == SURFACE_UNKNOWN)) if n_events else 0.0
-    max_unknown_frac = float(study.config.capture.max_unknown_surface_fraction)
-    if unknown_frac > max_unknown_frac:
+    # A backward particle that does not strike LaB6 is a normal physical outcome, not a geometry
+    # failure: the annulus between the 3.2 mm LaB6 disk and the cavity nose bore is open vacuum,
+    # so a returning electron can cross the cathode plane without hitting anything. What must stay
+    # rare is a ray that could not be classified for NUMERICAL reasons -- a null direction, a
+    # non-finite position, or an ID that never joined back to B0 -- because those are the rows
+    # whose cathode/no-cathode verdict is not trustworthy either way.
+    events = study.study_input.events
+    n_events = int(np.asarray(events.surface_code).size)
+    flags = np.asarray(events.quality_flags)
+    unclassifiable = np.asarray(events.cos_incidence)
+    anomalous = (flags & int(QUALITY_FLAG_ID_JOIN_FAILED)).astype(bool)
+    anomalous |= ~np.isfinite(unclassifiable) & (
+        np.asarray(events.surface_code) != SURFACE_UNKNOWN
+    )
+    anomalous_frac = float(np.mean(anomalous)) if n_events else 0.0
+    max_anomalous_frac = float(study.config.capture.max_unknown_surface_fraction)
+    if anomalous_frac > max_anomalous_frac:
         raise ValueError(
-            f"validate_back_bombardment_study: {unknown_frac:.3%} of {n_events} qualified events "
-            f"landed on SURFACE_UNKNOWN (no physical surface intersection), exceeding "
-            f"config.capture.max_unknown_surface_fraction={max_unknown_frac:.3%} -- the placeholder "
-            "geometry is not adequate for this run's return distribution; heating/current claims "
-            "from it cannot be trusted at production scale."
+            f"validate_back_bombardment_study: {anomalous_frac:.3%} of {n_events} qualified events "
+            f"could not be classified for numerical reasons (failed ID join, or a non-finite "
+            f"incidence on a row that nonetheless claims a surface), exceeding "
+            f"config.capture.max_unknown_surface_fraction={max_anomalous_frac:.3%}. This gate is "
+            "about ray-cast integrity, NOT about how many electrons missed the cathode -- missing "
+            "it is physics, since the annulus outside the LaB6 disk is open vacuum."
         )
 
 
@@ -436,6 +451,23 @@ def write_back_bombardment_macropulse_h5(
                 heat_source.escaping_energy_below_tio_validity_J_total
             ),
             "excluded_non_lab6_energy_J_total": float(heat_source.excluded_non_lab6_energy_J_total),
+            # Boundary-discretisation and bad-input accounting. Both are conserved in the
+            # closure equation, but their size decides whether a small magnet-induced
+            # difference is physics or a rim artefact, so they must be visible per run.
+            "rim_reassigned_energy_J_total": float(heat_source.rim_reassigned_energy_J_total),
+            "rim_reassigned_event_count": int(heat_source.rim_reassigned_event_count),
+            "rim_reassigned_fraction_of_deposited": (
+                float(heat_source.rim_reassigned_energy_J_total)
+                / float(heat_source.total_deposited_energy_J)
+                if float(heat_source.total_deposited_energy_J) > 0.0
+                else 0.0
+            ),
+            "non_finite_position_energy_J_total": float(
+                heat_source.non_finite_position_energy_J_total
+            ),
+            "non_finite_position_event_count": int(
+                heat_source.non_finite_position_event_count
+            ),
         },
         "thermal": {
             "energy_residual_normalized": float(thermal_result.energy_residual_normalized),

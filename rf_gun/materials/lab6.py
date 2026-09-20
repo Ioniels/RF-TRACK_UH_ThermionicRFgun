@@ -94,6 +94,24 @@ def _build_lab6_k_composite_dataset() -> ScalarPropertyDataset:
             f"monotonic increasing after sorting: {x.tolist()}"
         )
 
+    # Inherit the UPPER segment's extrapolation policy rather than hardcoding "forbidden".
+    # `linear_to_limit` only ever extends above the table (below it stays hard -- see
+    # ScalarPropertyDataset.evaluate), so the segment that supplies the composite's top knot is
+    # the one entitled to decide what happens past it. Hardcoding "forbidden" here meant that
+    # setting `extrapolation: linear_to_limit` in LaB6_k_Tanaka_OsakaThesis_1981.yaml had no
+    # effect at all on what `LaB6_UH_recommended_v1.thermal.k` actually does: every real KOA
+    # Study IV macropulse case (all 10) died at T ~= 2000.003-2000.28 K -- an overshoot of at most
+    # 0.3 K past the last knot -- first on cp and, once that file was given a limit, on this
+    # composite instead. cp and k must move together or the fix just relocates the crash.
+    if float(tanaka.x.max()) != float(x.max()):
+        raise ValueError(
+            "LaB6_k composite: expected the Tanaka segment to supply the composite's top knot "
+            f"(Tanaka max {float(tanaka.x.max())} K vs composite max {float(x.max())} K); the "
+            "upper-segment extrapolation policy inherited below would then be the wrong one."
+        )
+    composite_extrapolation = tanaka.extrapolation
+    composite_extrapolation_limit_x = tanaka.extrapolation_limit_x
+
     reference = PropertyReference(
         key="Sun2023+Tanaka1981_composite",
         title=(
@@ -116,7 +134,8 @@ def _build_lab6_k_composite_dataset() -> ScalarPropertyDataset:
         unit_x="temperature_K",
         unit_y="W_m_K",
         interpolation="pchip",
-        extrapolation="forbidden",
+        extrapolation=composite_extrapolation,
+        extrapolation_limit_x=composite_extrapolation_limit_x,
         status="provisional_digitization",
         uncertainty={"type": "model", "value": 0.15},
         reference=reference,
@@ -135,6 +154,18 @@ def _build_lab6_k_composite_dataset() -> ScalarPropertyDataset:
 # ScalarPropertyDataset instances; LaB6_Kowalczyk_PRSTAB120402_2014_legacy.yaml records the same
 # equations as text plus the citation and check values used to validate them below.
 # ---------------------------------------------------------------------------------------------
+
+#: LaB6 melting point [K]. Quoted by Kowalczyk & Madey, Phys. Rev. ST Accel. Beams 17, 120402
+#: (2014) -- the paper describing this gun -- which also treats 2287 K as the design ceiling for
+#: transient cathode-surface excursions. This, not the last knot of any fitted property table, is
+#: the physical temperature at which the solid-phase model stops being defined; the cp and k
+#: datasets carry it as their `extrapolation_limit_x`.
+LAB6_MELTING_POINT_K = 2483.0
+
+#: Design ceiling for transient surface excursions from the same reference: below melting, but
+#: already deep into the regime where evaporation-driven recession is significant (recession rises
+#: by roughly three orders of magnitude between 1800 K and 2000 K).
+LAB6_SURFACE_DESIGN_CEILING_K = 2287.0
 
 _LEGACY_RHO_KG_M3 = 4720.0
 
@@ -176,7 +207,7 @@ def _legacy_rho_kg_m3(T_K: Any) -> Any:
 
 
 def _load_LaB6_UH_recommended_v1() -> CathodeMaterialSet:
-    manifest = _read_yaml("LaB6_UH_recommended_v1.yaml")
+    _read_yaml("LaB6_UH_recommended_v1.yaml")  # Validate the declared material manifest.
 
     density_raw = _read_yaml("LaB6_density_Ivashchenko_PhysicaB531_2018.yaml")
     density_ref = _reference_from_block(density_raw["reference"])

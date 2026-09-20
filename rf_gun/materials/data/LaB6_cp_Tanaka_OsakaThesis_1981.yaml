@@ -6,7 +6,8 @@ independent_variable: temperature_K
 temperature_K: [1000, 1200, 1400, 1600, 1800, 2000]
 value_J_kg_K: [801, 824, 839, 850, 858, 865]
 interpolation: pchip
-extrapolation: forbidden
+extrapolation: linear_to_limit
+extrapolation_limit_x: 2483  # K, LaB6 melting point
 status: cp_approximated_by_cV_derived_from_Debye_plus_electronic_model
 
 uncertainty:
@@ -30,3 +31,11 @@ notes: >
   applied here). Treat this dataset as a derived/secondary source, not a primary Tanaka-thesis
   table -- the `status` field records this explicitly so it is not silently re-cited as "Tanaka
   1981, Table N" in a later paper or plot caption.
+
+  Above the last tabulated knot (2000 K) this dataset is linearly continued to the LaB6
+  melting point (2483 K, Kowalczyk & Madey PRST-AB 17, 120402 (2014)). The continuation is
+  benign for cp: the Debye+electronic model has effectively reached its Dulong-Petit plateau
+  by 2000 K (last segment +7 J/kg/K per 200 K), so the extrapolation to 2483 K is ~+2%, well
+  inside this dataset's own 3% uncertainty. The hard failure is moved to the melting point,
+  where the solid-phase model genuinely stops being defined -- running off the end of a
+  fitted table is a data-coverage limit, not a physical one.

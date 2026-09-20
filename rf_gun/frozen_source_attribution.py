@@ -70,6 +70,9 @@ def run_frozen_source_attribution(
     seed: int = 42,
     diagnostics: Optional[DiagnosticsParams] = None,
     spatial_source: Optional[Dict[str, np.ndarray]] = None,
+    *,
+    Bt_grid: Optional[np.ndarray] = None,
+    Bz_grid: Optional[np.ndarray] = None,
 ) -> FrozenSourceAttributionResult:
     """Track the identical fixed-seed source through each of `cases` (default
     FROZEN_SOURCE_ATTRIBUTION_CASES), varying only sc_enabled/mirror_charge_enabled/
@@ -100,6 +103,7 @@ def run_frozen_source_attribution(
         result, _stats = run_transport_with_progress(
             rft, Er_grid, Ez_grid, Ez0_phasor_axis, vol_params_case, emission, tracking,
             diagnostics=diagnostics, rng=rng, spatial_source=spatial_source,
+            Bt_grid=Bt_grid, Bz_grid=Bz_grid,
         )
 
         n_initial = int(np.asarray(result.B0.get_phase_space(tracking.phase_fmt, "all")).shape[0])
