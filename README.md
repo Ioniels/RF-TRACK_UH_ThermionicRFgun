@@ -151,7 +151,7 @@ validated. A run directory contains:
 | `.run_complete` | completion record with SHA-256 digests of every output; its absence means a gate failed |
 | `beam_properties.csv` | transmission, Twiss parameters and beam sizes per screen |
 | `back_bombardment_events.h5` | per-event record, schema `back_bombardment_events_v2`, with accounting, geometry and provenance groups |
-| `back_bombardment_macropulse/` | `back_bombardment_heat_source.h5` (BB0 deposited energy per cell and layer for one RF period), `back_bombardment_macropulse.h5` (current and power histories, thermal time series, COMSOL comparison), `study_config.json`, `study_results.json` |
+| `back_bombardment_macropulse/` | `back_bombardment_heat_source.h5` (BB0 deposited energy per cell and layer for one RF period), `back_bombardment_macropulse.h5` (current and power histories, thermal time series, COMSOL comparison); CLI runs also write `study_config.json` and `study_results.json` |
 | `lost_particle_diagnostics.json`, `emission_iteration.npz` | RF-Track loss table; full field and current history of the emission iteration |
 | `figures/` | every figure as 300 dpi PNG and PDF (EPS when under 15 MB) with its data alongside (`.npz`/`.json`) |
 
