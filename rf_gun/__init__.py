@@ -16,6 +16,7 @@ from typing import Any
 # event that two modules expose the same public name, package-level lookup keeps
 # the established winner.  Submodules themselves remain directly importable.
 _LAZY_MODULES = (
+    "temperature_profile",
     "config",
     "constants",
     "helpers",
@@ -80,6 +81,8 @@ def __dir__() -> list[str]:
 
 __all__ = [
     "apply_publication_style",
+    "ComsolSurfaceTemperature",
+    "load_comsol_surface_temperature",
 	"rft",
 	"show_versions",
 	"resolve_threads",

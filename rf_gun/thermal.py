@@ -100,8 +100,8 @@ __all__ = [
 @dataclass(frozen=True)
 class ConstantTemperatureMap:
     """`T_s(x,y,0) = T0_K` for every point in the cathode footprint mask (flat + bevel projection),
-    no thermal state outside it (plan Sec. 6.1, item 1). The current default/only-used initial
-    condition in every existing back-bombardment study; a trivial, always-unambiguous case for
+    no thermal state outside it (plan Sec. 6.1, item 1). A uniform initial
+    condition for back-bombardment studies; a trivial, always-unambiguous case for
     every depth-extension mode (plan Sec. 6.1: "For the present constant map all three [depth
     -extension modes] reduce to a constant initial cathode temperature").
     """
@@ -127,7 +127,7 @@ class ConstantTemperatureMap:
 @dataclass(frozen=True)
 class TemperatureMap2D:
     """An imported/asymmetric `T(x,y,t=0,z=0)` map (plan Sec. 6.1, item 2; Sec. 4's
-    `initial_temperature_xy.h5` contract) -- e.g. a future COMSOL/heater-derived baseline.
+    `initial_temperature_xy.h5` contract) -- e.g. a gridded COMSOL/heater-derived baseline.
 
     `x_m`/`y_m`: strictly increasing 1D coordinate axes of the SOURCE grid (not necessarily the
     solver's own grid) -- a regular Cartesian grid, since `on_grid` below interpolates with
@@ -899,8 +899,9 @@ def _initial_T_array(
 ) -> np.ndarray:
     if not hasattr(initial_temperature, "on_grid"):
         raise TypeError(
-            f"initial_temperature must be a ConstantTemperatureMap or TemperatureMap2D (got "
-            f"{type(initial_temperature)!r})"
+            "initial_temperature must provide on_grid (e.g. ConstantTemperatureMap, "
+            "TemperatureMap2D, or ComsolSurfaceTemperature); "
+            f"got {type(initial_temperature)!r}"
         )
     return initial_temperature.on_grid(x_centers_m, y_centers_m, mask, n_layers)
 
