@@ -71,7 +71,7 @@ def plot_emission_iteration_convergence(result: Any):
     axC.set_title(
         f"Cathode field corrections (mirror {'ON' if mirror_on else 'OFF'}, BL {'ON' if bl_on else 'OFF'})"
     )
-    axC.legend(frameon=False, fontsize=9)
+    axC.legend(frameon=False)
 
     axD.plot(it, result.relaxation_history, "o-", color="tab:purple", label=r"$\omega$")
     axD.set_ylabel(r"Relaxation $\omega$", color="tab:purple")
@@ -124,7 +124,7 @@ def plot_emission_iteration_waveforms(result: Any, x_index: int = 0, y_index: in
     axA.plot(t_ns, E_totf, "-", color="tab:red", lw=1.8, label=r"$E_{\rm total}$ (final)")
     axA.set_ylabel(r"$E_z\,(\mathrm{kV\,m^{-1}})$")
     axA.set_title(f"Signed fields at (x,y)=({x_mm:.3f}, {y_mm:.3f}) mm -- mirror {'ON' if mirror_on else 'OFF'}")
-    axA.legend(frameon=False, fontsize=9)
+    axA.legend(frameon=False)
 
     J0 = result.J_history_Apm2[0][x_index, y_index] * 1e-4
     Jf = result.J_history_Apm2[-1][x_index, y_index] * 1e-4

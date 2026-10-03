@@ -79,6 +79,7 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "apply_publication_style",
 	"rft",
 	"show_versions",
 	"resolve_threads",

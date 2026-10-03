@@ -104,13 +104,15 @@ def capture_figures(
     name: str,
     output_dir: Path | str | None,
     *,
-    formats: Sequence[str] = ("png",),
-    dpi: int = 200,
+    formats: Sequence[str] = ("png", "pdf"),
+    dpi: int = 300,
     data: Any = None,
     data_format: str = "npz",
 ):
     """Save every figure shown (via ``plt.show()``) inside this ``with`` block, before Jupyter's
     inline backend destroys it -- and the numeric data behind that figure too.
+
+    Defaults to 300-dpi PNG plus PDF with vector text/axes for publication.
 
     Notebook cells that call a plotting helper ending in ``plt.show()`` -- e.g. `field_maps`,
     `plot_spectra`, the back-bombardment figures -- never return the `Figure` object, so it can't

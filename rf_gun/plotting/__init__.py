@@ -50,6 +50,7 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "apply_publication_style",
     "DEFAULT_FIGURE_FORMATS",
     "EPS_MAX_BYTES",
     "SIZE_CAPPED_FORMATS",

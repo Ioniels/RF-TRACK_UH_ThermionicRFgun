@@ -136,7 +136,7 @@ def plot_beam_twiss_evolution(
         axes[2, 2].plot(t_mm, 100.0 * np.asarray(transmission["not_lost"]), "o-", ms=3, color=COLOR_PRIMARY, label="backward + forward")
         axes[2, 2].plot(t_mm, 100.0 * np.asarray(transmission["forward_and_surviving"]), "s--", ms=3, color=COLOR_SECONDARY, label="forward only")
         axes[2, 2].set_ylabel(r"$T\,(\%)$")
-        axes[2, 2].legend(frameon=False, fontsize=8)
+        axes[2, 2].legend(frameon=False)
     else:
         axes[2, 2].text(0.5, 0.5, "transmission not supplied", ha="center", va="center", transform=axes[2, 2].transAxes)
     axes[2, 2].set_title("Transmission vs $z$")

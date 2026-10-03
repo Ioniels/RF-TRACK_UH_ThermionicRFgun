@@ -56,7 +56,7 @@ def plot_frozen_source_attribution(result: Any):
 
     for ax in (axA, axB, axC, axD):
         ax.set_xticks(x)
-        ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=9)
+        ax.set_xticklabels(labels, rotation=30, ha="right")
         ax.grid(axis="y", alpha=0.3)
 
     fig.suptitle("Frozen-source physics attribution (same source, varying transport physics)")

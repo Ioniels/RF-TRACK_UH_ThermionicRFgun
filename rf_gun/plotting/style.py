@@ -3,10 +3,10 @@
 This module is the single source of truth for plotting aesthetics used by the
 RF-gun plotting package.
 
-No system LaTeX is installed in this environment, so `text.usetex=True` is not viable (it would
-error at render time) -- `mathtext.fontset='cm'` gives the same Computer-Modern "LaTeX look" for
-anything inside `$...$` using matplotlib's own bundled glyphs, with a serif `font.family` for
-regular text. Applied once, at import time, project-wide.
+STIX provides a consistent scientific serif face for text and mathematics using
+Matplotlib's bundled fonts, without requiring a system LaTeX installation.
+``apply_publication_style`` sets readable defaults and export quality. It runs at
+import time and can be called again after a notebook selects its inline backend.
 
 `COLOR_PRIMARY`/`COLOR_SECONDARY`/`COLOR_NEUTRAL` are the project's standard curve palette for
 figures with one or two curves (a nice blue/red/gray). Convention: x-plane vs y-plane pairs -> blue/red;
@@ -32,10 +32,58 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LinearSegmentedColormap
 
-plt.rcParams["mathtext.fontset"] = "cm"
-plt.rcParams["font.family"] = "serif"
-plt.rcParams["font.serif"] = ["cmr10", "DejaVu Serif"]
-plt.rcParams["axes.formatter.use_mathtext"] = True
+def apply_publication_style() -> None:
+    """Apply shared paper-style typography to subsequently created figures.
+
+    Display DPI and export DPI are independent. The notebook also requests retina
+    output so inline PNGs carry twice the pixels at the same displayed size.
+    Avoid a global layout engine: some diagnostic figures use inset/twin axes
+    and manage their layout explicitly.
+    """
+    mpl.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["STIXGeneral", "DejaVu Serif"],
+        "mathtext.fontset": "stix",
+        "text.usetex": False,
+        "font.size": 13,
+        "axes.titlesize": 15,
+        "axes.labelsize": 14,
+        "axes.titlepad": 12,
+        "axes.labelpad": 6,
+        "axes.linewidth": 0.8,
+        "axes.axisbelow": True,
+        "axes.formatter.use_mathtext": True,
+        "axes.formatter.limits": (-3, 4),
+        "xtick.labelsize": 12,
+        "ytick.labelsize": 12,
+        "xtick.direction": "in",
+        "ytick.direction": "in",
+        "xtick.major.size": 4,
+        "ytick.major.size": 4,
+        "xtick.major.width": 0.8,
+        "ytick.major.width": 0.8,
+        "legend.fontsize": 11,
+        "legend.title_fontsize": 12,
+        "legend.framealpha": 0.95,
+        "legend.edgecolor": "0.85",
+        "legend.fancybox": False,
+        "lines.linewidth": 1.7,
+        "grid.color": "0.8",
+        "grid.linewidth": 0.6,
+        "grid.alpha": 0.4,
+        "figure.dpi": 140,
+        "figure.facecolor": "white",
+        "savefig.dpi": 300,
+        "savefig.facecolor": "white",
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.12,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+        "svg.fonttype": "none",
+    })
+
+
+apply_publication_style()
 
 # Phase-space panels draw mirrored marginal histograms as inset axes (see
 # phase_space._phase_space_panel), which tight_layout() cannot lay out and warns about on every
@@ -187,7 +235,10 @@ def add_cathode_boundary_circle(
     styling) keeps the default white line legible over both a dark heatmap background and a
     bright, near-white hot spot.
     """
-    effects = [patheffects.withStroke(linewidth=lw + 1.6, foreground="black", alpha=0.85)]
+    # Black outlines already contrast with these heatmaps; adding a black halo
+    # doubles their apparent weight and hides edge cells.
+    effects = (None if color == "black" else
+               [patheffects.withStroke(linewidth=lw + 1.6, foreground="black", alpha=0.85)])
     theta = np.linspace(0.0, 2.0 * np.pi, 256)
     r = float(radius_mm)
     ax.plot(

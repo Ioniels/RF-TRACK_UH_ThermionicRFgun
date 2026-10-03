@@ -73,7 +73,7 @@ def phase_plot(
     ax.set_xlabel(r"RF phase (deg) (absolute)")
     ax.set_ylabel(r"Mean $p_z$ at exit (MeV/c)")
     ax.set_title("Fast phase scan: mean pz vs phase")
-    ax.legend(frameon=False, fontsize=9, loc="best")
+    ax.legend(frameon=False, loc="best")
     ax.grid(alpha=0.3)
     plt.tight_layout()
     plt.show()

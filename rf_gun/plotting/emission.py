@@ -373,6 +373,6 @@ def plot_emission_model_sensitivities(
     # One shared legend above the whole figure, outside every axes -- the model-name strings are
     # too long to fit inside a panel without overlapping the curves.
     handles, labels = axA.get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=2, frameon=False, fontsize=8)
+    fig.legend(handles, labels, loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=2, frameon=False)
     plt.show()
     return sens_by_model

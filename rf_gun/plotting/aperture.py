@@ -75,7 +75,7 @@ def plot_dynamic_aperture_losses(
     axes[0].set_xlabel(r"$z\,(\mathrm{mm})$")
     axes[0].set_ylabel(r"$r\,(\mathrm{mm})$")
     axes[0].set_title("Where particles were removed vs. R(z)")
-    axes[0].legend(frameon=False, fontsize=8)
+    axes[0].legend(frameon=False)
     axes[0].grid(alpha=0.3)
 
     edges = _fixed_width_bin_edges(z_mm, bin_width_mm)

@@ -27,7 +27,7 @@ EPS_MAX_BYTES = 15 * 1024 * 1024
 SIZE_CAPPED_FORMATS = frozenset({"eps", "ps"})
 
 #: Default format bundle for a saved run figure: raster always, vector when it fits.
-DEFAULT_FIGURE_FORMATS = ("png", "eps")
+DEFAULT_FIGURE_FORMATS = ("png", "pdf", "eps")
 
 
 def normalize_formats(formats: Sequence[str] | None, *, fallback: Sequence[str] = ("png",)) -> list[str]:

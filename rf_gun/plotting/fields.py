@@ -171,7 +171,8 @@ def field_maps(
             )
         handles, labels = ax.get_legend_handles_labels()
         if handles:
-            ax.legend(handles, labels, loc="lower right", frameon=True, facecolor="white", framealpha=0.75, fontsize=9)
+            ax.legend(handles, labels, loc="lower right", frameon=True,
+                      facecolor="white", framealpha=0.95).set_zorder(20)
         return im
 
     for ax, panel in zip(axes, panels):
@@ -254,7 +255,7 @@ def axis_phase(
     ax.set_xlabel(r"$z$ (mm)", fontsize=12)
     ax.set_ylabel(r"$\mathrm{Re}(E_z)\ (r=0)$ (V/m)", fontsize=12)
     ax.set_title(r"On-axis $E_z$ field at selected phases", fontsize=13)
-    ax.legend(frameon=False, fontsize=9, loc="best")
+    ax.legend(frameon=False, loc="best")
     ax.tick_params(labelsize=10)
     ax.grid(alpha=0.3)
     plt.tight_layout()

@@ -44,7 +44,7 @@ def plot_acceptance_scan(result: AcceptanceScanResult):
     else:
         ax.text(
             0.5, 0.5, "insufficient forward particles\nfor an emittance scan",
-            transform=ax.transAxes, ha="center", va="center", fontsize=9, color="gray",
+            transform=ax.transAxes, ha="center", va="center", color="gray",
         )
     ax.set_xlabel("$k$")
     ax.set_ylabel(r"$\varepsilon(k)\,(\mathrm{mm}\cdot\mathrm{MeV}/c)$")
@@ -59,7 +59,7 @@ def plot_acceptance_scan(result: AcceptanceScanResult):
     ax.set_ylabel(r"$dT/d(\log k)$, normalized")
     ax.set_title("Transmission slope")
     ax.grid(alpha=0.3)
-    ax.legend(frameon=False, fontsize=8)
+    ax.legend(frameon=False)
 
     n = result.n_forward
     n_core = int(result.kept_mask_core.sum())
@@ -75,7 +75,7 @@ def plot_acceptance_scan(result: AcceptanceScanResult):
             result.k_trailing, color="tab:red", ls="-", lw=1.5,
             label=rf"$k_{{\mathrm{{trailing}}}}={result.k_trailing:.2f}$ ($T={pct_trailing:.1f}\%$, applied)",
         )
-    axes[0].legend(frameon=False, fontsize=8, loc="lower right")
+    axes[0].legend(frameon=False, loc="lower right")
 
     fig.suptitle(
         rf"Acceptance scan at Bout ($N_{{\mathrm{{fwd}}}}={n}$): "

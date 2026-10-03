@@ -153,7 +153,7 @@ def _panel_impact_footprint(ax, events, geometry) -> None:
         sizes = 8.0 + 40.0 * (w[m] / w_max if w_max > 0.0 else 0.0)
         ax.scatter(
             x_mm[m], y_mm[m], s=sizes, c=style["color"], marker=style["marker"], alpha=0.7,
-            edgecolors="none", label=f"{style['label']} (N={int(np.sum(m))})",
+            edgecolors="none", rasterized=True, label=f"{style['label']} (N={int(np.sum(m)):,})",
         )
 
     theta = np.linspace(0.0, 2.0 * np.pi, 256)
@@ -181,7 +181,8 @@ def _panel_impact_footprint(ax, events, geometry) -> None:
     ax.set_ylabel(r"$y\,(\mathrm{mm})$")
     ax.set_aspect("equal")
     ax.set_title("Impact footprint and zones")
-    ax.legend(fontsize=6, loc="upper right", framealpha=0.85)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.20),
+              ncol=2, frameon=False, columnspacing=1.0)
 
 
 def _panel_deposited_energy_density(ax, fig, heat_source, geometry) -> None:
@@ -204,8 +205,8 @@ def _panel_deposited_energy_density(ax, fig, heat_source, geometry) -> None:
     q_masked = np.where(mask, q_xy, np.nan)
 
     cmap = get_default_density_cmap()
-    im = ax.pcolormesh(x_mm, y_mm, q_masked.T, cmap=cmap, shading="nearest")
-    fig.colorbar(im, ax=ax, label=r"$E_{\rm dep}\,(\mathrm{J/cell})$", fraction=0.046)
+    im = ax.pcolormesh(x_mm, y_mm, q_masked.T * 1e9, cmap=cmap, shading="nearest", rasterized=True)
+    fig.colorbar(im, ax=ax, label=r"$E_{\rm dep}\,(\mathrm{nJ/cell})$", fraction=0.046)
     add_cathode_boundary_circle(ax, geometry.flat_radius_mm, color="black", ls="--", label="flat edge")
     add_cathode_boundary_circle(
         ax, geometry.bevel_outer_radius_mm, color="black", ls="-", label="bevel outer edge"
@@ -213,8 +214,9 @@ def _panel_deposited_energy_density(ax, fig, heat_source, geometry) -> None:
     ax.set_xlabel(r"$x\,(\mathrm{mm})$")
     ax.set_ylabel(r"$y\,(\mathrm{mm})$")
     ax.set_aspect("equal")
-    ax.set_title("Deposited energy per cell (flat + bevel)")
-    ax.legend(fontsize=5.5, loc="upper right", labelcolor="black", framealpha=0.85)
+    ax.set_title("Deposited energy per cell")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.20),
+              ncol=2, frameon=False)
 
 
 def _panel_return_phase_energy(ax, events) -> None:
@@ -237,13 +239,13 @@ def _panel_return_phase_energy(ax, events) -> None:
         sizes = 8.0 + 40.0 * (w[m] / w_max if w_max > 0.0 else 0.0)
         ax.scatter(
             t_ns[m], K_keV[m], s=sizes, c=style["color"], marker=style["marker"], alpha=0.7,
-            edgecolors="none", label=style["label"],
+            edgecolors="none", rasterized=True, label=style["label"],
         )
 
     ax.set_xlabel(r"$t_{\rm hit,RF}\,(\mathrm{ns})$")
     ax.set_ylabel(r"$K_{\rm hit}\,(\mathrm{keV})$")
     ax.set_title("Return phase vs. impact energy")
-    ax.legend(fontsize=6, loc="best")
+    ax.legend(loc="best")
     ax.grid(alpha=0.3)
 
 
@@ -280,8 +282,8 @@ def _panel_energy_incidence_distributions(ax, events) -> None:
 
     ax.set_xlabel(r"$K_{\rm hit}\,(\mathrm{keV})$")
     ax.set_ylabel("weighted counts (electrons)")
-    ax.set_title("Energy spectrum by zone (shaded: 16-84th pct)")
-    ax.legend(fontsize=6, loc="upper right")
+    ax.set_title("Energy spectrum by zone\n(shaded: 16–84th percentile)")
+    ax.legend(loc="upper right")
 
 
 def _panel_origin_to_impact(ax, events) -> None:
@@ -299,12 +301,12 @@ def _panel_origin_to_impact(ax, events) -> None:
     y_emit_mm = np.asarray(events.y_emit_m, dtype=float) * 1.0e3
     color_val = np.asarray(events.incident_energy_J, dtype=float)
 
-    sc = ax.scatter(x_emit_mm, y_emit_mm, c=color_val, cmap=get_default_density_cmap(), s=24, edgecolors="none")
+    sc = ax.scatter(x_emit_mm, y_emit_mm, c=color_val * 1e12, cmap=get_default_density_cmap(), s=16, edgecolors="none", rasterized=True)
     fig = ax.figure
-    fig.colorbar(sc, ax=ax, label=r"$E_{\rm incident}\,(\mathrm{J})$ per event", fraction=0.046)
+    fig.colorbar(sc, ax=ax, label=r"$E_{\rm incident}\,(\mathrm{pJ/event})$", fraction=0.046)
     ax.set_xlabel(r"$x_{\rm emit}\,(\mathrm{mm})$")
     ax.set_ylabel(r"$y_{\rm emit}\,(\mathrm{mm})$")
-    ax.set_title("Emission origin, colored by incident energy")
+    ax.set_title("Emission origin")
     ax.set_aspect("equal")
 
 
@@ -414,8 +416,8 @@ def plot_back_bombardment_source_qualification(
     heat_source = study.heat_source
     geometry = study.config.geometry
 
-    fig = plt.figure(figsize=(15.0, 9.0))
-    gs = GridSpec(2, 3, figure=fig, wspace=0.45, hspace=0.4)
+    fig = plt.figure(figsize=(16.0, 11.5), layout="constrained")
+    gs = GridSpec(2, 3, figure=fig)
 
     ax1 = fig.add_subplot(gs[0, 0])
     _panel_impact_footprint(ax1, events, geometry)
