@@ -36,6 +36,8 @@ from typing import Any
 
 import matplotlib
 
+from rf_gun.parameters import load_reference_parameters
+
 matplotlib.use("Agg")
 
 _THERMAL_BACKENDS = ("python_xy_layered", "python_xy_sheet", "lumped_energy_check", "uh_legacy_1d")
@@ -108,10 +110,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--macropulse-duration-us",
         dest="macropulse_duration_us",
         type=float,
-        default=8.0,
+        default=float(load_reference_parameters()["inputs"]["gun"]["macropulse_configurations"]["design_study"]["value"]),
         help=(
             "RF macropulse duration in microseconds, converted once at parsing to the SI "
-            "duration_s stored in rf_gun.MacropulseConfig (plan Sec. 10.3). Default: 8.0."
+            "duration_s stored in rf_gun.MacropulseConfig (plan Sec. 10.3). Default: the "
+            "design-study configuration of the reference parameters (%(default)s); the "
+            "benchmark configuration is 5."
         ),
     )
     parser.add_argument(

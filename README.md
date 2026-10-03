@@ -129,8 +129,9 @@ python run_back_bombardment_macropulse.py --source-mode load_run --run-dir outpu
   --thermal-bin-ns 50 --initial-temperature-uniform-k 1650 --output outputs/tmp/gun_T1650K --save-figures
 ```
 
-Always pass `--phi_eff_ev` explicitly: the script default (2.1 eV) is not the LaB6(100) value
-used in production (2.66 eV, Liu et al. 2017). `--finesse {coarse,medium,fine,extra_fine}` sets
+RF frequency, cathode temperature, work function (2.66 eV, LaB6(100), Liu et al. 2017) and
+macropulse duration default to the validated entries of `parameters/UH_reference_parameters.yaml`,
+a copy of the Orchestrator master file. `--finesse {coarse,medium,fine,extra_fine}` sets
 every numerical-resolution parameter at once; `medium` matches the notebook. Full option lists:
 `--help` on either script.
 

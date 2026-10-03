@@ -18,6 +18,7 @@ from rf_gun.fieldmaps.tracking import (
     load_qualified_artifact_for_tracking as _load_qualified_artifact_for_tracking,
     artifact_tracking_provenance as _artifact_provenance_record,
 )
+from rf_gun.parameters import load_reference_parameters
 from rf_gun.provenance import (
     sha256_file as _sha256_file,
     canonical_json_sha256 as _canonical_payload_sha256,
@@ -31,7 +32,7 @@ matplotlib.use("Agg")
 _FINESSE_TIER_NAMES = ("extra_fine", "fine", "medium", "coarse")
 # Kept separate from rf_gun.aperture.R_CAV_MM/DEFAULT_DELTA_CATHODE_CHAMFER_MM for the same
 # reason as _FINESSE_TIER_NAMES above -- must match by hand.
-_R_CAV_MM = 34.0145
+_R_CAV_MM = 34.0145  # mm, cavity radius; master machine.cavity_geometry is unverified
 _DEFAULT_DELTA_CATHODE_CHAMFER_MM = 0.0
 # Kept separate from rf_gun.back_bombardment.DEFAULT_CATHODE_CHAMFER_WIDTH_MM for the same reason
 # as _FINESSE_TIER_NAMES above -- must match by hand. (Was previously referenced directly as
@@ -46,6 +47,8 @@ _DEFAULT_CATHODE_BACKSTOP_THICKNESS_MM = 2.0
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run thermionic TM010 transport with RF-Track.")
+    ref = load_reference_parameters()
+    ref_gun = ref["inputs"]["gun"]
 
     parser.add_argument("--preset", choices=["none", "quick"], default="none",
                          help="'quick': fast low-fidelity smoke-test configuration (forces "
@@ -131,7 +134,9 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
-    parser.add_argument("--f_hz", type=float, default=2.856e9)
+    parser.add_argument("--f_hz", type=float, default=ref["machine"]["rf_frequency"]["value"] * 1e9,
+                        help="RF frequency [Hz]; default is the machine value from the reference "
+                             "parameters (%(default).6g).")
     parser.add_argument("--y_cathode_mm", type=float, default=12.75,
                          help="Cathode position in the XY field map's own y-axis (maps to z=0). "
                               "Must match the field data's own PEC-screening boundary -- checked "
@@ -193,6 +198,7 @@ def parse_args() -> argparse.Namespace:
                               "effect on tracked dynamics for this gun geometry in RF-Track 2.7.0 "
                               "(see tests/test_beam_loading_cross_validation.py); attaching it "
                               "still exercises the real production code path.")
+    # Q0, Qext and R/Q match master machine.beam_loading, which is unverified.
     parser.add_argument("--bl_q0", type=float, default=4000.0)
     parser.add_argument("--bl_qext", type=float, default=3500.0)
     parser.add_argument(
@@ -208,7 +214,7 @@ def parse_args() -> argparse.Namespace:
             "a compatibility alias."
         ),
     )
-    parser.add_argument("--bl_r_over_q_ohm_per_m", type=float, default=1.0)
+    parser.add_argument("--bl_r_over_q_ohm_per_m", type=float, default=1.0)  # ohm/m, placeholder
     parser.add_argument("--bl_ncells", type=int, default=1)
     parser.add_argument("--bl_tinj_mode", choices=["auto_from_emission", "manual"], default="auto_from_emission")
     parser.add_argument("--bl_tinj_manual_mm_c", type=float, default=0.0)
@@ -231,6 +237,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--screen_t0_manual_mm_c", type=float, default=0.0)
     parser.add_argument("--screen_log", action=argparse.BooleanOptionalAction, default=False)
 
+    # mm; flat-face radius of the model geometry, kept until master cathode diameter (3 mm,
+    # unverified) is settled against the bevel.
     parser.add_argument(
         "--r_cathode_mm", type=float, default=2.80 / 2,
         help="Emission radius [mm]. Default 1.40mm is the physical flat-face radius (2.80mm "
@@ -388,11 +396,11 @@ def parse_args() -> argparse.Namespace:
              "of the prescribed on-axis model. Falls back clearly (prints a message, keeps the "
              "prescribed source) if the iteration does not converge.",
     )
-    # 1650 K matches the notebook's default and the brief's requested uniform default for the
-    # KOA production studies -- previously 1700.0 here, an undocumented mismatch between entry
-    # points (see RF_GUN_REPOSITORY_UPGRADE_INSTRUCTIONS.md Sec. 5, item C4 / Sec. 2 finding #5).
-    parser.add_argument("--t_cathode_k", type=float, default=1650.0)
-    parser.add_argument("--phi_eff_ev", type=float, default=2.1)
+    parser.add_argument("--t_cathode_k", type=float, default=float(ref_gun["cathode_temperature"]["value"]),
+                        help="Cathode temperature [K]; default from the reference parameters (%(default)s).")
+    parser.add_argument("--phi_eff_ev", type=float, default=float(ref_gun["work_function"]["value"]),
+                        help="Effective work function [eV]; default from the reference parameters "
+                             "(%(default)s).")
     parser.add_argument(
         "--work-function-temperature-model", dest="work_function_temperature_model",
         choices=["constant_phi_eff", "linear_tcwf", "piecewise_surface_evolution"], default=None,
