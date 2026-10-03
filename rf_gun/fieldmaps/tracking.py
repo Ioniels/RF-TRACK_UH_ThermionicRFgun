@@ -101,7 +101,7 @@ def load_qualified_artifact_for_tracking(
         warnings.warn(
             f"Field amplitude uses {detail}. Relative power scaling does not validate "
             "the steady-state amplitude or the supplier's port-power convention. "
-            "See docs/field_map_fill_audit.md.",
+            "See README.md, section Field maps from XFdtd.",
             RuntimeWarning, stacklevel=2,
         )
     source_power_raw = field.metadata.get("source_power_w")

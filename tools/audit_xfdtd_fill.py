@@ -104,7 +104,7 @@ def audit(source: Path) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=Path("field_maps/cavity_E_H_full_volume.h5"))
-    parser.add_argument("--output", type=Path, default=Path("docs/field_map_fill_audit.json"))
+    parser.add_argument("--output", type=Path, default=Path("outputs/ref/field_map_fill_audit.json"))
     args = parser.parse_args()
     if args.source.resolve() == args.output.resolve():
         parser.error("source and output must be distinct")
