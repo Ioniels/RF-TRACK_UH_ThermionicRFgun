@@ -29,13 +29,14 @@ Koa outputs/
 KOA results/
 analysis_Koa/
 
-# Field maps: only the two small qualified artifacts and their report are versioned
+# Raw and intermediate field maps stay local
 *.mat
 field_maps/**/*.h5
 field_maps/uncorrected_control/
 field_maps/fill_audit_v1_archive/
 field_maps/fill_audit_v2/
 field_maps/grid_convergence/
+# derived axisymmetric field maps kept as reference inputs for the examples
 !field_maps/cavity_axisymmetric_m0_rftrack.h5
 !field_maps/cavity_axisymmetric_m0_zero_tail_control.h5
 

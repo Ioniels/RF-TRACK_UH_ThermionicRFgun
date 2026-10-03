@@ -75,7 +75,9 @@ The source `field_maps/cavity_E_H_full_volume.h5` (24.8 GB, E and H at 2.865417 
 is reduced once, out of core, into a small immutable artifact that notebooks and batch jobs
 load. Versioned artifacts: `field_maps/cavity_axisymmetric_m0_rftrack.h5` (4.3 MB, with its
 `.report.json`) and the zero-tail sensitivity control `cavity_axisymmetric_m0_zero_tail_control.h5`
-(3.8 MB, selected only with `--field-tail-policy zero-control`).
+(3.8 MB, selected only with `--field-tail-policy zero-control`). These derived maps are versioned
+as reference inputs; the raw RemCom XFdtd sets are not. The field-map manifest is documented
+separately and available from Niels.
 
 ```bash
 python prepare_xfdtd_fieldmap.py \
