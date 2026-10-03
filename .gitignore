@@ -13,24 +13,37 @@ venv/
 # Jupyter
 .ipynb_checkpoints/
 
-# Project-specific
-archive/
+# Local verification only; tests are not versioned
+tests/
+
+# Working documents live outside the repository
+docs/
+
+# Run outputs and local-only folders
 outputs/
+archive/
+logs/
+manual_references/
+Upgrade_history/
 Koa outputs/
 KOA results/
 analysis_Koa/
-manual_references/
-logs/
 
-# Solver-scale raw inputs are verified by checksum and kept outside Git history.
-field_maps/cavity_E_H_full_volume.h5
-# Local audit copies; active maps and matching controls remain visible to Git.
+# Field maps: only the two small qualified artifacts and their report are versioned
+*.mat
+field_maps/**/*.h5
+field_maps/uncorrected_control/
 field_maps/fill_audit_v1_archive/
 field_maps/fill_audit_v2/
+field_maps/grid_convergence/
+!field_maps/cavity_axisymmetric_m0_rftrack.h5
+!field_maps/cavity_axisymmetric_m0_zero_tail_control.h5
 
-# Local upgrade notes (the executable regression tests are source and must be versioned)
-Upgrade_history/
-
-# Local artifacts / OS metadata
+# Figures, documents and archives
+*.png
+*.pdf
 *.zip
+
+# OS metadata
+.DS_Store
 *:Zone.Identifier
