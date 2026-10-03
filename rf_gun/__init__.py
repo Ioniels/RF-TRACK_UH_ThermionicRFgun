@@ -208,6 +208,8 @@ __all__ = [
 	"save_run_config",
 	"save_run_results",
 	"save_beam_openpmd",
+	"save_exit_plane_openpmd",
+	"screen_particle_group",
 	"to_json_safe",
 	"atomic_write_json",
 	"build_validation_report",

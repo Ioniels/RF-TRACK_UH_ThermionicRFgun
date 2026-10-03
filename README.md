@@ -23,8 +23,9 @@ beamline repositories; the back-bombardment heat source feeds the COMSOL 3D ther
 - **Transport.** RF-Track `Volume` with an explicit `SpaceCharge_PIC_FreeSpace` engine and
   cathode mirror plane, `BeamLoadingSW`, the cavity channel R(z) as a live `Aperture_1d`, a thin
   cathode backstop for event capture, and a deflection magnet as a `UserField`. The domain ends
-  at the exit tube face, 40.589 mm from the cathode; use the last screen, not `Bout`, for
-  exit-beam quantities.
+  at the exit tube face, 40.589 mm from the cathode. The CLI writes the gun output
+  `Bout_sout*.h5` at that plane (fixed s, from the exit screen: forward, alive, not trailing) and
+  keeps the final fixed-time snapshot, about 1.2 m downstream, as `Bsnapshot_t*.h5`.
 - **Emission fields iteration.** An optional under-relaxed Picard loop that converges the emitted
   current density J(x, y, t) against the space-charge and mirror field it creates near the
   cathode, and can feed the converged source into the production run.

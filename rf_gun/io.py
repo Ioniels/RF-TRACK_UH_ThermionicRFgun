@@ -107,7 +107,7 @@ def save_screen_distributions_hdf5(
     alongside the openPMD ParticleGroup data, so a single file is self-describing.
     """
     try:
-        from pmd_beamphysics import ParticleGroup
+        from pmd_beamphysics import ParticleGroup  # noqa: F401
     except ImportError as exc:  # pragma: no cover - depends on environment
         raise ImportError(
             "openPMD-beamphysics is required to save screens in HDF5 format. "
@@ -141,36 +141,9 @@ def save_screen_distributions_hdf5(
             continue
 
         n = int(M.shape[0])
-        x_mm, px_MeVc, y_mm, py_MeVc, z_mm, pz_MeVc = (
-            M[:, 0], M[:, 1], M[:, 2], M[:, 3], M[:, 4], M[:, 5],
-        )
-        if M.shape[1] >= 8:
-            pid = M[:, 6].astype(np.int64)
-            t_mm_c = M[:, 7]
-        else:
-            pid = np.arange(n, dtype=np.int64)
-            t_mm_c = np.zeros(n, dtype=float)
-
-        weight = (
-            np.full(n, n_real_per_macro * q_e, dtype=float)
-            if n_real_per_macro > 0
-            else np.full(n, float(q_e), dtype=float)
-        )
-
-        data = {
-            "x": x_mm * 1e-3,
-            "y": y_mm * 1e-3,
-            "z": z_mm * 1e-3,
-            "px": px_MeVc * 1e6,
-            "py": py_MeVc * 1e6,
-            "pz": pz_MeVc * 1e6,
-            "t": t_mm_c * 1e-3 / c,
-            "status": np.ones(n, dtype=int),
-            "weight": weight,
-            "id": pid,
-            "species": str(species),
-        }
-        pg = ParticleGroup(data=data)
+        pz_MeVc = M[:, 5]
+        weight_C = n_real_per_macro * q_e if n_real_per_macro > 0 else float(q_e)
+        pg = screen_particle_group(M, weight_C, species=species)
 
         if i < len(precomputed):
             summary = dict(precomputed[i])
@@ -231,6 +204,73 @@ def save_lost_particles_json(output_dir: Path, lost_table: np.ndarray | None) ->
     out_path = Path(output_dir) / "lost_particle_diagnostics.json"
     with out_path.open("w", encoding="utf-8") as f:
         json.dump(to_json_safe(payload), f, indent=2, sort_keys=True)
+    return out_path
+
+
+def screen_particle_group(M: np.ndarray, weight_C: float, *, species: str = "electron") -> Any:
+    """openPMD-beamphysics ParticleGroup from an RF-Track screen array (x, Px, y, Py, z, Pz[, id, t])."""
+    from pmd_beamphysics import ParticleGroup
+
+    M = np.asarray(M, dtype=float)
+    n = int(M.shape[0])
+    if M.shape[1] >= 8:
+        pid = M[:, 6].astype(np.int64)
+        t_mm_c = M[:, 7]
+    else:
+        pid = np.arange(n, dtype=np.int64)
+        t_mm_c = np.zeros(n, dtype=float)
+    return ParticleGroup(data={
+        "x": M[:, 0] * 1e-3,
+        "y": M[:, 2] * 1e-3,
+        "z": M[:, 4] * 1e-3,
+        "px": M[:, 1] * 1e6,
+        "py": M[:, 3] * 1e6,
+        "pz": M[:, 5] * 1e6,
+        "t": t_mm_c * 1e-3 / c,
+        "status": np.ones(n, dtype=int),
+        "weight": np.full(n, float(weight_C), dtype=float),
+        "id": pid,
+        "species": str(species),
+    })
+
+
+def save_exit_plane_openpmd(
+    output_path: Path,
+    screen_pg: Any,
+    keep: np.ndarray,
+    *,
+    s_out_m: float,
+    selection: str,
+    extra_attrs: dict[str, Any] | None = None,
+) -> Path:
+    """Write the beam crossing the plane s = s_out_m (fixed-s frame: z = s_out_m, t = arrival time).
+
+    `screen_pg` is the ParticleGroup recorded by the screen at s_out_m; `keep` selects the alive,
+    not-trailing particles, and non-finite or pz <= 0 rows are always dropped.
+    """
+    from pmd_beamphysics import ParticleGroup
+
+    d = screen_pg.data
+    keep = np.asarray(keep, dtype=bool) & (d["pz"] > 0.0)
+    keep &= np.all(np.isfinite(np.column_stack([d[k] for k in ("x", "y", "px", "py", "pz", "t")])), axis=1)
+    if not np.any(keep):
+        raise ValueError(f"No particles cross s = {s_out_m} m with the requested selection.")
+    data = {k: (v[keep] if isinstance(v, np.ndarray) else v) for k, v in d.items()}
+    data["z"] = np.full(int(keep.sum()), float(s_out_m))
+    pg = ParticleGroup(data=data)
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    pg.write(str(out_path))
+    attrs = {**(extra_attrs or {}), "s_out_m": float(s_out_m), "Q_total_C": float(pg.charge),
+             "selection": str(selection), "frame": "fixed_s"}
+    import h5py
+
+    with h5py.File(str(out_path), "a") as h5:
+        for key, value in attrs.items():
+            try:
+                h5.attrs[str(key)] = value
+            except (TypeError, ValueError):
+                h5.attrs[str(key)] = str(value)
     return out_path
 
 

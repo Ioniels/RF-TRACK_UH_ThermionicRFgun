@@ -1633,38 +1633,29 @@ def main() -> None:
         mf, result.lost_table, extra_backward_ids=acceptance_scan.trailing_ids, backstop_z_min_m=_backstop_z_min_m,
     )
 
-    # Save B0 (initial launch state) and Bout (final, forward-going, dynamic-aperture-surviving
-    # state) as openPMD-beamphysics HDF5, beside the per-screen HDF5 files in
+    # Save B0 (initial launch state), Bout (the beam crossing the exit plane) and the final
+    # fixed-time snapshot as openPMD-beamphysics HDF5, beside the per-screen HDF5 files in
     # screen_distributions_hdf5/ -- the canonical location for every particle-distribution output
     # (Section 6.2: openpmd/ as a separate top-level directory, and the redundant beam_data.npz,
     # are both retired in favor of this one schema/location).
     openpmd_h5_path = None
     b0_h5_path = None
     openpmd_exit_beam_summary = None
+    snapshot_h5_path = None
+    openpmd_snapshot_summary = None
+    _exit_screen_missing = False
     if bool(args.save_openpmd_beam):
         screen_hdf5_dir = output_dir / "screen_distributions_hdf5"
 
-        _which = "good"
-        # NOTE: `Bout` is a fixed-TIME snapshot at `t_max_mm`, not a fixed-z one. Tracking does not
-        # stop at the domain end: past `z_max` there is no field and no aperture, and every
-        # surviving particle keeps drifting until `t_max_mm` (2000 mm/c by default), so a saved
-        # Bout typically sits ~1-1.5 m downstream with a wide z spread -- e.g. a real KOA
-        # study_ii "fine" case named `Bout_sout33.7mm_...h5` holds a beam whose z runs 0.25-1.52 m.
-        # `s_out_m` therefore names the END OF THE MODELLED STRUCTURE (the last z at which
-        # anything acted on the beam), not the position of these particles; the actual z spread is
-        # recorded alongside it below so the name cannot be read as a position.
+        # `Bout` is a fixed-time snapshot at t_max_mm: past z_max particles drift freely, so it sits
+        # ~1-1.5 m downstream, sheared by the energy spread (eps_n x20 on the reference run). The
+        # gun output handed to the beamline is the beam crossing the exit plane s = z_max, taken
+        # from the screen anchored there; the snapshot is kept under its own name.
         s_out_m = float(z_max)
-        _save_source = "Bout (final tracking time, dynamic-aperture survivors)"
-
         s_out_mm = s_out_m * 1e3
         _run_tag = f"T{float(args.t_cathode_k):.0f}K_{rg.sc_bl_tag(bool(args.sc_enabled), bool(args.beam_loading))}"
-        _stem = f"Bout_sout{s_out_mm:.1f}mm_{_run_tag}"
         _meta = {
             "run_name": output_dir.name,
-            "s_out_m": s_out_m,
-            "s_out_meaning": "end of the modelled structure (domain end), not the z of these particles",
-            "t_max_mm": float(t_max_mm),
-            "save_source": _save_source,
             "delta_cathode_chamfer_mm": float(delta_cathode_chamfer_mm),
             "transport_phase_deg": float(phase_deg_transport),
             "f_hz": float(f_hz),
@@ -1672,17 +1663,52 @@ def main() -> None:
             "work_function_eV": float(args.phi_eff_ev),
             "space_charge": bool(args.sc_enabled),
             "beam_loading": bool(args.beam_loading),
-            "Q_total_C": float(result.thermo_info.get("Q_total_C", float("nan"))),
+            "Q_emitted_C": float(result.thermo_info.get("Q_total_C", float("nan"))),
         }
-        openpmd_h5_path = rg.save_beam_openpmd(
-            screen_hdf5_dir / f"{_stem}.h5",
-            result.Bout,
-            which=_which,
-            forward_only=True,
-            aperture_radius_mm=None,
-            species="electron",
-            extra_attrs=_meta,
+        from pmd_beamphysics import ParticleGroup
+
+        def _pmd_summary(path: Path) -> Dict[str, Any]:
+            pg = ParticleGroup(h5=str(path))
+            return {
+                "file": str(path.resolve()), "n_saved": int(pg.n_particle), "total_charge_C": float(pg.charge),
+                "z_saved_min_m": float(pg.z.min()), "z_saved_mean_m": float(pg.z.mean()), "z_saved_max_m": float(pg.z.max()),
+                "sigma_t_s": float(pg["sigma_t"]), "mean_energy_eV": float(pg["mean_energy"]),
+                "norm_emit_x_m": float(pg["norm_emit_x"]), "norm_emit_y_m": float(pg["norm_emit_y"]),
+            }
+
+        snapshot_h5_path = rg.save_beam_openpmd(
+            screen_hdf5_dir / f"Bsnapshot_t{float(t_max_mm):.0f}mmc_{_run_tag}.h5",
+            result.Bout, which="good", forward_only=True, aperture_radius_mm=None, species="electron",
+            extra_attrs={**_meta, "frame": "fixed_t", "t_snapshot_mm_c": float(t_max_mm),
+                         "save_source": "Bout (fixed-time snapshot at t_max_mm, dynamic-aperture survivors, pz > 0)"},
         )
+        openpmd_snapshot_summary = {"frame": "fixed_t", "t_snapshot_mm_c": float(t_max_mm), **_pmd_summary(snapshot_h5_path)}
+
+        _dz = np.abs(z_snaps_arr - s_out_m) if z_snaps_arr.size else np.array([np.inf])
+        _i_exit = int(np.argmin(_dz))
+        if _dz[_i_exit] <= 1e-6 and np.asarray(result.M_snaps[_i_exit]).ndim == 2:
+            M_exit = np.asarray(result.M_snaps[_i_exit], dtype=float)
+            _is_backward, _is_lost = rg.tag_mask(M_exit, tags)
+            _selection = ("screen at s_out; pz > 0; not backward, unphysical or trailing at Bout "
+                          "(acceptance scan); not in the RF-Track lost table")
+            openpmd_h5_path = rg.save_exit_plane_openpmd(
+                screen_hdf5_dir / f"Bout_sout{s_out_mm:.1f}mm_{_run_tag}.h5",
+                rg.screen_particle_group(M_exit, abs(_meta["Q_emitted_C"]) / max(1, int(m0.shape[0]))),
+                ~_is_backward & ~_is_lost,
+                s_out_m=float(z_snaps_arr[_i_exit]),
+                selection=_selection,
+                extra_attrs={**_meta, "save_source": f"screen {_i_exit} at the exit plane"},
+            )
+            openpmd_exit_beam_summary = {
+                "frame": "fixed_s", "s_out_m": float(z_snaps_arr[_i_exit]), "selection": _selection,
+                **_pmd_summary(openpmd_h5_path),
+            }
+            print(f"Saved exit-plane beam    : {openpmd_h5_path.relative_to(output_dir)} "
+                  f"(s = {s_out_mm:.3f} mm, N = {openpmd_exit_beam_summary['n_saved']}, "
+                  f"Q = {openpmd_exit_beam_summary['total_charge_C'] * 1e12:.2f} pC)")
+        else:
+            _exit_screen_missing = True
+            print(f"WARNING: no screen at z_max = {s_out_mm:.3f} mm (use --n_screens >= 1); exit-plane Bout not written.")
 
         # B0: the as-launched distribution, no forward/aperture filtering (nothing has happened
         # to it yet) -- "which='all'" since RF-Track has not classified any particle as lost yet.
@@ -1693,44 +1719,9 @@ def main() -> None:
             forward_only=False,
             aperture_radius_mm=None,
             species="electron",
-            extra_attrs={**_meta, "save_source": "B0 (as-launched distribution)"},
+            extra_attrs={**_meta, "Q_total_C": _meta["Q_emitted_C"], "save_source": "B0 (as-launched distribution)"},
         )
-
-        from pmd_beamphysics import ParticleGroup
-
-        _pg = ParticleGroup(h5=str(openpmd_h5_path))
-        _z_saved_m = np.asarray(_pg["z"], dtype=float)
-        openpmd_exit_beam_summary = {
-            "file": str(openpmd_h5_path.resolve()),
-            "source": _save_source,
-            "s_out_m": s_out_m,
-            "s_out_meaning": "end of the modelled structure (domain end), not the z of these particles",
-            "t_max_mm": float(t_max_mm),
-            "z_saved_min_m": float(np.min(_z_saved_m)) if _z_saved_m.size else float("nan"),
-            "z_saved_mean_m": float(np.mean(_z_saved_m)) if _z_saved_m.size else float("nan"),
-            "z_saved_max_m": float(np.max(_z_saved_m)) if _z_saved_m.size else float("nan"),
-            "n_saved": int(_pg.n_particle),
-            "total_charge_C": float(_pg.charge),
-            "mean_energy_eV": float(_pg["mean_energy"]),
-            "norm_emit_x_m": float(_pg["norm_emit_x"]),
-            "norm_emit_y_m": float(_pg["norm_emit_y"]),
-        }
-        print(f"Saved exit beam to: {openpmd_h5_path.resolve()}")
-        print(f"Source                   : {_save_source}")
-        print(
-            f"Structure ends at        : s_out = {s_out_mm:.3f} mm from cathode (z=0)"
-        )
-        print(
-            "z of saved distribution  : "
-            + (
-                f"{np.min(_z_saved_m) * 1e3:.1f} to {np.max(_z_saved_m) * 1e3:.1f} mm "
-                f"(mean {np.mean(_z_saved_m) * 1e3:.1f} mm) -- free drift past the structure "
-                f"until t_max_mm={float(t_max_mm):.0f} mm/c"
-                if _z_saved_m.size
-                else "no particles saved"
-            )
-        )
-        print(f"Saved                    : {_pg.n_particle}")
+        print(f"Saved fixed-t snapshot   : {snapshot_h5_path.relative_to(output_dir)}")
         print(f"Saved B0 (as-launched)   : {b0_h5_path.relative_to(output_dir)}")
 
     # Full B0/Bout phase-space arrays: screen_distributions_hdf5/{B0,Bout_*}.h5 above are the
@@ -2313,6 +2304,7 @@ def main() -> None:
             "beam_summary": rg.to_json_safe(beam_summary),
             "back_bombardment": back_bombardment_summary,
             "openpmd_exit_beam": openpmd_exit_beam_summary,
+            "openpmd_snapshot_beam": openpmd_snapshot_summary,
             "reference_particle_warning": bool(ref_warn),
             "reference_particle_note": ref_note,
             "screen_phase_space_batch": rg.to_json_safe(screen_phase_space_batch),
@@ -2339,6 +2331,7 @@ def main() -> None:
             "emission_iteration_npz": str(emission_iteration_npz_path.resolve()) if emission_iteration_npz_path is not None else None,
             "figures_dir": str((output_dir / "figures").resolve()) if saved_figures else None,
             "bout_h5": str(openpmd_h5_path) if openpmd_h5_path is not None else None,
+            "bsnapshot_h5": str(snapshot_h5_path) if snapshot_h5_path is not None else None,
             "b0_h5": str(b0_h5_path) if b0_h5_path is not None else None,
             "screens_dir": (
                 str(output_dir / "screen_distributions_hdf5")
@@ -2425,12 +2418,14 @@ def main() -> None:
     if bool(args.save_openpmd_beam):
         validation_checks["requested_openpmd_beams_written"] = {
             "passed": bool(
-                openpmd_h5_path is not None
-                and openpmd_h5_path.is_file()
+                (_exit_screen_missing or (openpmd_h5_path is not None and openpmd_h5_path.is_file()))
+                and snapshot_h5_path is not None
+                and snapshot_h5_path.is_file()
                 and b0_h5_path is not None
                 and b0_h5_path.is_file()
             ),
             "bout_path": str(openpmd_h5_path) if openpmd_h5_path is not None else None,
+            "bsnapshot_path": str(snapshot_h5_path) if snapshot_h5_path is not None else None,
             "b0_path": str(b0_h5_path) if b0_h5_path is not None else None,
         }
     if bool(args.save_screen_hdf5):
