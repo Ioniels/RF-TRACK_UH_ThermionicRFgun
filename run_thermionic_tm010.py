@@ -1415,6 +1415,13 @@ def main() -> None:
             # outputs. z_min itself is still excluded (a screen at the cathode measures nothing).
             z_snaps = np.linspace(float(z_min), float(z_max), n_screens + 1)[1:].tolist()
 
+    if bool(args.save_openpmd_beam):
+        # the exit-plane Bout is taken from a screen at z_max
+        _z_requested = list(z_snaps or [])
+        z_snaps = rg.ensure_exit_screen(_z_requested, z_max)
+        if len(z_snaps) > len(_z_requested):
+            print(f"Note: --save-openpmd-beam adds a screen at z_max = {z_max * 1e3:.3f} mm for the exit-plane Bout.")
+
     tracking = rg.TrackingParams(
         phi_deg=float(phase_deg_transport),
         n_particles=int(args.n_particles),
@@ -1643,7 +1650,6 @@ def main() -> None:
     openpmd_exit_beam_summary = None
     snapshot_h5_path = None
     openpmd_snapshot_summary = None
-    _exit_screen_missing = False
     if bool(args.save_openpmd_beam):
         screen_hdf5_dir = output_dir / "screen_distributions_hdf5"
 
@@ -1679,36 +1685,45 @@ def main() -> None:
         snapshot_h5_path = rg.save_beam_openpmd(
             screen_hdf5_dir / f"Bsnapshot_t{float(t_max_mm):.0f}mmc_{_run_tag}.h5",
             result.Bout, which="good", forward_only=True, aperture_radius_mm=None, species="electron",
+            reference_time_s=float(t_max_mm) * 1e-3 / rg.c,
             extra_attrs={**_meta, "frame": "fixed_t", "t_snapshot_mm_c": float(t_max_mm),
                          "save_source": "Bout (fixed-time snapshot at t_max_mm, dynamic-aperture survivors, pz > 0)"},
         )
         openpmd_snapshot_summary = {"frame": "fixed_t", "t_snapshot_mm_c": float(t_max_mm), **_pmd_summary(snapshot_h5_path)}
 
-        _dz = np.abs(z_snaps_arr - s_out_m) if z_snaps_arr.size else np.array([np.inf])
-        _i_exit = int(np.argmin(_dz))
-        if _dz[_i_exit] <= 1e-6 and np.asarray(result.M_snaps[_i_exit]).ndim == 2:
-            M_exit = np.asarray(result.M_snaps[_i_exit], dtype=float)
+        M_exit = result.M_exit_full
+        if M_exit is None and np.any(np.abs(z_snaps_arr - s_out_m) <= 1e-6):
+            if args.max_screen_particles is not None:
+                raise RuntimeError(
+                    "Exit-plane Bout needs the full exit-screen array, but only the copy capped by "
+                    f"--max-screen-particles={args.max_screen_particles} is available."
+                )
+            M_exit = result.M_snaps[int(np.argmin(np.abs(z_snaps_arr - s_out_m)))]
+        if M_exit is not None and np.asarray(M_exit).ndim == 2:
+            M_exit = np.asarray(M_exit, dtype=float)
+            _s_exit_m = float(result.z_exit_m) if result.z_exit_m is not None else s_out_m
             _is_backward, _is_lost = rg.tag_mask(M_exit, tags)
             _selection = ("screen at s_out; pz > 0; not backward, unphysical or trailing at Bout "
                           "(acceptance scan); not in the RF-Track lost table")
             openpmd_h5_path = rg.save_exit_plane_openpmd(
                 screen_hdf5_dir / f"Bout_sout{s_out_mm:.1f}mm_{_run_tag}.h5",
-                rg.screen_particle_group(M_exit, abs(_meta["Q_emitted_C"]) / max(1, int(m0.shape[0]))),
+                M_exit,
+                abs(_meta["Q_emitted_C"]) / max(1, int(m0.shape[0])),
                 ~_is_backward & ~_is_lost,
-                s_out_m=float(z_snaps_arr[_i_exit]),
+                s_out_m=_s_exit_m,
                 selection=_selection,
-                extra_attrs={**_meta, "save_source": f"screen {_i_exit} at the exit plane"},
+                extra_attrs={**_meta, "save_source": "full screen array at the exit plane"},
             )
             openpmd_exit_beam_summary = {
-                "frame": "fixed_s", "s_out_m": float(z_snaps_arr[_i_exit]), "selection": _selection,
+                "frame": "fixed_s", "s_out_m": _s_exit_m, "selection": _selection,
+                "transverse_source": "lowercase" if M_exit.shape[1] > 11 else "corrected_from_uppercase",
                 **_pmd_summary(openpmd_h5_path),
             }
             print(f"Saved exit-plane beam    : {openpmd_h5_path.relative_to(output_dir)} "
                   f"(s = {s_out_mm:.3f} mm, N = {openpmd_exit_beam_summary['n_saved']}, "
                   f"Q = {openpmd_exit_beam_summary['total_charge_C'] * 1e12:.2f} pC)")
         else:
-            _exit_screen_missing = True
-            print(f"WARNING: no screen at z_max = {s_out_mm:.3f} mm (use --n_screens >= 1); exit-plane Bout not written.")
+            print(f"WARNING: no particles recorded at z_max = {s_out_mm:.3f} mm; exit-plane Bout not written.")
 
         # B0: the as-launched distribution, no forward/aperture filtering (nothing has happened
         # to it yet) -- "which='all'" since RF-Track has not classified any particle as lost yet.
@@ -2418,7 +2433,8 @@ def main() -> None:
     if bool(args.save_openpmd_beam):
         validation_checks["requested_openpmd_beams_written"] = {
             "passed": bool(
-                (_exit_screen_missing or (openpmd_h5_path is not None and openpmd_h5_path.is_file()))
+                openpmd_h5_path is not None
+                and openpmd_h5_path.is_file()
                 and snapshot_h5_path is not None
                 and snapshot_h5_path.is_file()
                 and b0_h5_path is not None
@@ -2587,7 +2603,7 @@ def main() -> None:
         rg.atomic_write_json(
             completion_marker_path,
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "stage": "transport",
                 "status": "complete",
                 "timestamp_utc": datetime.now(timezone.utc).isoformat(),

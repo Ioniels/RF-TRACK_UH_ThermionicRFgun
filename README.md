@@ -24,8 +24,12 @@ beamline repositories; the back-bombardment heat source feeds the COMSOL 3D ther
   cathode mirror plane, `BeamLoadingSW`, the cavity channel R(z) as a live `Aperture_1d`, a thin
   cathode backstop for event capture, and a deflection magnet as a `UserField`. The domain ends
   at the exit tube face, 40.589 mm from the cathode. The CLI writes the gun output
-  `Bout_sout*.h5` at that plane (fixed s, from the exit screen: forward, alive, not trailing) and
-  keeps the final fixed-time snapshot, about 1.2 m downstream, as `Bsnapshot_t*.h5`.
+  `Bout_sout*.h5` at that plane (fixed s, from the full exit screen: forward, alive, not
+  trailing; a screen at z_max is added if none is requested) and keeps the final fixed-time
+  snapshot, about 1.2 m downstream, as `Bsnapshot_t*.h5`. Bout and the beam-properties table use
+  the plane-crossing x, y (RF-Track `%x %y`); a screen's `%X %Y` are fixed-time back-projections
+  to the reference particle's arrival time, with `%Z` relative to the plane, and the per-screen
+  `screen_*.h5` files keep that layout (x = X - (Px/Pz) Z recovers the crossing).
 - **Emission fields iteration.** An optional under-relaxed Picard loop that converges the emitted
   current density J(x, y, t) against the space-charge and mirror field it creates near the
   cathode, and can feed the converged source into the production run.
@@ -148,7 +152,7 @@ validated. A run directory contains:
 
 | File | Content |
 |---|---|
-| `screen_distributions_hdf5/B0_*.h5`, `Bout_*.h5`, `screen_*_z*.h5` | openPMD-beamphysics `ParticleGroup` files: launched bunch, final forward surviving bunch, one full phase space per screen (last screen on the exit face, 40.589 mm) |
+| `screen_distributions_hdf5/B0_*.h5`, `Bout_*.h5`, `Bsnapshot_t*.h5`, `screen_*_z*.h5` | openPMD-beamphysics `ParticleGroup` files: launched bunch, exit-plane beam (fixed s), fixed-time snapshot at t_max, one full phase space per screen (last screen on the exit face, 40.589 mm) |
 | `run_config.json` | every input parameter plus pre-tracking derived values (crest phase, Veff, R/Q, grids, field provenance and digests) |
 | `run_results.json` | what the run found: peak current and current density, beam properties vs z, particle classification, aperture and back-bombardment summaries, paths of all other outputs |
 | `validation.json` | pass/fail report (phase calibration, particle-ID uniqueness, finite RF parameters, field hull fraction, required products, iteration convergence); `status == "ok"` required for `.run_complete` |

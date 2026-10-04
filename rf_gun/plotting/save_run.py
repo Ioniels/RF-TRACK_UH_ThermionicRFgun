@@ -25,10 +25,11 @@ from .phase_space import (
 
 
 PHASE_SPACE_COLUMNS = ["x_mm", "px_MeV_c", "y_mm", "py_MeV_c", "z_mm", "pz_MeV_c"]
-#: Column names for the 4 optional trailing columns of `EXTENDED_PHASE_FMT_DEFAULT`, appended to
+#: Column names for the optional trailing columns of `EXTENDED_PHASE_FMT_DEFAULT` (and the screen-only
+#: crossing x, y of `SCREEN_PHASE_FMT`), appended to
 #: `PHASE_SPACE_COLUMNS` (by count, not by inspecting the caller's actual phase_fmt string) when a
 #: caller doesn't supply explicit `phase_space_columns`.
-_EXTENDED_EXTRA_COLUMNS = ["id", "t_mm_c", "E_MeV", "K_MeV"]
+_EXTENDED_EXTRA_COLUMNS = ["id", "t_mm_c", "E_MeV", "K_MeV", "x_cross_mm", "y_cross_mm"]
 
 
 def _save_figure(

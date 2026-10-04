@@ -73,6 +73,11 @@ class EmissionParams:
 #: exactly the core 6 columns already slices `[:, :6]` explicitly, so this extension is additive.
 EXTENDED_PHASE_FMT = "%X %Px %Y %Py %Z %Pz %id %t %E %K"
 
+#: Screen (Bunch6d) columns: EXTENDED_PHASE_FMT + plane-crossing %x %y [mm] (indices 10, 11). On a
+#: screen %X, %Y are fixed-time back-projections to the reference particle's arrival time and %Z is
+#: relative to the plane; %x, %y, %t are the crossing values. Bunch6dT does not accept %x.
+SCREEN_PHASE_FMT = EXTENDED_PHASE_FMT + " %x %y"
+
 #: `thermo_info` entries that are per-emission-time-sample arrays (one value per `t_s` sample,
 #: typically hundreds), not per-run scalars -- must be excluded from any run summary/config JSON.
 THERMO_INFO_TIME_ARRAY_KEYS = frozenset({
@@ -112,6 +117,7 @@ class TrackingParams:
     n_particles: int
     z_screens_m: Optional[Sequence[float]] = None
     phase_fmt: str = EXTENDED_PHASE_FMT
+    screen_phase_fmt: str = SCREEN_PHASE_FMT
     screen_width_mm: float | None = None
     screen_height_mm: float | None = None
     screen_time_window_mm_c: float | None = None
@@ -142,6 +148,9 @@ class SimulationResult:
     screen_summaries: List[Dict[str, float]]
     lost_table: Optional[np.ndarray] = None
     particle_classes: Optional[Dict[str, Any]] = None
+    #: Full (never subsampled) array of the screen at the domain end, and its z [m].
+    M_exit_full: Optional[np.ndarray] = None
+    z_exit_m: Optional[float] = None
 
 
 _RUNTIME_HISTORY_CACHE = Path(
@@ -1402,7 +1411,11 @@ def run_transport_with_progress(
     keep_idx = _select_screen_indices(len(snaps), diagnostics)
     z_snaps_kept = [z_snaps[i] for i in keep_idx] if z_snaps else []
 
-    full_M_snaps = [np.array(snaps[i].get_phase_space(tracking.phase_fmt, "all"), copy=True) for i in keep_idx] if snaps else []
+    full_M_snaps = [np.array(snaps[i].get_phase_space(tracking.screen_phase_fmt, "all"), copy=True) for i in keep_idx] if snaps else []
+    i_exit = next((i for i, z in enumerate(z_snaps or []) if abs(float(z) - float(vol_params_track.z_max_m)) <= 1e-6), None)
+    M_exit_full = None
+    if i_exit is not None and i_exit < len(snaps):
+        M_exit_full = np.array(snaps[i_exit].get_phase_space(tracking.screen_phase_fmt, "all"), copy=True)
 
     if diagnostics.store_screen_phase_space and full_M_snaps:
         M_snaps = [
@@ -1523,6 +1536,8 @@ def run_transport_with_progress(
         screen_summaries=screen_summaries,
         lost_table=lost_table,
         particle_classes=classes,
+        M_exit_full=M_exit_full,
+        z_exit_m=float(z_snaps[i_exit]) if M_exit_full is not None else None,
     )
     return result, {
         "track_elapsed_s": float(track_elapsed_s),

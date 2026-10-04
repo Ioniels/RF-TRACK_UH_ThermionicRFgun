@@ -12,6 +12,7 @@ import numpy as np
 
 from .constants import c, q_e
 from .diagnostics import build_screen_summary_from_phase_space, info_get_first
+from .particle_tags import T_COL, ID_COL, plane_crossing_xy
 
 LOST_COLUMNS = ["x", "px", "y", "py", "z", "pz", "t", "mass", "q", "N", "id"]
 
@@ -25,7 +26,8 @@ OPENPMD_PHASE_FMT = "%X %Px %Y %Py %Z %Pz %m %Q %N %t0 %id"
 #: version so later changes remain readable"). Independent of each other since the two files can
 #: evolve separately (e.g. a new hardcoded_parameters key doesn't touch run_results.json's shape).
 RUN_CONFIG_SCHEMA_VERSION = 1
-RUN_RESULTS_SCHEMA_VERSION = 1
+#: 2: openpmd_exit_beam is the fixed-s exit-plane beam with plane-crossing x, y.
+RUN_RESULTS_SCHEMA_VERSION = 2
 
 
 def atomic_write_json(path: Path, payload: Any, *, indent: int = 2, sort_keys: bool = True) -> Path:
@@ -72,10 +74,11 @@ def to_json_safe(value: Any) -> Any:
 
 
 
-#: Column layout of the extended phase-space format used for screen snapshots throughout this
-#: project (`rf_gun.simulation.EXTENDED_PHASE_FMT`: "%X %Px %Y %Py %Z %Pz %id %t %E %K").
+#: Column layout of screen snapshots (`rf_gun.simulation.SCREEN_PHASE_FMT`:
+#: "%X %Px %Y %Py %Z %Pz %id %t %E %K %x %y"); arrays from older runs stop after K_MeV.
 SCREEN_EXTENDED_COLUMNS = [
     "x_mm", "px_MeV_c", "y_mm", "py_MeV_c", "z_mm", "pz_MeV_c", "id", "t_mm_c", "E_MeV", "K_MeV",
+    "x_cross_mm", "y_cross_mm",
 ]
 
 
@@ -208,14 +211,15 @@ def save_lost_particles_json(output_dir: Path, lost_table: np.ndarray | None) ->
 
 
 def screen_particle_group(M: np.ndarray, weight_C: float, *, species: str = "electron") -> Any:
-    """openPMD-beamphysics ParticleGroup from an RF-Track screen array (x, Px, y, Py, z, Pz[, id, t])."""
+    """ParticleGroup of a screen array as RF-Track reports it: fixed-time back-projected x, y and
+    z relative to the plane (see `plane_crossing_xy`); columns x, Px, y, Py, z, Pz[, id, t]."""
     from pmd_beamphysics import ParticleGroup
 
     M = np.asarray(M, dtype=float)
     n = int(M.shape[0])
-    if M.shape[1] >= 8:
-        pid = M[:, 6].astype(np.int64)
-        t_mm_c = M[:, 7]
+    if M.shape[1] > T_COL:
+        pid = M[:, ID_COL].astype(np.int64)
+        t_mm_c = M[:, T_COL]
     else:
         pid = np.arange(n, dtype=np.int64)
         t_mm_c = np.zeros(n, dtype=float)
@@ -234,35 +238,60 @@ def screen_particle_group(M: np.ndarray, weight_C: float, *, species: str = "ele
     })
 
 
+def ensure_exit_screen(z_screens_m: Sequence[float] | None, z_exit_m: float, *, tol_m: float = 1e-6) -> list[float]:
+    """Screen positions [m] with one at the exit plane z_exit_m, appended if none lies within tol_m."""
+    z = [float(v) for v in (z_screens_m or [])]
+    if not any(abs(v - float(z_exit_m)) <= tol_m for v in z):
+        z.append(float(z_exit_m))
+    return z
+
+
 def save_exit_plane_openpmd(
     output_path: Path,
-    screen_pg: Any,
+    M: np.ndarray,
+    weight_C: float,
     keep: np.ndarray,
     *,
     s_out_m: float,
     selection: str,
+    species: str = "electron",
     extra_attrs: dict[str, Any] | None = None,
 ) -> Path:
     """Write the beam crossing the plane s = s_out_m (fixed-s frame: z = s_out_m, t = arrival time).
 
-    `screen_pg` is the ParticleGroup recorded by the screen at s_out_m; `keep` selects the alive,
-    not-trailing particles, and non-finite or pz <= 0 rows are always dropped.
+    `M` is the full screen array at s_out_m (`SCREEN_PHASE_FMT`, or the legacy layout without
+    %x %y, corrected exactly); `keep` selects the alive, not-trailing particles, and non-finite or
+    pz <= 0 rows are always dropped. `weight_C` is the charge per macroparticle.
     """
     from pmd_beamphysics import ParticleGroup
 
-    d = screen_pg.data
-    keep = np.asarray(keep, dtype=bool) & (d["pz"] > 0.0)
-    keep &= np.all(np.isfinite(np.column_stack([d[k] for k in ("x", "y", "px", "py", "pz", "t")])), axis=1)
+    M = np.asarray(M, dtype=float)
+    if M.ndim != 2 or M.shape[1] <= T_COL:
+        raise ValueError("Exit-plane export needs a screen array with at least x, Px, y, Py, z, Pz, id, t.")
+    x_mm, y_mm, source = plane_crossing_xy(M)
+    keep = np.asarray(keep, dtype=bool) & (M[:, 5] > 0.0)
+    keep &= np.all(np.isfinite(np.column_stack([x_mm, y_mm, M[:, [1, 3, 5, T_COL]]])), axis=1)
     if not np.any(keep):
         raise ValueError(f"No particles cross s = {s_out_m} m with the requested selection.")
-    data = {k: (v[keep] if isinstance(v, np.ndarray) else v) for k, v in d.items()}
-    data["z"] = np.full(int(keep.sum()), float(s_out_m))
-    pg = ParticleGroup(data=data)
+    n = int(keep.sum())
+    pg = ParticleGroup(data={
+        "x": x_mm[keep] * 1e-3,
+        "y": y_mm[keep] * 1e-3,
+        "z": np.full(n, float(s_out_m)),
+        "px": M[keep, 1] * 1e6,
+        "py": M[keep, 3] * 1e6,
+        "pz": M[keep, 5] * 1e6,
+        "t": M[keep, T_COL] * 1e-3 / c,
+        "status": np.ones(n, dtype=int),
+        "weight": np.full(n, float(weight_C), dtype=float),
+        "id": M[keep, ID_COL].astype(np.int64),
+        "species": str(species),
+    })
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     pg.write(str(out_path))
     attrs = {**(extra_attrs or {}), "s_out_m": float(s_out_m), "Q_total_C": float(pg.charge),
-             "selection": str(selection), "frame": "fixed_s"}
+             "selection": str(selection), "frame": "fixed_s", "transverse_source": source}
     import h5py
 
     with h5py.File(str(out_path), "a") as h5:

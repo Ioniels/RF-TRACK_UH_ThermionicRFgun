@@ -29,7 +29,9 @@ from typing import Any, Mapping, Sequence
 from rf_gun.provenance import canonical_json_sha256, sha256_file
 
 
-TRANSPORT_MARKER_SCHEMA_VERSION = 2
+#: 3: Bout_* is the fixed-s exit-plane beam with plane-crossing x, y; 2 is still accepted.
+TRANSPORT_MARKER_SCHEMA_VERSION = 3
+SUPPORTED_TRANSPORT_MARKER_SCHEMA_VERSIONS = (2, 3)
 MACROPULSE_MARKER_SCHEMA_VERSION = 2
 TRANSPORT_MARKER_NAME = ".run_complete"
 MACROPULSE_MARKER_NAME = ".macropulse_complete"
@@ -631,7 +633,7 @@ def _verify_output_manifest(
 
 
 def _verify_requested_transport_outputs(
-    outputs: Mapping[str, Mapping[str, Any]], arguments: Mapping[str, Any]
+    outputs: Mapping[str, Mapping[str, Any]], arguments: Mapping[str, Any], z_max_m: float
 ) -> None:
     bound_paths = {str(record.get("file", "")) for record in outputs.values()}
     if not bool(arguments.get("screens_enabled", True)):
@@ -640,6 +642,15 @@ def _verify_requested_transport_outputs(
         expected_screen_count = len(arguments["screens_z"])
     else:
         expected_screen_count = max(0, int(arguments.get("n_screens", 0)))
+    if bool(arguments.get("save_openpmd_beam")):
+        # the CLI appends a screen at z_max for the exit-plane Bout when none is requested there
+        requested_z = (
+            [float(z) for z in arguments["screens_z"]]
+            if bool(arguments.get("screens_enabled", True)) and arguments.get("screens_z")
+            else ([float(z_max_m)] if expected_screen_count > 0 else [])
+        )
+        if not any(abs(z - float(z_max_m)) <= 1.0e-6 for z in requested_z):
+            expected_screen_count += 1
 
     if bool(arguments.get("save_openpmd_beam")):
         for prefix in ("B0_", "Bout_"):
@@ -864,7 +875,7 @@ def verify_transport_completion(
     run_path = Path(run_dir)
     marker_path = run_path / TRANSPORT_MARKER_NAME
     marker = _read_json_mapping(marker_path, "transport completion marker")
-    if marker.get("schema_version") != TRANSPORT_MARKER_SCHEMA_VERSION:
+    if marker.get("schema_version") not in SUPPORTED_TRANSPORT_MARKER_SCHEMA_VERSIONS:
         raise CompletionVerificationError(
             f"unsupported/legacy transport marker schema {marker.get('schema_version')!r}; "
             f"required {TRANSPORT_MARKER_SCHEMA_VERSION}"
@@ -1045,10 +1056,8 @@ def verify_transport_completion(
         raise CompletionVerificationError(
             f"canonical resolved configuration disagrees with run_config: {difference}"
         )
-    _compare_resolved_to_external_identity(
-        canonical_resolved,
-        _externally_expected_artifact_identity(artifact, expected_arguments),
-    )
+    expected_identity = _externally_expected_artifact_identity(artifact, expected_arguments)
+    _compare_resolved_to_external_identity(canonical_resolved, expected_identity)
     outputs = _verify_output_manifest(run_path, marker)
     canonical_output_names = {
         "run_config": "run_config.json",
@@ -1099,7 +1108,7 @@ def verify_transport_completion(
             raise CompletionVerificationError(
                 "transport event output must bind 'back_bombardment_events.h5'"
             )
-    _verify_requested_transport_outputs(outputs, expected_arguments)
+    _verify_requested_transport_outputs(outputs, expected_arguments, expected_identity["z_max_m"])
     return {
         "status": "exact_match",
         "run_dir": str(run_path),
@@ -1112,7 +1121,7 @@ def verify_transport_completion(
 def _macropulse_source_identity(transport_dir: Path) -> dict[str, Any]:
     marker_path = transport_dir / TRANSPORT_MARKER_NAME
     marker = _read_json_mapping(marker_path, "source transport marker")
-    if marker.get("schema_version") != TRANSPORT_MARKER_SCHEMA_VERSION:
+    if marker.get("schema_version") not in SUPPORTED_TRANSPORT_MARKER_SCHEMA_VERSIONS:
         raise CompletionVerificationError("source transport marker is legacy or unsupported")
     if marker.get("stage") != "transport" or marker.get("status") != "complete":
         raise CompletionVerificationError("source transport is not marked complete")

@@ -39,6 +39,30 @@ ID_COL = 6
 T_COL = 7
 E_COL = 8
 K_COL = 9
+#: Plane-crossing x, y [mm], appended on screens by `SCREEN_PHASE_FMT`.
+X_CROSS_COL = 10
+Y_CROSS_COL = 11
+
+
+def plane_crossing_xy(M: np.ndarray, *, atol_mm: float = 1e-9) -> tuple[np.ndarray, np.ndarray, str]:
+    """Transverse positions [mm] where each particle crosses the screen plane, and their source.
+
+    A screen's %X, %Y are fixed-time back-projections to the arrival time of the reference
+    particle, with %Z relative to the plane, so x = X - (Px/Pz) Z exactly. Lowercase %x, %y
+    columns are used when present and checked against that inverse to `atol_mm`.
+    """
+    M = np.asarray(M, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        x_corr = M[:, 0] - M[:, 1] / M[:, 5] * M[:, 4]
+        y_corr = M[:, 2] - M[:, 3] / M[:, 5] * M[:, 4]
+    if M.shape[1] <= Y_CROSS_COL:
+        return x_corr, y_corr, "corrected_from_uppercase"
+    x, y = M[:, X_CROSS_COL], M[:, Y_CROSS_COL]
+    ok = np.isfinite(x_corr) & np.isfinite(y_corr) & np.isfinite(x) & np.isfinite(y)
+    err = max(np.max(np.abs(x[ok] - x_corr[ok]), initial=0.0), np.max(np.abs(y[ok] - y_corr[ok]), initial=0.0))
+    if err >= atol_mm:
+        raise ValueError(f"Screen %x/%y disagree with X - (Px/Pz) Z by {err:.3e} mm; column layout is not SCREEN_PHASE_FMT.")
+    return x.copy(), y.copy(), "lowercase"
 
 #: Column index of `%id` within RF-Track's own lost-particle table (`LOST_COLUMNS` in
 #: `rf_gun.io`: x, px, y, py, z, pz, t, mass, q, N, id) -- verified empirically against the

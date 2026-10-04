@@ -7,8 +7,10 @@ Every quantity is manual (numpy second-moment), consistent with the rest of the 
 Twiss/emittance pipeline -- see `rf_gun.diagnostics.manual_twiss_and_emittance`'s docstring for
 why RF-Track's native `get_info()` is not used here.
 
-Column layout assumed for `M_snaps`: `rf_gun.simulation.EXTENDED_PHASE_FMT`
-("%X %Px %Y %Py %Z %Pz %id %t %E %K"). The core 6 columns (position/momentum) are required;
+Column layout assumed for `M_snaps`: `rf_gun.simulation.SCREEN_PHASE_FMT`
+("%X %Px %Y %Py %Z %Pz %id %t %E %K %x %y"). Transverse moments use the plane-crossing x, y
+(`plane_crossing_xy`: %x %y, or X - (Px/Pz) Z for arrays without them), not the screen's fixed-time
+back-projected %X %Y. The core 6 columns (position/momentum) are required;
 `%t`/`%E`/`%K` are optional (missing -> NaN for the quantities that need them) so this still works
 against older, un-extended phase-space arrays.
 
@@ -30,7 +32,7 @@ import numpy as np
 
 from .constants import MM_C_TO_NS as _MM_C_TO_NS
 from .diagnostics import manual_twiss_and_emittance, dispersion_from_moments
-from .particle_tags import ParticleTags, surviving_mask, tag_mask, T_COL as _COL_T, E_COL as _COL_E, K_COL as _COL_K
+from .particle_tags import ParticleTags, surviving_mask, tag_mask, plane_crossing_xy, T_COL as _COL_T, E_COL as _COL_E, K_COL as _COL_K
 
 TWISS_KEYS = [
     "alpha_x", "beta_x", "gamma_x", "emitt_x_norm", "emitt_x_geom",
@@ -61,7 +63,10 @@ def compute_beam_properties(
     for z_m, M in zip(z_snaps, M_snaps):
         arr = np.asarray(M, dtype=float)
         mask = surviving_mask(arr, tags) if arr.shape[0] else np.zeros((0,), dtype=bool)
-        rows.append(_row_for_screen(float(z_m), arr[mask], mass_MeV))
+        Mf = arr[mask]
+        if Mf.shape[0]:
+            Mf[:, 0], Mf[:, 2], _ = plane_crossing_xy(Mf)
+        rows.append(_row_for_screen(float(z_m), Mf, mass_MeV))
     return rows
 
 
