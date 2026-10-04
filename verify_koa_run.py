@@ -878,7 +878,7 @@ def verify_transport_completion(
     if marker.get("schema_version") not in SUPPORTED_TRANSPORT_MARKER_SCHEMA_VERSIONS:
         raise CompletionVerificationError(
             f"unsupported/legacy transport marker schema {marker.get('schema_version')!r}; "
-            f"required {TRANSPORT_MARKER_SCHEMA_VERSION}"
+            f"accepted {list(SUPPORTED_TRANSPORT_MARKER_SCHEMA_VERSIONS)}"
         )
     if marker.get("stage") != "transport" or marker.get("status") != "complete":
         raise CompletionVerificationError("transport marker stage/status is not transport/complete")

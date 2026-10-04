@@ -1705,7 +1705,7 @@ def main() -> None:
             _is_backward, _is_lost = rg.tag_mask(M_exit, tags)
             _selection = ("screen at s_out; pz > 0; not backward, unphysical or trailing at Bout "
                           "(acceptance scan); not in the RF-Track lost table")
-            openpmd_h5_path = rg.save_exit_plane_openpmd(
+            openpmd_h5_path, _transverse_source = rg.save_exit_plane_openpmd(
                 screen_hdf5_dir / f"Bout_sout{s_out_mm:.1f}mm_{_run_tag}.h5",
                 M_exit,
                 abs(_meta["Q_emitted_C"]) / max(1, int(m0.shape[0])),
@@ -1716,7 +1716,7 @@ def main() -> None:
             )
             openpmd_exit_beam_summary = {
                 "frame": "fixed_s", "s_out_m": _s_exit_m, "selection": _selection,
-                "transverse_source": "lowercase" if M_exit.shape[1] > 11 else "corrected_from_uppercase",
+                "transverse_source": _transverse_source,
                 **_pmd_summary(openpmd_h5_path),
             }
             print(f"Saved exit-plane beam    : {openpmd_h5_path.relative_to(output_dir)} "

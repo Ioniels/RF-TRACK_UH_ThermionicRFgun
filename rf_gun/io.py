@@ -256,12 +256,13 @@ def save_exit_plane_openpmd(
     selection: str,
     species: str = "electron",
     extra_attrs: dict[str, Any] | None = None,
-) -> Path:
+) -> tuple[Path, str]:
     """Write the beam crossing the plane s = s_out_m (fixed-s frame: z = s_out_m, t = arrival time).
 
     `M` is the full screen array at s_out_m (`SCREEN_PHASE_FMT`, or the legacy layout without
     %x %y, corrected exactly); `keep` selects the alive, not-trailing particles, and non-finite or
     pz <= 0 rows are always dropped. `weight_C` is the charge per macroparticle.
+    Returns (path, transverse_source).
     """
     from pmd_beamphysics import ParticleGroup
 
@@ -300,7 +301,7 @@ def save_exit_plane_openpmd(
                 h5.attrs[str(key)] = value
             except (TypeError, ValueError):
                 h5.attrs[str(key)] = str(value)
-    return out_path
+    return out_path, source
 
 
 def save_beam_openpmd(
