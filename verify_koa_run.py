@@ -633,7 +633,10 @@ def _verify_output_manifest(
 
 
 def _verify_requested_transport_outputs(
-    outputs: Mapping[str, Mapping[str, Any]], arguments: Mapping[str, Any], z_max_m: float
+    outputs: Mapping[str, Mapping[str, Any]],
+    arguments: Mapping[str, Any],
+    z_max_m: float,
+    marker_schema: int = 2,
 ) -> None:
     bound_paths = {str(record.get("file", "")) for record in outputs.values()}
     if not bool(arguments.get("screens_enabled", True)):
@@ -653,7 +656,8 @@ def _verify_requested_transport_outputs(
             expected_screen_count += 1
 
     if bool(arguments.get("save_openpmd_beam")):
-        for prefix in ("B0_", "Bout_"):
+        prefixes = ("B0_", "Bout_") + (("Bsnapshot_t",) if marker_schema >= 3 else ())
+        for prefix in prefixes:
             if not any(
                 Path(path).parent.as_posix() == "screen_distributions_hdf5"
                 and Path(path).name.startswith(prefix)
@@ -1108,7 +1112,9 @@ def verify_transport_completion(
             raise CompletionVerificationError(
                 "transport event output must bind 'back_bombardment_events.h5'"
             )
-    _verify_requested_transport_outputs(outputs, expected_arguments, expected_identity["z_max_m"])
+    _verify_requested_transport_outputs(
+        outputs, expected_arguments, expected_identity["z_max_m"], int(marker["schema_version"])
+    )
     return {
         "status": "exact_match",
         "run_dir": str(run_path),
