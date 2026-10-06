@@ -45,11 +45,9 @@ through the shared `_solve_fv_core`):
     spacing) -- true of every grid `back_bombardment_deposition.build_back_bombardment_heat_source`
     actually builds; a caller supplying a non-uniform/non-square grid gets a clear `ValueError`
     rather than a silently wrong stencil.
-  * Through-depth conductance between neighboring layers uses the standard series-resistance form
-    `G = k_eff/(0.5*dz_ell + 0.5*dz_(ell+1))` with `k_eff` the HARMONIC mean of the two layers'
-    `k(T)` (the standard finite-volume choice for a conductivity at a cell face, since it is exact
-    for a steady 1D two-segment conduction path in series -- an arithmetic mean would not
-    reproduce that exact series-resistance limit).
+  * Through-depth conductance between neighboring layers uses the series-resistance form
+    `G = 1/(0.5*dz_ell/k_ell + 0.5*dz_(ell+1)/k_(ell+1))`, exact for a steady 1D two-segment
+    conduction path between the two cell centres; it reduces to `k_harmonic/dz` for equal depths.
   * The full sparse linear system is assembled over ALL `(x,y,layer)` unknowns jointly (in-plane
     and depth coupling in one solve per Picard iteration) via `scipy.sparse`/`scipy.sparse.linalg.
     spsolve` -- simplicity/correctness over speed, per the task's explicit instruction; no
@@ -589,7 +587,6 @@ def _assemble_and_solve_step(
     """
     n_active, n_layers = T_iter.shape
     n_dof = n_active * n_layers
-    A = grid.dx  # cell area factor for in-plane flux (dx==dy, so face-area/distance ratio is 1)
 
     rho0 = float(thermal.rho_kg_m3(300.0, apply_expansion=False))  # constant regardless of T (see ThermalComponent)
     cp_iter = np.asarray(thermal.cp_J_kg_K(T_iter), dtype=float)  # (n_active, n_layers)
@@ -619,7 +616,7 @@ def _assemble_and_solve_step(
         pair_b = np.array([p[1] for p in grid.neighbor_pairs], dtype=int)
         for ell in range(n_layers):
             k_face = _harmonic_mean(k_iter[pair_a, ell], k_iter[pair_b, ell])
-            g_inplane = k_face * layer_thickness_m[ell] / A  # W/K per face, dx==dy assumed
+            g_inplane = k_face * layer_thickness_m[ell]  # W/K: face area dx*dz over centre distance dx
             dof_a = grid.dof(pair_a, ell)
             dof_b = grid.dof(pair_b, ell)
             # a's equation: -g*(T_b - T_a) moved to LHS as +g*T_a - g*T_b
@@ -631,9 +628,9 @@ def _assemble_and_solve_step(
 
     # Through-depth conductance between adjacent layers of the same active cell.
     for ell in range(n_layers - 1):
-        k_face = _harmonic_mean(k_iter[:, ell], k_iter[:, ell + 1])
-        dz_avg = 0.5 * (layer_thickness_m[ell] + layer_thickness_m[ell + 1])
-        G = np.where(dz_avg > 0.0, k_face / np.where(dz_avg > 0.0, dz_avg, 1.0), 0.0)  # W/m^2/K
+        k_top, k_bot = k_iter[:, ell], k_iter[:, ell + 1]
+        denom = k_top * layer_thickness_m[ell + 1] + k_bot * layer_thickness_m[ell]
+        G = np.where(denom > 0.0, 2.0 * k_top * k_bot / np.where(denom > 0.0, denom, 1.0), 0.0)  # W/m^2/K
         g_depth = G * xy_cell_area_m2  # W/K
         dof_top = grid.dof(np.arange(n_active), ell)
         dof_bot = grid.dof(np.arange(n_active), ell + 1)
