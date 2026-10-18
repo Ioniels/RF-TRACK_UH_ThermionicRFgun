@@ -35,8 +35,9 @@ INCH_MM = 25.4
 
 #: Pipe 1 radius [mm]: cathode-side bore 0.199 +/- 0.001 inch, PF-32-103-68 R1 section B-B.
 R1_MM = 0.5 * 0.199 * INCH_MM
-#: Pipe 2 radius [mm] (= 5.055/2): exit bore 0.199 inch, PF-32-103-45 R0 section A-A.
-R2_MM = 2.5275
+#: Pipe 2 radius [mm]: exit bore modelled as the inscribed circle of the .199 x .350 inch racetrack
+#: slot of drawing PF-32-103-45 R0 (axisymmetric approximation).
+R2_MM = 0.5 * 0.199 * INCH_MM
 #: Main cavity inner radius [mm] (= 68.029/2): 2.6783 +/- 0.0002 inch, PF-32-103-54 R3 section A-A.
 R_CAV_MM = 34.0145
 #: Cathode-cone mouth radius [mm] at the theoretical sharp corner: 0.493 inch, PF-32-103-68 R1
@@ -45,7 +46,10 @@ R_CONE_MOUTH_MM = 0.5 * 0.493 * INCH_MM
 #: Cone angle to the beam axis [deg], PF-32-103-68 R1 section B-B.
 CONE_ANGLE_TO_AXIS_DEG = 60.0
 #: Axial extent of the cone from the bore to the theoretical sharp corner [mm] (2.1557), set by
-#: R1_MM, R_CONE_MOUTH_MM and the 60 deg angle; drawing axial 0.085 +/- 0.001 inch = 2.159 +/- 0.025.
+#: R1_MM, R_CONE_MOUTH_MM and the 60 deg angle. The .085 inch is dimensioned .085 +/- .001 in section
+#: B-B of PF-32-103-68 R1 and as (.085) reference to the theoretical sharp corner in the enlarged
+#: view; the cone is constructed from the 0.199 bore, the 0.493 mouth and 60 deg, giving 0.08487 inch,
+#: inside the tolerance band.
 A_CHI_MM = float((R_CONE_MOUTH_MM - R1_MM) / np.tan(np.deg2rad(CONE_ANGLE_TO_AXIS_DEG)))
 #: Cone angle from the radial plane [deg] and slant length bore to theoretical corner [mm].
 CHAMFER_ANGLE_DEG = 90.0 - CONE_ANGLE_TO_AXIS_DEG
