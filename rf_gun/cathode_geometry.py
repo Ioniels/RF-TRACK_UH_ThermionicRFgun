@@ -152,7 +152,7 @@ class CathodeGeometry:
 
     `insertion_offset_mm`: maps to the existing `delta_cathode_chamfer_mm` concept in
     `rf_gun.aperture`/`run_thermionic_tm010.py` (cathode insertion depth relative to the vacuum
-    chamber's own dynamic-aperture chamfer -- a *different* 30deg/3.734mm chamfer, not this
+    chamber's own dynamic-aperture chamfer -- a *different* 60deg-to-axis cone, not this
     module's 45deg/0.2mm cathode-disk bevel; see this module's and `rf_gun.aperture`'s module
     docstrings for the distinction). Purely a bookkeeping/metadata field here: this module's own
     geometry is always expressed in the cathode's own z=0-at-the-emission-surface frame, so

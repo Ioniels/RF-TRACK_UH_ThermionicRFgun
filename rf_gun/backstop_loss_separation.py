@@ -38,7 +38,7 @@ Despite that, separation is still exact in every configuration tested here, beca
      classified every row in every test run here, with the slack sized comfortably above the
      largest observed residual (see `DEFAULT_Z_SLACK_M`) yet comfortably below the smallest z at
      which a *real* near-cathode dynamic-aperture violation is geometrically possible (the dynamic
-     aperture's own radius profile is R1_MM=2.5275 mm at s<=0 and only grows moving into z>0 via the
+     aperture's own radius profile is R1_MM=2.5273 mm at s<=0 and only grows moving into z>0 via the
      chamfer, so a genuine transverse violation within a fraction of a mm of z=0 would require a
      transverse excursion much larger than this project's ~1.4-1.6 mm cathode radius -- plausible
      only for the already-separately-flagged pathological/numerical-blowup rows described in

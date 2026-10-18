@@ -1,13 +1,16 @@
 """Dynamic radial aperture R(z): the cavity's real transverse channel, enforced by RF-Track
 itself during tracking via `RF_Track.Aperture_1d`.
 
-The channel is not a single cylinder: narrow near the cathode (a short conical chamfer feeding
-into pipe 1), wide through the main cavity body, narrow again near the exit (a rounded transition
+The channel is not a single cylinder: narrow near the cathode (a 60 deg cone, to the axis, opening
+from the cathode bore to a rounded R.030 inch lip on the nose face), wide through the main cavity body, narrow again near the exit (a rounded transition
 into pipe 2). A single scalar aperture cannot represent this shape, so this module builds a
 tabulated R(z) profile (`aperture_radius_profile_mm`) sampled on the same z-grid as the RF field
 map, and wraps it into an `Aperture_1d` element added to the same `Volume` as the field map
 (`build_dynamic_aperture`), so a particle is removed the instant it crosses the real transverse
 channel during tracking.
+
+Dimensions follow the Duke FEL Laboratory cavity drawings: PF-32-103-68 R1 (cathode end plate),
+PF-32-103-54 R3 (centre section) and PF-32-103-45 R0 (anode end plate).
 
 `Aperture_1d` gotchas (manual Sec. 5.3.1: `Aperture_1d(Ra, hz, length=-1)` -- third arg is
 *length*, not z0):
@@ -28,17 +31,35 @@ from __future__ import annotations
 
 import numpy as np
 
-#: Pipe 1 / pipe 2 radius [mm] (= 5.0546/2 -- the exit iris diameter measured for this cavity).
-R1_MM = 2.5275
+INCH_MM = 25.4
+
+#: Pipe 1 radius [mm]: cathode-side bore 0.199 +/- 0.001 inch, PF-32-103-68 R1 section B-B.
+R1_MM = 0.5 * 0.199 * INCH_MM
+#: Pipe 2 radius [mm] (= 5.055/2): exit bore 0.199 inch, PF-32-103-45 R0 section A-A.
 R2_MM = 2.5275
-#: Main cavity inner radius [mm] (= 68.029/2).
+#: Main cavity inner radius [mm] (= 68.029/2): 2.6783 +/- 0.0002 inch, PF-32-103-54 R3 section A-A.
 R_CAV_MM = 34.0145
-#: Chamfer slanted length [mm] and angle from the y-axis [deg].
-CHAMFER_LEN_MM = 3.734
-CHAMFER_ANGLE_DEG = 30.0
-#: Axial extent of the chamfer [mm]: CHAMFER_LEN_MM * sin(CHAMFER_ANGLE_DEG).
-A_CHI_MM = CHAMFER_LEN_MM * np.sin(np.deg2rad(CHAMFER_ANGLE_DEG))
-#: Exit rounding radius [mm].
+#: Cathode-cone mouth radius [mm] at the theoretical sharp corner: 0.493 inch, PF-32-103-68 R1
+#: enlarged view of section B-B.
+R_CONE_MOUTH_MM = 0.5 * 0.493 * INCH_MM
+#: Cone angle to the beam axis [deg], PF-32-103-68 R1 section B-B.
+CONE_ANGLE_TO_AXIS_DEG = 60.0
+#: Axial extent of the cone from the bore to the theoretical sharp corner [mm] (2.1557), set by
+#: R1_MM, R_CONE_MOUTH_MM and the 60 deg angle; drawing axial 0.085 +/- 0.001 inch = 2.159 +/- 0.025.
+A_CHI_MM = float((R_CONE_MOUTH_MM - R1_MM) / np.tan(np.deg2rad(CONE_ANGLE_TO_AXIS_DEG)))
+#: Cone angle from the radial plane [deg] and slant length bore to theoretical corner [mm].
+CHAMFER_ANGLE_DEG = 90.0 - CONE_ANGLE_TO_AXIS_DEG
+CHAMFER_LEN_MM = float(A_CHI_MM / np.sin(np.deg2rad(CHAMFER_ANGLE_DEG)))
+#: Cathode-lip blend radius [mm]: R.030 inch, PF-32-103-68 R1 section B-B, tangent to the cone and
+#: to the flat nose face (plane s = A_CHI_MM, perpendicular to the axis).
+LIP_RADIUS_MM = 0.030 * INCH_MM
+#: Lip tangent length from the theoretical corner [mm]: R tan(half the 30 deg turn).
+_LIP_TANGENT_MM = float(LIP_RADIUS_MM * np.tan(0.5 * np.deg2rad(CHAMFER_ANGLE_DEG)))
+#: Lip tangency on the cone (s [mm], R [mm]) and radius of the tangency on the nose face [mm].
+S_LIP_CONE_MM = float(A_CHI_MM - _LIP_TANGENT_MM * np.cos(np.deg2rad(CONE_ANGLE_TO_AXIS_DEG)))
+R_LIP_CONE_MM = float(R_CONE_MOUTH_MM - _LIP_TANGENT_MM * np.sin(np.deg2rad(CONE_ANGLE_TO_AXIS_DEG)))
+R_LIP_FACE_MM = float(R_CONE_MOUTH_MM + _LIP_TANGENT_MM)
+#: Exit rounding radius [mm]: R.122 inch = 3.0988, PF-32-103-45 R0 section A-A.
 RHO_MM = 3.099
 #: Start of pipe 2, measured from the start of the chamfer [mm].
 L_MM = 28.854
@@ -55,20 +76,26 @@ def aperture_radius_profile_mm(z_mm: np.ndarray, delta_mm: float) -> np.ndarray:
     """Piecewise-analytic R(z) [mm] of the cavity's real transverse channel.
 
     `s = z_mm + delta_mm`:
-      s <= 0                  -> R1_MM (still inside pipe 1)
-      0 < s < A_CHI_MM        -> R1_MM + s*cot(30deg)   (chamfer)
-      A_CHI_MM <= s < L-RHO   -> R_CAV_MM               (main cavity body)
-      L-RHO <= s < L          -> R2_MM + RHO - sqrt(RHO^2 - (L-s)^2)   (rounded exit transition)
-      s >= L                  -> R2_MM                  (pipe 2)
+      s <= 0                     -> R1_MM (still inside pipe 1)
+      0 < s < S_LIP_CONE_MM      -> R1_MM + s*tan(60deg)   (cathode cone)
+      S_LIP_CONE_MM <= s < A     -> R_c - sqrt(LIP_RADIUS^2 - (s - s_c)^2)   (R.030 lip,
+                                    centre s_c = A - LIP_RADIUS, R_c = R_LIP_FACE_MM)
+      A <= s < L-RHO             -> R_CAV_MM               (nose face, main cavity body)
+      L-RHO <= s < L             -> R2_MM + RHO - sqrt(RHO^2 - (L-s)^2)   (rounded exit transition)
+      s >= L                     -> R2_MM                  (pipe 2)
+    with A = A_CHI_MM, the theoretical sharp corner of the cone mouth.
     """
     z_mm = np.asarray(z_mm, dtype=float)
     s = z_mm + float(delta_mm)
-    cot30 = 1.0 / np.tan(np.deg2rad(CHAMFER_ANGLE_DEG))
+    slope = np.tan(np.deg2rad(CONE_ANGLE_TO_AXIS_DEG))
 
     R = np.full_like(s, R_CAV_MM, dtype=float)
     R = np.where(s <= 0.0, R1_MM, R)
-    chamfer = (s > 0.0) & (s < A_CHI_MM)
-    R = np.where(chamfer, R1_MM + s * cot30, R)
+    cone = (s > 0.0) & (s < S_LIP_CONE_MM)
+    R = np.where(cone, R1_MM + s * slope, R)
+    lip = (s >= S_LIP_CONE_MM) & (s < A_CHI_MM)
+    ds_lip = s - (A_CHI_MM - LIP_RADIUS_MM)
+    R = np.where(lip, R_LIP_FACE_MM - np.sqrt(np.maximum(LIP_RADIUS_MM**2 - ds_lip**2, 0.0)), R)
     round_zone = (s >= (L_MM - RHO_MM)) & (s < L_MM)
     dz = np.clip(L_MM - s, -RHO_MM, RHO_MM)
     R = np.where(round_zone, R2_MM + RHO_MM - np.sqrt(np.maximum(RHO_MM**2 - dz**2, 0.0)), R)
